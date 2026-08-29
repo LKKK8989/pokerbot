@@ -1421,6 +1421,8 @@ class HorseRace:
         wallet = game_chips
         if not 0 <= horse < HORSE_COUNT or amount <= 0: return False, "马号或金额无效"
         async with wallet_locks[uid]:
+            # 锁内重校阶段：等锁期间比赛可能已开跑，避免按旧赔率接受下注
+            if self.phase != "betting" or self.cancelled: return False, "当前不是下注阶段"
             if amount > wallet[self.chat_id][uid]: return False, "积分不足"
             # 先按「下注前」赔率锁定（即玩家在界面上看到的赔率），确保看到=拿到
             o = self.odds()[horse]
@@ -2313,22 +2315,25 @@ async def settle_sicbo(game, app):
             elif bet_type.startswith("sum_"):
                 nums = [int(x) for x in bet_type.split("_")[1:]]
                 label = "/".join(str(x) for x in nums) if len(nums) <= 2 else f"{nums[0]}-{nums[-1]}"
-                if total in nums:
+                # 豹子通杀总点数（与「大/小」「单/双」一致）：开出豹子时总点数注全输
+                if not is_triple and total in nums:
                     pay = bet_amt * (1 + SICBO_SUM_PAYOUT.get(total, 6))
                     win_amount += pay
                     detail.append(f"总点{label} {bet_amt} → ✅ 1:{SICBO_SUM_PAYOUT.get(total, 6)} = +{pay}")
                 else:
-                    detail.append(f"总点{label} {bet_amt} → ❌")
+                    detail.append(f"总点{label} {bet_amt} → ❌{'（豹子通杀）' if is_triple and total in nums else ''}")
         net = win_amount - total_bet
         payout_list.append((uid, win_amount, net, total_bet, detail))
     # 阶段二：应用派彩（先算后付，阶段一异常则钱包未动可安全全额退款）
     wallet = game_chips
     lines = []
     payouts_applied = False
+    paid_uids = set()   # 已实际派彩的玩家；异常退款时必须跳过，否则本金被重复退
     try:
         async with user_wallet_locks([uid for uid, *_ in payout_list]):
             for uid, win_amount, net, total_bet, detail in payout_list:
                 wallet[game.chat_id][uid] += win_amount
+                paid_uids.add(uid)
                 if game.mode == "official": sicbo_profit_by_date[date][game.chat_id][uid] += net
                 lines.append(f"👤 {name_map[uid]}\n  " + "\n  ".join(detail) + f"\n  本金 {total_bet}｜派彩 {win_amount}｜盈亏 {net:+d}")
                 pending_game_bets[game.chat_id].get(uid, {}).pop("sicbo", None)
@@ -2353,7 +2358,10 @@ async def settle_sicbo(game, app):
             await safe_send(app.bot, game.chat_id, "⚠️ 骰子派彩已完成，但结算展示异常，积分不受影响。")
         else:
             await safe_send(app.bot, game.chat_id, "⚠️ 骰子结算异常，本局将退款以保护玩家积分。")
-            for uid, bets in game.bets.items(): wallet[game.chat_id][uid] += sum(bets.values())
+            # 只退尚未派彩的玩家：已派彩者的本金已含在 win_amount 内，重复退会白拿一份本金
+            for uid, bets in game.bets.items():
+                if uid not in paid_uids:
+                    wallet[game.chat_id][uid] += sum(bets.values())
     finally:
         active_sicbo_games.pop(game.chat_id, None)
         save_data()

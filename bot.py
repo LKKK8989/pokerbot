@@ -6221,7 +6221,7 @@ async def auto_backup(context):
                 chat_id=ADMIN_USER_ID,
                 document=f,
                 filename=f"auto_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                caption="🤖 自动备份（每30分钟，需要恢复时：回复此文件发 /restore）",
+                caption="🤖 每日自动备份（需要恢复时：回复此文件发 /restore）",
             )
         logger.info("自动备份完成")
     except Exception:
@@ -6244,10 +6244,10 @@ def main():
     # 云平台保活：健康检查服务，供 UptimeRobot 定时 ping 防止休眠
     start_health_server()
 
-    # 云端持久化：每 30 分钟自动把数据备份发给管理员，容器重启可用 /restore 恢复
+    # 云端持久化：每 24 小时自动把数据备份发给管理员，容器重启可用 /restore 恢复
     if getattr(app, "job_queue", None) is not None:
-        app.job_queue.run_repeating(auto_backup, interval=1800, first=60)
-        logger.info("自动备份任务已注册：每 1800 秒（30 分钟）执行一次")
+        app.job_queue.run_repeating(auto_backup, interval=86400, first=60)
+        logger.info("自动备份任务已注册：每 86400 秒（24 小时）执行一次")
     else:
         logger.warning("JobQueue 不可用，自动备份未启用（需安装 python-telegram-bot[job-queue]）")
 

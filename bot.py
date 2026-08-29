@@ -1185,6 +1185,12 @@ def poker_buttons(game, uid):
     rows.append([InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold"), InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}", callback_data="texas_check" if not to_call else "texas_call")])
     if uid not in game.raise_locked and game.chips[uid] >= to_call + FIXED_MIN_RAISE:
         rows.append([InlineKeyboardButton(f"🔼 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}")])
+    # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；仅在池子大于最小加注且积分够时显示，避免与最小加注按钮重复
+    if uid not in game.raise_locked:
+        if game.pot // 2 > FIXED_MIN_RAISE and game.chips[uid] >= to_call + game.pot // 2:
+            rows.append([InlineKeyboardButton(f"💰 半池 +{game.pot // 2}", callback_data="texas_raise_half")])
+        if game.pot > FIXED_MIN_RAISE and game.chips[uid] >= to_call + game.pot:
+            rows.append([InlineKeyboardButton(f"💰 全池 +{game.pot}", callback_data="texas_raise_pot")])
     if game.chips[uid] > 0: rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
 
@@ -5430,7 +5436,9 @@ async def on_button(update, context):
                 return
             if uid != game.current(): await q.answer("还没轮到你", show_alert=True); return
             action = {"texas_fold":"fold", "texas_check":"check", "texas_call":"call", "texas_allin":"allin"}.get(data); extra = 0
-            if data.startswith("texas_raise_"):
+            if data == "texas_raise_half": action, extra = "raise", max(FIXED_MIN_RAISE, game.pot // 2)
+            elif data == "texas_raise_pot": action, extra = "raise", max(FIXED_MIN_RAISE, game.pot)
+            elif data.startswith("texas_raise_"):
                 try: action, extra = "raise", int(data.rsplit("_", 1)[1])
                 except ValueError: await q.answer("无效加注额", show_alert=True); return
             if not action: await q.answer("未知操作", show_alert=True); return

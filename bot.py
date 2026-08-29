@@ -11,6 +11,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.error import BadRequest, RetryAfter, TelegramError
@@ -6174,6 +6175,59 @@ async def route_command(update, context):
     await _dispatch_alias(cmd, parts[1:], update, context)
 
 
+# ---------- 云平台保活 + 云端持久化（Render / Zeabur 等无持久磁盘的平台用）----------
+def start_health_server():
+    """启动极简健康检查服务，供 UptimeRobot 定时 ping，防止平台认为空闲而休眠。
+
+    端口从环境变量 PORT 读取（Render 自动注入），本地没有时默认 8080。
+    只回 200 ok，不干扰 bot 主逻辑；失败也不影响 bot 运行。
+    """
+    try:
+        port = int(os.environ.get("PORT", 8080))
+
+        class _HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass  # 抑制访问日志，避免刷屏
+
+        server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        logger.info("健康检查服务已启动，监听端口 %s", port)
+    except Exception:
+        logger.exception("健康检查服务启动失败（不影响 bot 运行）")
+
+
+async def auto_backup(context):
+    """定时把数据文件发给管理员私聊，当作云端持久化备份。
+
+    无持久磁盘的平台容器重启会清空磁盘，有这份备份就能用 /restore 恢复，
+    最坏只丢一个备份周期（30 分钟）的积分变动。
+    """
+    try:
+        ok = await asyncio.to_thread(force_save_now)
+        if not ok:
+            logger.warning("自动备份：写盘失败，跳过本次")
+            return
+        if not os.path.exists(DATA_FILE):
+            logger.warning("自动备份：数据文件不存在，跳过本次")
+            return
+        with open(DATA_FILE, "rb") as f:
+            await context.bot.send_document(
+                chat_id=ADMIN_USER_ID,
+                document=f,
+                filename=f"auto_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                caption="🤖 自动备份（云端持久化；重启后回复此文件发 /restore 即可恢复）",
+            )
+        logger.info("自动备份完成")
+    except Exception:
+        logger.exception("自动备份失败")
+
+
 def main():
     global save_event
     token = os.environ.get("BOT_TOKEN")
@@ -6186,6 +6240,16 @@ def main():
     # （后台任务如赛车动画、定时调度仍为并发；仅 handler 之间不再交错，杜绝并发负分）。
     builder = Application.builder().token(token).concurrent_updates(False).post_init(post_init).post_shutdown(post_shutdown)
     app = builder.build()
+
+    # 云平台保活：健康检查服务，供 UptimeRobot 定时 ping 防止休眠
+    start_health_server()
+
+    # 云端持久化：每 30 分钟自动把数据备份发给管理员，容器重启可用 /restore 恢复
+    if getattr(app, "job_queue", None) is not None:
+        app.job_queue.run_repeating(auto_backup, interval=1800, first=60)
+        logger.info("自动备份任务已注册：每 1800 秒执行一次")
+    else:
+        logger.warning("JobQueue 不可用，自动备份未启用（需安装 python-telegram-bot[job-queue]）")
 
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^/'), route_command))
     app.add_handler(CallbackQueryHandler(on_button)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))

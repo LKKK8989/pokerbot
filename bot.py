@@ -1183,14 +1183,16 @@ def poker_buttons(game, uid):
     if uid != game.current() or uid in game.folded or uid in game.all_in: return InlineKeyboardMarkup(rows)
     to_call = max(0, game.current_bet - game.round_bets[uid])
     rows.append([InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold"), InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}", callback_data="texas_check" if not to_call else "texas_call")])
-    if uid not in game.raise_locked and game.chips[uid] >= to_call + FIXED_MIN_RAISE:
-        rows.append([InlineKeyboardButton(f"🔼 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}")])
-    # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；仅在池子大于最小加注且积分够时显示，避免与最小加注按钮重复
+    # 半池/全池快捷加注（同栏）：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底，保证池子小时也有加注入口
     if uid not in game.raise_locked:
-        if game.pot // 2 > FIXED_MIN_RAISE and game.chips[uid] >= to_call + game.pot // 2:
-            rows.append([InlineKeyboardButton(f"💰 半池 +{game.pot // 2}", callback_data="texas_raise_half")])
-        if game.pot > FIXED_MIN_RAISE and game.chips[uid] >= to_call + game.pot:
-            rows.append([InlineKeyboardButton(f"💰 全池 +{game.pot}", callback_data="texas_raise_pot")])
+        half_amt = max(FIXED_MIN_RAISE, game.pot // 2)
+        pot_amt = max(FIXED_MIN_RAISE, game.pot)
+        pot_row = []
+        if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
+            pot_row.append(InlineKeyboardButton(f"💰 半池 +{half_amt}", callback_data="texas_raise_half"))
+        if game.chips[uid] >= to_call + pot_amt:
+            pot_row.append(InlineKeyboardButton(f"💰 全池 +{pot_amt}", callback_data="texas_raise_pot"))
+        if pot_row: rows.append(pot_row)
     if game.chips[uid] > 0: rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
 

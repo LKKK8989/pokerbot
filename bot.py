@@ -5985,7 +5985,7 @@ async def cmd_backup(update, context):
 
 
 async def cmd_restore(update, context):
-    """管理员恢复：回复一个 JSON 备份文件来恢复数据，恢复后自动重启。"""
+    """管理员恢复：回复一个 JSON 备份文件来恢复数据，直接载入内存立即生效（不依赖平台重启）。"""
     global data_dirty
     uid = update.effective_user.id
     if not is_bot_admin(uid):
@@ -6012,10 +6012,30 @@ async def cmd_restore(update, context):
         if os.path.exists(DATA_FILE):
             shutil.copy2(DATA_FILE, f"{DATA_FILE}.restore_bak")
         os.replace(tmp_path, DATA_FILE)
-        await update.message.reply_text("✅ 数据恢复成功，正在重启加载新数据…")
-        logger.warning("管理员 %s 执行了数据恢复，进程即将退出重启", uid)
-        # 强制退出（不走 post_shutdown，避免内存旧数据覆盖）；Railway 会自动重启容器
-        os._exit(1)
+        # 关键修复：直接把新文件读进内存 + 落盘，不依赖平台重启。
+        # 原实现 os._exit(1) 等平台重启后重新加载，但重启若重建容器，刚写入的文件会被清空 → 恢复失效。
+        load_data()
+        data_dirty = False
+        # 恢复摘要：一眼确认恢复成没成功，不用再翻 /列表
+        try:
+            all_players = {u for users in list(game_chips.values()) for u in users} | {u for users in list(texas_chips.values()) for u in users}
+            game_total = sum(sum(users.values()) for users in list(game_chips.values()))
+            texas_total = sum(sum(users.values()) for users in list(texas_chips.values()))
+            await update.message.reply_text("\n".join([
+                "✅ 数据恢复成功，已立即生效（无需重启）",
+                "━━━━━━━━━━━━━━━",
+                f"👥 玩家总数：{len(all_players)}",
+                f"💰 通用积分总量：{game_total}",
+                f"🃏 德州积分总量：{texas_total}",
+                f"📋 授权群：{len(AUTHORIZED_GROUPS)}",
+                f"🏆 赛季：{'进行中 · ' + (season_name or '未命名') if season_active else '未开启'}",
+                "",
+                "⚠️ 如有正在进行的牌局，请重新开局。",
+            ]))
+        except Exception:
+            logger.exception("生成恢复摘要失败")
+            await update.message.reply_text("✅ 数据恢复成功，已立即生效（无需重启）")
+        logger.warning("管理员 %s 执行了数据恢复，已直接载入内存", uid)
     except json.JSONDecodeError:
         await update.message.reply_text("⚠️ 文件不是有效的 JSON 格式，恢复已取消")
         if os.path.exists(tmp_path):

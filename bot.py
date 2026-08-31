@@ -36,7 +36,6 @@ TURN_TIMEOUT = 60          # 德州/21点单回合思考时间
 ROOM_WAIT_TIMEOUT = 60     # 各游戏等待房统一倒计时（60秒）
 RACE_AUTO_START = 120      # 赛车自动开赛时间
 RACE_ANIMATION_INTERVAL = 5.0   # 每帧画面停留秒数（间隔越大帧数越少，需与赛程总时长一起权衡）
-RACE_STEP_CAP = 2         # 赛车动画：单帧画面最多前进的格数（单调只向前，不倒退、不跳格；乱斗感来自 surget/st 图）
 SLOT_COOLDOWN = 5          # 老虎机冷却
 SLOT_SPIN_SEM = asyncio.Semaphore(2)  # 老虎机全局并发上限（防限流雪崩）
 lhj_cmd_spam = defaultdict(float)  # 老虎机命令防刷：与抽奖冷却同步（统一 5 秒窗口）
@@ -81,16 +80,6 @@ HORSE_NAMES = ["轿车", "出租", "越野", "皮卡"]
 HORSE_EMOJI = ["🚗", "🚕", "🚙", "🛻"]
 FIXED_BET_AMOUNTS = [100, 200, 500, 1000]
 RACE_TRACK_LENGTH = 14
-# 赛车跑法曲线：前期型(开局猛冲后劲不足) / 匀速型 / 后期型(前期落后、终点前反超)
-# 三条曲线均满足 f(0)=0、f(1)=1 —— 只改变画面观感，完赛时间与名次完全不变（赔率公平性不受影响）
-# 每辆车再叠加一条"衰减抖动"：amp * sin(2π*freq*p + phase) * (1-p)
-#   乘 (1-p) 让抖动在终点精确收敛为 0，因此完赛时刻与名次依旧分毫不差；
-#   各车振幅/频率/相位随机错开 → 全程反复易主、你追我赶
-RACE_STYLE_CURVES = {
-    "early":  lambda p: 1 - (1 - p) ** 2,   # 前期型：开局领先，后段乏力被追上
-    "steady": lambda p: p,                   # 匀速型
-    "late":   lambda p: p ** 2,              # 后期型：前期吊车尾，终点前绝杀反超
-}
 DATA_BACKUP_FILE, DATA_TEMP_FILE = f"{DATA_FILE}.bak", f"{DATA_FILE}.tmp"
 BEIJING_TZ = timezone(timedelta(hours=8))
 HAND_NAME_CN = {"High Card":"高牌", "Pair":"一对", "One Pair":"一对", "Two Pair":"两对", "Three of a Kind":"三条", "Straight":"顺子", "Flush":"同花", "Full House":"葫芦", "Four of a Kind":"四条", "Straight Flush":"同花顺", "Royal Flush":"皇家同花顺"}
@@ -1380,10 +1369,8 @@ class HorseRace:
         self.mode = mode or current_game_mode()
         self.bets, self.total_bets, self.pool = defaultdict(dict), [0] * HORSE_COUNT, 0
         self.phase, self.create_time, self.positions, self.arrivals = "betting", time.time(), [0.0] * HORSE_COUNT, []
-        self.display_positions = [0] * HORSE_COUNT  # 量化后的整数显示格（单调、单帧最多+2，画面干净不跳）
+        self.display_positions = [0] * HORSE_COUNT  # 显示格（=真实进度的整数部分，线性跟随时间）
         self.arrival_times, self.race_start_time = {}, None
-        self.race_styles = {}  # 每辆车的跑法（early/steady/late），开跑瞬间分配
-        self.race_wobble = {}  # 每辆车的抖动参数（振幅, 频率, 相位），开跑瞬间分配
         self.notified, self.name_cache = set(), {}
         self.game_msg_id = self.animation_msg_id = None
         self.task, self.settled, self.cancelled, self.lock = None, False, False, asyncio.Lock()
@@ -1498,10 +1485,22 @@ class HorseRace:
         return "\n".join(lines)
 
     async def _push_animation_frame(self, app):
-        """先发新帧、成功后再删旧帧：即使被 Telegram 限流，旧画面也保留，绝不出现画面冻结/消失。"""
+        """先删旧帧、再发新帧（每帧以新消息出现在群底部，无双画面堆叠）。
+        发送/删除都完整尊重 429 的 retry_after 重试——之前画面冻结的根因是
+        safe_send/safe_delete 吞掉限流错误，而不是删发顺序本身。"""
         text = self.animation()
+        old_id, self.animation_msg_id = self.animation_msg_id, None
+        if old_id:
+            for _ in range(3):
+                try:
+                    await app.bot.delete_message(chat_id=self.chat_id, message_id=old_id)
+                    break
+                except RetryAfter as exc:
+                    await asyncio.sleep(min(exc.retry_after + 0.5, 25))
+                except TelegramError:
+                    break
         msg = None
-        for _ in range(4):  # 尊重 429 的 retry_after 完整等待，最多重试 4 次，保证帧必达
+        for _ in range(4):  # 发送最多重试 4 次并按 Telegram 要求等待，保证帧必达、不冻结
             try:
                 msg = await app.bot.send_message(chat_id=self.chat_id, text=text)
                 break
@@ -1510,18 +1509,7 @@ class HorseRace:
             except TelegramError:
                 logger.exception("赛车动画帧发送失败: %s", self.chat_id)
                 break
-        if msg is None:
-            return  # 本帧放弃：旧帧仍在群里，下个周期重试，画面最多慢一拍而不会冻结假死
-        old_id, self.animation_msg_id = self.animation_msg_id, msg.message_id
-        if old_id:
-            for _ in range(3):  # 删除也尊重限流，避免旧帧滞留成孤儿消息
-                try:
-                    await app.bot.delete_message(chat_id=self.chat_id, message_id=old_id)
-                    break
-                except RetryAfter as exc:
-                    await asyncio.sleep(min(exc.retry_after + 0.5, 25))
-                except TelegramError:
-                    break
+        self.animation_msg_id = msg.message_id if msg else None
 
     async def run(self, app):
         try:
@@ -1573,20 +1561,10 @@ class HorseRace:
                 horse: minimum_duration + rank * finish_gap + random.uniform(-0.20, 0.20)
                 for rank, horse in enumerate(finish_order)
             }
-            # 分配跑法：冠军三种跑法都可能出现（仅轻微偏向后期型），保证每场观感不重样
-            self.race_styles, self.race_wobble = {}, {}
-            for rank, horse in enumerate(finish_order):
-                weights = [40, 32, 28] if rank == 0 else [38, 30, 32]
-                self.race_styles[horse] = random.choices(["late", "steady", "early"], weights=weights)[0]
-                self.race_wobble[horse] = (
-                    random.uniform(0.35, 0.45),        # 起伏振幅：赛道长度的 35%~45%（够造 surget/st 图，但单帧被 RACE_STEP_CAP 钳住，不会抽搐）
-                    random.uniform(3.5, 5.5),          # 频率：整场比赛来回 3.5~5.5 次（高频错相 → 名次反复洗牌）
-                    random.uniform(0, 2 * math.pi),    # 相位：错开各车节奏，制造反复反超
-                )
-            # 让最终冠、亚军反相抖动：两辆车一冲一歇，反复交叉，制造「反超来反超去」的贴身肉搏
-            if HORSE_COUNT >= 2:
-                w_amp, w_freq, w_phase = self.race_wobble[finish_order[0]]
-                self.race_wobble[finish_order[1]] = (w_amp, w_freq, w_phase + math.pi)
+            # 画面显示 = 纯线性时间映射（v2.7）：
+            # 5 秒一帧的采样下，任何"戏剧化"映射（跑法曲线/抖动/强制步长）都会产生失真——
+            # 钉死起点、冲刺终点、集体压线等都是它们的产物。线性映射保证：
+            # 首帧全员在起点、每帧恰好 +1~2 格（14格/70s → 每帧 1.0~1.27 格）、到线帧与到达名单完全同步
             while not self.cancelled and len(self.arrivals) < HORSE_COUNT:
                 now = time.time()
                 for i in range(HORSE_COUNT):
@@ -1594,21 +1572,15 @@ class HorseRace:
                         continue
                     duration = self.finish_durations[i]
                     progress = min(1.0, max(0.0, (now - self.race_start_time) / duration))
-                    # 进度(时间)决定完赛时刻，跑法曲线+抖动只决定画面位置 → 名次与派彩完全不受影响
-                    curve = RACE_STYLE_CURVES[self.race_styles.get(i, "steady")]
-                    amp, freq, phase = self.race_wobble.get(i, (0.0, 1.0, 0.0))
-                    wobble = amp * math.sin(2 * math.pi * freq * progress + phase) * ((1 - progress) ** 1.6)  # 晚收敛：前 90% 全幅混战，最后才收尾定胜负
                     self.positions[i] = max(0.0, min(float(RACE_TRACK_LENGTH),
-                                                     RACE_TRACK_LENGTH * (curve(progress) + wobble)))
+                                                     RACE_TRACK_LENGTH * progress))
                     if progress >= 1.0:
                         self.arrival_times[i] = self.race_start_time + duration
                         self.positions[i] = float(RACE_TRACK_LENGTH)
                         self.display_positions[i] = RACE_TRACK_LENGTH
                     else:
-                        # 自然量化：单调只向前、单帧至少 +1、至多 +RACE_STEP_CAP 格 —— 车永远在爬，永不倒退/永不钉死/永不跳格
-                        target = int(round(self.positions[i]))
-                        step = max(1, min(RACE_STEP_CAP, target - self.display_positions[i]))
-                        self.display_positions[i] = max(0, min(RACE_TRACK_LENGTH, self.display_positions[i] + step))
+                        # 画面格子严格跟随时间进度：既不超前（不会提前压线）也不滞后（不会钉死）
+                        self.display_positions[i] = max(0, min(RACE_TRACK_LENGTH, int(self.positions[i])))
                 self.arrivals = sorted(self.arrival_times, key=self.arrival_times.get)
                 await self._push_animation_frame(app)
                 if len(self.arrivals) < HORSE_COUNT: await asyncio.sleep(RACE_ANIMATION_INTERVAL)

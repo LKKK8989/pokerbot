@@ -1498,12 +1498,30 @@ class HorseRace:
         return "\n".join(lines)
 
     async def _push_animation_frame(self, app):
-        """删掉上一帧再发新帧：每帧都以新消息形式出现在群底部，让群友有时间看清赛道变化。"""
+        """先发新帧、成功后再删旧帧：即使被 Telegram 限流，旧画面也保留，绝不出现画面冻结/消失。"""
         text = self.animation()
-        old_id, self.animation_msg_id = self.animation_msg_id, None
-        if old_id: await safe_delete(app.bot, self.chat_id, old_id)
-        msg = await safe_send(app.bot, self.chat_id, text)
-        self.animation_msg_id = msg.message_id if msg else None
+        msg = None
+        for _ in range(4):  # 尊重 429 的 retry_after 完整等待，最多重试 4 次，保证帧必达
+            try:
+                msg = await app.bot.send_message(chat_id=self.chat_id, text=text)
+                break
+            except RetryAfter as exc:
+                await asyncio.sleep(min(exc.retry_after + 0.5, 25))
+            except TelegramError:
+                logger.exception("赛车动画帧发送失败: %s", self.chat_id)
+                break
+        if msg is None:
+            return  # 本帧放弃：旧帧仍在群里，下个周期重试，画面最多慢一拍而不会冻结假死
+        old_id, self.animation_msg_id = self.animation_msg_id, msg.message_id
+        if old_id:
+            for _ in range(3):  # 删除也尊重限流，避免旧帧滞留成孤儿消息
+                try:
+                    await app.bot.delete_message(chat_id=self.chat_id, message_id=old_id)
+                    break
+                except RetryAfter as exc:
+                    await asyncio.sleep(min(exc.retry_after + 0.5, 25))
+                except TelegramError:
+                    break
 
     async def run(self, app):
         try:

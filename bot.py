@@ -1369,7 +1369,7 @@ class HorseRace:
         self.mode = mode or current_game_mode()
         self.bets, self.total_bets, self.pool = defaultdict(dict), [0] * HORSE_COUNT, 0
         self.phase, self.create_time, self.positions, self.arrivals = "betting", time.time(), [0.0] * HORSE_COUNT, []
-        self.display_positions = [0] * HORSE_COUNT  # 显示格（=真实进度的整数部分，线性跟随时间）
+        self.display_positions = [0] * HORSE_COUNT  # 显示格（=节奏曲线进度的整数部分，严格跟随真实进度）
         self.arrival_times, self.race_start_time = {}, None
         self.notified, self.name_cache = set(), {}
         self.game_msg_id = self.animation_msg_id = None
@@ -1561,10 +1561,21 @@ class HorseRace:
                 horse: minimum_duration + rank * finish_gap + random.uniform(-0.20, 0.20)
                 for rank, horse in enumerate(finish_order)
             }
-            # 画面显示 = 纯线性时间映射（v2.7）：
-            # 5 秒一帧的采样下，任何"戏剧化"映射（跑法曲线/抖动/强制步长）都会产生失真——
-            # 钉死起点、冲刺终点、集体压线等都是它们的产物。线性映射保证：
-            # 首帧全员在起点、每帧恰好 +1~2 格（14格/70s → 每帧 1.0~1.27 格）、到线帧与到达名单完全同步
+            # 节奏分配（v2.9）：每辆车一条单调节奏曲线 f(p) = p ± a·sin(pπ) —— f(0)=0, f(1)=1,
+            # 完赛时刻与名次分毫不差，但中段节奏不同 → 真实反超/守擂戏码。
+            # 方向与幅度全随机（冠军不特殊，先慢后快/先快后慢各半，25% 概率接近匀速），每场剧本不重样。
+            # a 上限按各车完赛时长收紧，保证最慢段每帧仍 +≥1 格（不钉死）；曲线单调 → 无倒退。
+            # 显示 = int(真实节奏进度)，无累积/无强制步长 → 显示与真实严格同步，零失真。
+            self.race_tempo = {}
+            for rank, horse in enumerate(finish_order):
+                T = self.finish_durations[horse]
+                a_cap = max(0.0, (1 - T / (RACE_TRACK_LENGTH * RACE_ANIMATION_INTERVAL)) / math.pi)
+                if random.random() < 0.25:
+                    a = random.uniform(0.05, 0.35) * a_cap    # 四分之一概率接近匀速，增加剧本多样性
+                else:
+                    a = random.uniform(0.4, 0.95) * a_cap
+                sign = random.choice([-1, 1])                  # -1 先慢后快（反超），+1 先快后慢（守擂）
+                self.race_tempo[horse] = (sign, a)
             while not self.cancelled and len(self.arrivals) < HORSE_COUNT:
                 now = time.time()
                 for i in range(HORSE_COUNT):
@@ -1572,14 +1583,16 @@ class HorseRace:
                         continue
                     duration = self.finish_durations[i]
                     progress = min(1.0, max(0.0, (now - self.race_start_time) / duration))
+                    sign, amp = self.race_tempo.get(i, (0, 0.0))
+                    tempo = progress + sign * amp * math.sin(progress * math.pi)
                     self.positions[i] = max(0.0, min(float(RACE_TRACK_LENGTH),
-                                                     RACE_TRACK_LENGTH * progress))
+                                                     RACE_TRACK_LENGTH * tempo))
                     if progress >= 1.0:
                         self.arrival_times[i] = self.race_start_time + duration
                         self.positions[i] = float(RACE_TRACK_LENGTH)
                         self.display_positions[i] = RACE_TRACK_LENGTH
                     else:
-                        # 画面格子严格跟随时间进度：既不超前（不会提前压线）也不滞后（不会钉死）
+                        # 画面格子严格跟随真实节奏进度：既不超前（不会提前压线）也不滞后（不会钉死）
                         self.display_positions[i] = max(0, min(RACE_TRACK_LENGTH, int(self.positions[i])))
                 self.arrivals = sorted(self.arrival_times, key=self.arrival_times.get)
                 await self._push_animation_frame(app)

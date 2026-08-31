@@ -1194,6 +1194,9 @@ def poker_buttons(game, uid):
         if game.chips[uid] >= to_call + pot_amt:
             pot_row.append(InlineKeyboardButton(f"💰 全池 +{pot_amt}", callback_data="texas_raise_pot"))
         if pot_row: rows.append(pot_row)
+        # 固定额加注：加注 100（最低加注额）；筹码不足时隐藏，半池本身就是 100 时不再重复显示
+        if game.chips[uid] >= to_call + FIXED_MIN_RAISE and half_amt > FIXED_MIN_RAISE:
+            rows.append([InlineKeyboardButton(f"➕ 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}")])
     if game.chips[uid] > 0: rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
 

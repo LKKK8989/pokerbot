@@ -1587,9 +1587,9 @@ class HorseRace:
                         self.positions[i] = float(RACE_TRACK_LENGTH)
                         self.display_positions[i] = RACE_TRACK_LENGTH
                     else:
-                        # 自然量化：单调只向前、单帧最多 +RACE_STEP_CAP 格 —— 车只会加速或原地歇，永不倒退、永不跳格
+                        # 自然量化：单调只向前、单帧至少 +1、至多 +RACE_STEP_CAP 格 —— 车永远在爬，永不倒退/永不钉死/永不跳格
                         target = int(round(self.positions[i]))
-                        step = max(0, min(RACE_STEP_CAP, target - self.display_positions[i]))
+                        step = max(1, min(RACE_STEP_CAP, target - self.display_positions[i]))
                         self.display_positions[i] = max(0, min(RACE_TRACK_LENGTH, self.display_positions[i] + step))
                 self.arrivals = sorted(self.arrival_times, key=self.arrival_times.get)
                 await self._push_animation_frame(app)

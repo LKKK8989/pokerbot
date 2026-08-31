@@ -36,7 +36,7 @@ TURN_TIMEOUT = 60          # 德州/21点单回合思考时间
 ROOM_WAIT_TIMEOUT = 60     # 各游戏等待房统一倒计时（60秒）
 RACE_AUTO_START = 120      # 赛车自动开赛时间
 RACE_ANIMATION_INTERVAL = 5.0   # 每帧画面停留秒数（间隔越大帧数越少，需与赛程总时长一起权衡）
-RACE_BRAWL_CAP = 5        # 大乱斗模式：单帧画面步长双向封顶（允许倒退，制造混战；过大像瞬移）
+RACE_STEP_CAP = 2         # 赛车动画：单帧画面最多前进的格数（单调只向前，不倒退、不跳格；乱斗感来自 surget/st 图）
 SLOT_COOLDOWN = 5          # 老虎机冷却
 SLOT_SPIN_SEM = asyncio.Semaphore(2)  # 老虎机全局并发上限（防限流雪崩）
 lhj_cmd_spam = defaultdict(float)  # 老虎机命令防刷：与抽奖冷却同步（统一 5 秒窗口）
@@ -1561,8 +1561,8 @@ class HorseRace:
                 weights = [40, 32, 28] if rank == 0 else [38, 30, 32]
                 self.race_styles[horse] = random.choices(["late", "steady", "early"], weights=weights)[0]
                 self.race_wobble[horse] = (
-                    random.uniform(0.50, 0.65),        # 大乱斗振幅：赛道长度的 50%~65%（四车高频强抖动，全程混战洗牌）
-                    random.uniform(5.0, 7.0),          # 频率：整场比赛来回 5~7 次（高频率 → 名次反复洗牌）
+                    random.uniform(0.35, 0.45),        # 起伏振幅：赛道长度的 35%~45%（够造 surget/st 图，但单帧被 RACE_STEP_CAP 钳住，不会抽搐）
+                    random.uniform(3.5, 5.5),          # 频率：整场比赛来回 3.5~5.5 次（高频错相 → 名次反复洗牌）
                     random.uniform(0, 2 * math.pi),    # 相位：错开各车节奏，制造反复反超
                 )
             # 让最终冠、亚军反相抖动：两辆车一冲一歇，反复交叉，制造「反超来反超去」的贴身肉搏
@@ -1587,9 +1587,9 @@ class HorseRace:
                         self.positions[i] = float(RACE_TRACK_LENGTH)
                         self.display_positions[i] = RACE_TRACK_LENGTH
                     else:
-                        # 大乱斗量化：单帧步长双向封顶 RACE_BRAWL_CAP，允许倒退 —— 四车疯狂穿插换位、名次乱洗
+                        # 自然量化：单调只向前、单帧最多 +RACE_STEP_CAP 格 —— 车只会加速或原地歇，永不倒退、永不跳格
                         target = int(round(self.positions[i]))
-                        step = max(-RACE_BRAWL_CAP, min(RACE_BRAWL_CAP, target - self.display_positions[i]))
+                        step = max(0, min(RACE_STEP_CAP, target - self.display_positions[i]))
                         self.display_positions[i] = max(0, min(RACE_TRACK_LENGTH, self.display_positions[i] + step))
                 self.arrivals = sorted(self.arrival_times, key=self.arrival_times.get)
                 await self._push_animation_frame(app)

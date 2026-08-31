@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -34,7 +35,8 @@ EMERGENCY_MAX_USES = 3
 TURN_TIMEOUT = 60          # 德州/21点单回合思考时间
 ROOM_WAIT_TIMEOUT = 60     # 各游戏等待房统一倒计时（60秒）
 RACE_AUTO_START = 120      # 赛车自动开赛时间
-RACE_ANIMATION_INTERVAL = 1.5
+RACE_ANIMATION_INTERVAL = 5.0   # 每帧画面停留秒数（间隔越大帧数越少，需与赛程总时长一起权衡）
+RACE_BRAWL_CAP = 5        # 大乱斗模式：单帧画面步长双向封顶（允许倒退，制造混战；过大像瞬移）
 SLOT_COOLDOWN = 5          # 老虎机冷却
 SLOT_SPIN_SEM = asyncio.Semaphore(2)  # 老虎机全局并发上限（防限流雪崩）
 lhj_cmd_spam = defaultdict(float)  # 老虎机命令防刷：与抽奖冷却同步（统一 5 秒窗口）
@@ -79,6 +81,16 @@ HORSE_NAMES = ["轿车", "出租", "越野", "皮卡"]
 HORSE_EMOJI = ["🚗", "🚕", "🚙", "🛻"]
 FIXED_BET_AMOUNTS = [100, 200, 500, 1000]
 RACE_TRACK_LENGTH = 14
+# 赛车跑法曲线：前期型(开局猛冲后劲不足) / 匀速型 / 后期型(前期落后、终点前反超)
+# 三条曲线均满足 f(0)=0、f(1)=1 —— 只改变画面观感，完赛时间与名次完全不变（赔率公平性不受影响）
+# 每辆车再叠加一条"衰减抖动"：amp * sin(2π*freq*p + phase) * (1-p)
+#   乘 (1-p) 让抖动在终点精确收敛为 0，因此完赛时刻与名次依旧分毫不差；
+#   各车振幅/频率/相位随机错开 → 全程反复易主、你追我赶
+RACE_STYLE_CURVES = {
+    "early":  lambda p: 1 - (1 - p) ** 2,   # 前期型：开局领先，后段乏力被追上
+    "steady": lambda p: p,                   # 匀速型
+    "late":   lambda p: p ** 2,              # 后期型：前期吊车尾，终点前绝杀反超
+}
 DATA_BACKUP_FILE, DATA_TEMP_FILE = f"{DATA_FILE}.bak", f"{DATA_FILE}.tmp"
 BEIJING_TZ = timezone(timedelta(hours=8))
 HAND_NAME_CN = {"High Card":"高牌", "Pair":"一对", "One Pair":"一对", "Two Pair":"两对", "Three of a Kind":"三条", "Straight":"顺子", "Flush":"同花", "Full House":"葫芦", "Four of a Kind":"四条", "Straight Flush":"同花顺", "Royal Flush":"皇家同花顺"}
@@ -1368,7 +1380,10 @@ class HorseRace:
         self.mode = mode or current_game_mode()
         self.bets, self.total_bets, self.pool = defaultdict(dict), [0] * HORSE_COUNT, 0
         self.phase, self.create_time, self.positions, self.arrivals = "betting", time.time(), [0.0] * HORSE_COUNT, []
+        self.display_positions = [0] * HORSE_COUNT  # 量化后的整数显示格（单调、单帧最多+2，画面干净不跳）
         self.arrival_times, self.race_start_time = {}, None
+        self.race_styles = {}  # 每辆车的跑法（early/steady/late），开跑瞬间分配
+        self.race_wobble = {}  # 每辆车的抖动参数（振幅, 频率, 相位），开跑瞬间分配
         self.notified, self.name_cache = set(), {}
         self.game_msg_id = self.animation_msg_id = None
         self.task, self.settled, self.cancelled, self.lock = None, False, False, asyncio.Lock()
@@ -1475,12 +1490,20 @@ class HorseRace:
 
     def animation(self):
         lines = ["🏁 赛车进行中", "━" * 14]
-        for i, pos in enumerate(self.positions):
+        for i, pos in enumerate(self.display_positions):
             track_pos = max(0, min(RACE_TRACK_LENGTH, int(pos)))
             track = "🏁" + (HORSE_EMOJI[i] + "━" * RACE_TRACK_LENGTH if track_pos >= RACE_TRACK_LENGTH else "━" * (RACE_TRACK_LENGTH - track_pos - 1) + HORSE_EMOJI[i] + "━" * track_pos)
             lines.append(track)
         if self.arrivals: lines.append("✅ 到达：" + " ".join(HORSE_EMOJI[i] for i in self.arrivals))
         return "\n".join(lines)
+
+    async def _push_animation_frame(self, app):
+        """删掉上一帧再发新帧：每帧都以新消息形式出现在群底部，让群友有时间看清赛道变化。"""
+        text = self.animation()
+        old_id, self.animation_msg_id = self.animation_msg_id, None
+        if old_id: await safe_delete(app.bot, self.chat_id, old_id)
+        msg = await safe_send(app.bot, self.chat_id, text)
+        self.animation_msg_id = msg.message_id if msg else None
 
     async def run(self, app):
         try:
@@ -1524,12 +1547,28 @@ class HorseRace:
                         finish_order.append(index)
                         remaining.remove(index)
                         break
-            minimum_duration = 6.0
-            finish_gap = 1.25
+            # 赛程总时长 = minimum_duration + 3*finish_gap = 70 秒
+            # 配合 RACE_ANIMATION_INTERVAL=5.0 与 RACE_TRACK_LENGTH=14 → 约 15 帧、每帧走 1 格
+            minimum_duration = 55.0
+            finish_gap = 5.0
             self.finish_durations = {
                 horse: minimum_duration + rank * finish_gap + random.uniform(-0.20, 0.20)
                 for rank, horse in enumerate(finish_order)
             }
+            # 分配跑法：冠军三种跑法都可能出现（仅轻微偏向后期型），保证每场观感不重样
+            self.race_styles, self.race_wobble = {}, {}
+            for rank, horse in enumerate(finish_order):
+                weights = [40, 32, 28] if rank == 0 else [38, 30, 32]
+                self.race_styles[horse] = random.choices(["late", "steady", "early"], weights=weights)[0]
+                self.race_wobble[horse] = (
+                    random.uniform(0.50, 0.65),        # 大乱斗振幅：赛道长度的 50%~65%（四车高频强抖动，全程混战洗牌）
+                    random.uniform(5.0, 7.0),          # 频率：整场比赛来回 5~7 次（高频率 → 名次反复洗牌）
+                    random.uniform(0, 2 * math.pi),    # 相位：错开各车节奏，制造反复反超
+                )
+            # 让最终冠、亚军反相抖动：两辆车一冲一歇，反复交叉，制造「反超来反超去」的贴身肉搏
+            if HORSE_COUNT >= 2:
+                w_amp, w_freq, w_phase = self.race_wobble[finish_order[0]]
+                self.race_wobble[finish_order[1]] = (w_amp, w_freq, w_phase + math.pi)
             while not self.cancelled and len(self.arrivals) < HORSE_COUNT:
                 now = time.time()
                 for i in range(HORSE_COUNT):
@@ -1537,12 +1576,23 @@ class HorseRace:
                         continue
                     duration = self.finish_durations[i]
                     progress = min(1.0, max(0.0, (now - self.race_start_time) / duration))
-                    self.positions[i] = RACE_TRACK_LENGTH * progress
+                    # 进度(时间)决定完赛时刻，跑法曲线+抖动只决定画面位置 → 名次与派彩完全不受影响
+                    curve = RACE_STYLE_CURVES[self.race_styles.get(i, "steady")]
+                    amp, freq, phase = self.race_wobble.get(i, (0.0, 1.0, 0.0))
+                    wobble = amp * math.sin(2 * math.pi * freq * progress + phase) * ((1 - progress) ** 1.6)  # 晚收敛：前 90% 全幅混战，最后才收尾定胜负
+                    self.positions[i] = max(0.0, min(float(RACE_TRACK_LENGTH),
+                                                     RACE_TRACK_LENGTH * (curve(progress) + wobble)))
                     if progress >= 1.0:
                         self.arrival_times[i] = self.race_start_time + duration
                         self.positions[i] = float(RACE_TRACK_LENGTH)
+                        self.display_positions[i] = RACE_TRACK_LENGTH
+                    else:
+                        # 大乱斗量化：单帧步长双向封顶 RACE_BRAWL_CAP，允许倒退 —— 四车疯狂穿插换位、名次乱洗
+                        target = int(round(self.positions[i]))
+                        step = max(-RACE_BRAWL_CAP, min(RACE_BRAWL_CAP, target - self.display_positions[i]))
+                        self.display_positions[i] = max(0, min(RACE_TRACK_LENGTH, self.display_positions[i] + step))
                 self.arrivals = sorted(self.arrival_times, key=self.arrival_times.get)
-                await safe_edit(app.bot, self.chat_id, self.animation_msg_id, self.animation())
+                await self._push_animation_frame(app)
                 if len(self.arrivals) < HORSE_COUNT: await asyncio.sleep(RACE_ANIMATION_INTERVAL)
             if not self.cancelled: await self.settle(app)
         except asyncio.CancelledError: raise

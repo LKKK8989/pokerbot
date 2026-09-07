@@ -82,26 +82,37 @@ DATA_BACKUP_FILE, DATA_TEMP_FILE = f"{DATA_FILE}.bak", f"{DATA_FILE}.tmp"
 # 设置存在独立文件 bot_settings.json，网页保存后立即覆盖内存中的全局常量，无需重启。
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(DATA_FILE)), "bot_settings.json")
 WEB_DEFAULT_PASSWORD = "admin888"  # 首次登录用，登录后请在面板里立即修改
+# 左侧菜单分组：(分组键, 显示名, 图标)
+SETTINGS_GROUPS = [
+    ("dashboard", "群体总览",   "📊"),
+    ("texas",     "德州扑克",   "🃏"),
+    ("blackjack", "21点",      "♠️"),
+    ("jinhua",    "炸金花",     "♣️"),
+    ("race",      "赛车",       "🏎️"),
+    ("general",   "通用与应急", "⚙️"),
+    ("season",    "排位赛",     "🏆"),
+    ("security",  "安全",       "🔒"),
+]
 SETTINGS_FIELDS = [
-    # (settings键, 模块全局变量名, 面板显示名, 类型, 最小, 最大)
-    ("starting_chips",          "STARTING_CHIPS",           "德州·新玩家初始积分",        "int",   100, 1000000),
-    ("min_entry_chips",         "MIN_ENTRY_CHIPS",          "德州·入座最低积分",          "int",   0,   100000),
-    ("fixed_min_raise",         "FIXED_MIN_RAISE",          "德州·最低加注额",            "int",   10,  10000),
-    ("texas_exchange_rate",     "TEXAS_EXCHANGE_RATE",      "兑换·几通用积分换1德州积分", "int",   1,   100),
-    ("emergency_chips",         "EMERGENCY_CHIPS",          "应急·归零赠送积分",          "int",   0,   100000),
-    ("emergency_max_uses",      "EMERGENCY_MAX_USES",       "应急·每日赠送次数",          "int",   0,   99),
-    ("turn_timeout",            "TURN_TIMEOUT",             "德州/21点·单回合思考(秒)",   "int",   10,  600),
-    ("room_wait_timeout",       "ROOM_WAIT_TIMEOUT",        "等待房·倒计时(秒)",          "int",   10,  600),
-    ("race_auto_start",         "RACE_AUTO_START",          "赛车·自动开赛(秒)",          "int",   10,  600),
-    ("race_animation_interval", "RACE_ANIMATION_INTERVAL",  "赛车·动画帧间隔(秒)",        "float", 0.5, 30),
-    ("bj_min_bet",              "BJ_MIN_BET",               "21点·最低下注",              "int",   1,   100000),
-    ("blackjack_decks",         "BLACKJACK_DECKS",          "21点·使用几副牌",            "int",   1,   8),
-    ("jinhua_ante",             "JINHUA_ANTE",              "炸金花·底注",                "int",   1,   100000),
-    ("jinhua_base",             "JINHUA_BASE",              "炸金花·单注基准",            "int",   1,   100000),
-    ("season_start_chips",      "SEASON_START_CHIPS",       "排位赛·每人起始分",          "int",   100, 1000000),
-    ("season_min_players",      "SEASON_MIN_PLAYERS",       "排位赛·最少开赛人数",        "int",   2,   50),
-    ("season_min_games",        "SEASON_MIN_GAMES",         "排位赛·结算最少局数",        "int",   0,   999),
-    ("season_days",             "SEASON_DAYS",              "排位赛·赛季天数",            "int",   1,   90),
+    # (settings键, 模块全局变量名, 面板显示名, 类型, 最小, 最大, 所属分组)
+    ("starting_chips",          "STARTING_CHIPS",          "新玩家初始积分",            "int",   100, 1000000, "texas"),
+    ("min_entry_chips",         "MIN_ENTRY_CHIPS",         "入座最低积分",              "int",   0,   100000,  "texas"),
+    ("fixed_min_raise",         "FIXED_MIN_RAISE",         "最低加注额",                "int",   10,  10000,   "texas"),
+    ("turn_timeout",            "TURN_TIMEOUT",            "单回合思考时间(秒·德州/21点共用)", "int", 10, 600, "texas"),
+    ("room_wait_timeout",       "ROOM_WAIT_TIMEOUT",       "等待房倒计时(秒)",          "int",   10,  600,     "texas"),
+    ("bj_min_bet",              "BJ_MIN_BET",              "最低下注",                  "int",   1,   100000,  "blackjack"),
+    ("blackjack_decks",         "BLACKJACK_DECKS",         "使用几副牌",                "int",   1,   8,       "blackjack"),
+    ("jinhua_ante",             "JINHUA_ANTE",             "底注",                      "int",   1,   100000,  "jinhua"),
+    ("jinhua_base",             "JINHUA_BASE",             "单注基准",                  "int",   1,   100000,  "jinhua"),
+    ("race_auto_start",         "RACE_AUTO_START",         "自动开赛时间(秒)",          "int",   10,  600,     "race"),
+    ("race_animation_interval", "RACE_ANIMATION_INTERVAL", "动画帧间隔(秒)",            "float", 0.5, 30,      "race"),
+    ("texas_exchange_rate",     "TEXAS_EXCHANGE_RATE",     "几通用积分换1德州积分",     "int",   1,   100,     "general"),
+    ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
+    ("emergency_max_uses",      "EMERGENCY_MAX_USES",      "归零每日赠送次数",          "int",   0,   99,      "general"),
+    ("season_start_chips",      "SEASON_START_CHIPS",      "每人起始分",                "int",   100, 1000000, "season"),
+    ("season_min_players",      "SEASON_MIN_PLAYERS",      "最少开赛人数",              "int",   2,   50,      "season"),
+    ("season_min_games",        "SEASON_MIN_GAMES",        "结算最少局数",              "int",   0,   999,     "season"),
+    ("season_days",             "SEASON_DAYS",             "赛季天数",                  "int",   1,   90,      "season"),
 ]
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
@@ -118,7 +129,7 @@ def _write_settings_file(cfg: dict, password: str):
 def apply_settings(cfg: dict):
     """把设置字典套用到内存全局常量（带类型与范围校验，非法值跳过）。"""
     applied = {}
-    for key, gname, _label, ftype, lo, hi in SETTINGS_FIELDS:
+    for key, gname, _label, ftype, lo, hi, _grp in SETTINGS_FIELDS:
         if key not in cfg:
             continue
         try:
@@ -150,13 +161,19 @@ def load_settings():
         logger.exception("设置文件读取失败，使用默认配置")
 
 def save_settings(cfg: dict, new_password: str = ""):
-    """网页保存入口：套用内存 + 写盘 + 可选改密码。返回实际生效的配置。"""
+    """网页保存入口：套用内存 + 与已有存档合并写盘（分页保存互不覆盖）+ 可选改密码。"""
     global _web_password
     with _settings_lock:
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                stored = json.load(f).get("fields", {})
+        except Exception:
+            stored = {}
         applied = apply_settings(cfg)
+        stored.update(applied)
         if new_password and len(new_password.strip()) >= 4:
             _web_password = new_password.strip()
-        _write_settings_file(applied, _web_password)
+        _write_settings_file(stored, _web_password)
     return applied
 BEIJING_TZ = timezone(timedelta(hours=8))
 HAND_NAME_CN = {"High Card":"高牌", "Pair":"一对", "One Pair":"一对", "Two Pair":"两对", "Three of a Kind":"三条", "Straight":"顺子", "Flush":"同花", "Full House":"葫芦", "Four of a Kind":"四条", "Straight Flush":"同花顺", "Royal Flush":"皇家同花顺"}
@@ -4362,10 +4379,11 @@ def start_health_server():
     """网页后台：密码登录 + 在线调设置。
 
     端口从环境变量 PORT 读取（平台注入），本地没有时默认 8080。
-    - GET /health      → 200 ok（给 UptimeRobot ping，不需要登录）
-    - GET /            → 未登录显示登录页；已登录显示设置面板
-    - POST /login      → 校验密码，发 Cookie 会话（7 天有效）
-    - POST /save       → 保存设置：立即套用内存全局常量 + 写 bot_settings.json
+    - GET /health            → 200 ok（给 UptimeRobot ping，不需要登录）
+    - GET /                  → 未登录显示登录页；已登录显示群体总览（关键数值卡片）
+    - GET /page/<分组>       → 各游戏/分类设置页（左侧菜单栏导航）
+    - POST /login            → 校验密码，发 Cookie 会话（7 天有效）
+    - POST /save             → 分组保存：立即套用内存全局常量 + 合并写 bot_settings.json
     全部跑在独立守护线程，任何异常都不影响 bot 主逻辑。
     """
     try:
@@ -4391,49 +4409,116 @@ def start_health_server():
                 sessions.pop(token, None)
             return False
 
-        def _page(head, body):
+        def _page(title, sidebar_active, body):
+            """阿福风格布局：左侧深色菜单栏 + 右侧内容区，手机窄屏折叠为顶部横排。"""
+            items = []
+            for gkey, name, icon in SETTINGS_GROUPS:
+                cls = "item active" if gkey == sidebar_active else "item"
+                items.append(f"<a class='{cls}' href='/page/{gkey}'>{icon}<span>{name}</span></a>")
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-                    f"<title>{head} - 机器人后台</title><style>"
-                    "body{background:#14161f;color:#e8e6df;font-family:system-ui,sans-serif;margin:0;padding:20px}"
-                    ".card{max-width:520px;margin:0 auto;background:#1d1f2a;border:1px solid #34363f;border-radius:12px;padding:24px}"
-                    "h1{font-size:19px;margin:0 0 16px}.row{margin-bottom:14px}"
-                    "label{display:block;font-size:13px;color:#a9a89f;margin-bottom:4px}"
-                    "input{width:100%;box-sizing:border-box;background:#14161f;border:1px solid #3a3d47;color:#e8e6df;"
-                    "border-radius:8px;padding:9px 12px;font-size:15px}"
-                    "input:focus{outline:none;border-color:#5b8fd9}"
-                    "button{width:100%;background:#2f6fce;color:#fff;border:none;border-radius:8px;padding:12px;font-size:16px;cursor:pointer}"
-                    "button:hover{background:#3a7fd8}"
-                    ".tip{font-size:12px;color:#8a8880;margin-top:14px}.ok{color:#6fd08c;font-size:13px;margin-bottom:12px}"
-                    ".err{color:#f09595;font-size:13px;margin-bottom:12px}.grp{font-size:12px;color:#6a695f;margin:18px 0 8px;border-top:1px solid #2a2c36;padding-top:14px}"
-                    "</style></head><body><div class='card'>" + body + "</div></body></html>").encode("utf-8")
+                    f"<title>{title} - 机器人后台</title><style>"
+                    "*{box-sizing:border-box}"
+                    "body{background:#151621;color:#e6e5f0;font-family:system-ui,sans-serif;margin:0}"
+                    ".wrap{display:flex;min-height:100vh}"
+                    ".side{width:210px;background:#101120;border-right:1px solid #26273a;padding:18px 12px;flex-shrink:0}"
+                    ".logo{font-size:16px;font-weight:500;padding:6px 10px 16px;color:#c9c4f2}"
+                    ".side a{display:flex;align-items:center;gap:10px;color:#9a99ac;text-decoration:none;"
+                    "font-size:14px;padding:10px 12px;border-radius:10px;margin-bottom:2px}"
+                    ".side a:hover{background:#1c1d2e;color:#e6e5f0}"
+                    ".side a.active{background:#2b2854;color:#fff}"
+                    ".main{flex:1;padding:22px;max-width:860px}"
+                    ".card{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:22px;margin-bottom:18px}"
+                    "h1{font-size:18px;font-weight:500;margin:0 0 4px}"
+                    ".sub{font-size:12px;color:#8a89a0;margin-bottom:18px}"
+                    "label{display:block;font-size:13px;color:#a9a8bd;margin:14px 0 5px}"
+                    "input{width:100%;background:#151621;border:1px solid #34354a;color:#e6e5f0;"
+                    "border-radius:10px;padding:10px 12px;font-size:15px}"
+                    "input:focus{outline:none;border-color:#7c6cf0}"
+                    "button{background:#7c6cf0;color:#fff;border:none;border-radius:10px;padding:11px 26px;"
+                    "font-size:15px;cursor:pointer;margin-top:18px}"
+                    "button:hover{background:#8d7ef5}"
+                    ".ok{color:#6fd08c;font-size:13px;margin-bottom:12px}"
+                    ".err{color:#f09595;font-size:13px;margin-bottom:12px}"
+                    ".cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px}"
+                    ".stat{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:16px}"
+                    ".stat .v{font-size:22px;font-weight:500;margin-top:6px}"
+                    ".stat .t{font-size:12px;color:#8a89a0}"
+                    ".q{display:inline-block;margin:6px 6px 0 0;background:#2b2854;color:#d6d2f5;"
+                    "text-decoration:none;font-size:13px;padding:9px 14px;border-radius:10px}"
+                    "@media(max-width:720px){.wrap{flex-direction:column}.side{width:100%;display:flex;"
+                    "overflow-x:auto;border-right:none;border-bottom:1px solid #26273a;padding:10px}"
+                    ".logo{display:none}.side a{flex-shrink:0}.main{padding:14px}}"
+                    "</style></head><body><div class='wrap'>"
+                    f"<nav class='side'><div class='logo'>🤖 机器人后台</div>{''.join(items)}</nav>"
+                    f"<main class='main'>{body}</main></div></body></html>").encode("utf-8")
 
         def _login_page(err=""):
-            msg = f"<div class='err'>密码错误，请重试</div>" if err else ""
-            return _page("登录", f"<h1>🔐 机器人后台</h1>{msg}"
-                "<form method='post' action='/login'>"
-                "<div class='row'><label>管理密码</label><input type='password' name='password' autofocus></div>"
-                "<button type='submit'>登 录</button></form>"
-                "<div class='tip'>初始密码 admin888，登录后请立即在面板底部修改。</div>")
+            msg = "<div class='err'>密码错误，请重试</div>" if err else ""
+            return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                    "<title>登录 - 机器人后台</title><style>"
+                    "body{background:#151621;color:#e6e5f0;font-family:system-ui,sans-serif;margin:0;"
+                    "display:flex;justify-content:center;padding-top:12vh}"
+                    ".card{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:28px;width:min(400px,92vw)}"
+                    "h1{font-size:18px;font-weight:500;margin:0 0 18px}"
+                    "label{display:block;font-size:13px;color:#a9a8bd;margin-bottom:5px}"
+                    "input{width:100%;background:#151621;border:1px solid #34354a;color:#e6e5f0;border-radius:10px;padding:10px 12px;font-size:15px}"
+                    "button{width:100%;background:#7c6cf0;color:#fff;border:none;border-radius:10px;padding:12px;font-size:15px;cursor:pointer;margin-top:16px}"
+                    ".err{color:#f09595;font-size:13px;margin-bottom:10px}"
+                    ".tip{font-size:12px;color:#8a89a0;margin-top:14px}"
+                    "</style></head><body><div class='card'><h1>🔐 机器人后台</h1>" + msg +
+                    "<form method='post' action='/login'>"
+                    "<label>管理密码</label><input type='password' name='password' autofocus>"
+                    "<button type='submit'>登 录</button></form>"
+                    "<div class='tip'>初始密码 admin888，登录后请立即在「安全」页修改。</div>"
+                    "</div></body></html>").encode("utf-8")
 
-        def _admin_page(saved=False, err=""):
-            msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
-            msg += f"<div class='err'>{html.escape(err)}</div>" if err else ""
-            rows, last_grp = [], None
-            for key, _g, label, ftype, lo, hi in SETTINGS_FIELDS:
+        def _field_rows(gkey):
+            rows = []
+            for key, _g, label, ftype, lo, hi, grp in SETTINGS_FIELDS:
+                if grp != gkey:
+                    continue
                 cur = globals().get(_g)
                 step = "0.1" if ftype == "float" else "1"
-                rows.append(f"<div class='row'><label>{html.escape(label)}（{lo} ~ {hi}）"
-                            f"<input type='number' name='{key}' value='{cur}' step='{step}'></label></div>")
-            is_default_pwd = _web_password == WEB_DEFAULT_PASSWORD
-            pwd_tip = "<div class='err'>⚠️ 当前还在用初始密码，请在下方改成自己的密码</div>" if is_default_pwd else ""
-            return _page("设置", f"<h1>⚙️ 机器人设置</h1>{msg}{pwd_tip}"
-                "<form method='post' action='/save'>" + "".join(rows) +
-                "<div class='grp'>安全</div>"
-                "<div class='row'><label>修改后台密码（留空 = 不改，至少4位）"
-                f"<input type='password' name='new_password' placeholder=\"{'建议立即修改' if is_default_pwd else ''}\"></label></div>"
-                "<button type='submit'>💾 保 存</button></form>"
-                "<div class='tip'>保存立即生效，无需重启；设置存在 bot_settings.json，机器人重启后自动加载。</div>")
+                rows.append(f"<label>{html.escape(label)}（{lo} ~ {hi}）"
+                            f"<input type='number' name='{key}' value='{cur}' step='{step}'></label>")
+            return "".join(rows)
+
+        def _home_page():
+            def stat(label, gname):
+                return f"<div class='stat'><div class='t'>{label}</div><div class='v'>{globals().get(gname)}</div></div>"
+            quick = "".join(f"<a class='q' href='/page/{g}'>{i} {n}</a>" for g, n, i in SETTINGS_GROUPS if g != "dashboard")
+            return _page("群体总览", "dashboard",
+                "<h1>📊 群体总览</h1><div class='sub'>当前生效的关键数值（改设置去左侧菜单）</div>"
+                "<div class='cards'>" +
+                stat("德州入座门槛", "MIN_ENTRY_CHIPS") +
+                stat("新玩家初始积分", "STARTING_CHIPS") +
+                stat("单回合思考(秒)", "TURN_TIMEOUT") +
+                stat("赛车自动开赛(秒)", "RACE_AUTO_START") +
+                stat("应急每日次数", "EMERGENCY_MAX_USES") +
+                stat("炸金花底注", "JINHUA_ANTE") +
+                "</div><div class='card' style='margin-top:18px'><h1>快捷入口</h1>" + quick + "</div>")
+
+        def _admin_page(gkey, saved=False, bad=False):
+            gname, gicon = next((n, i) for k, n, i in SETTINGS_GROUPS if k == gkey)
+            msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
+            msg += "<div class='err'>部分数值超出范围或非法，已跳过这些项</div>" if bad else ""
+            if gkey == "security":
+                is_default = _web_password == WEB_DEFAULT_PASSWORD
+                warn = "<div class='err'>⚠️ 当前还在用初始密码，建议立即修改（至少4位）</div>" if is_default else ""
+                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码</div>{msg}{warn}"
+                        "<form method='post' action='/save'>"
+                        "<input type='hidden' name='group' value='security'>"
+                        "<label>新密码（至少4位）<input type='password' name='new_password'></label>"
+                        "<button type='submit'>💾 保存密码</button></form>")
+            else:
+                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
+                        "<div class='card'><form method='post' action='/save'>"
+                        f"<input type='hidden' name='group' value='{gkey}'>"
+                        + _field_rows(gkey) +
+                        "<button type='submit'>💾 保 存</button></form></div>")
+            return _page(gname, gkey, body)
 
         class _AdminHandler(BaseHTTPRequestHandler):
             def _send(self, code, body, headers=None):
@@ -4459,12 +4544,16 @@ def start_health_server():
                 path = urlparse(self.path).path
                 if path == "/health":
                     self._send(200, b"ok", [("Content-Type", "text/plain")]); return
-                if path != "/":
-                    self._send(404, b"not found", [("Content-Type", "text/plain")]); return
                 if not _check_session(self.headers.get("Cookie")):
                     self._send(200, _login_page()); return
                 qs = parse_qs(urlparse(self.path).query)
-                self._send(200, _admin_page(saved="saved" in qs, err="bad" in qs and "部分数值超出范围或非法，已跳过这些项" or ""))
+                saved, bad = "saved" in qs, "bad" in qs
+                if path == "/":
+                    self._send(200, _home_page()); return
+                m = re.fullmatch(r"/page/([a-z]+)", path)
+                if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
+                    self._send(200, _admin_page(m.group(1), saved=saved, bad=bad)); return
+                self._send(404, b"not found", [("Content-Type", "text/plain")])
 
             def do_POST(self):
                 try:
@@ -4486,10 +4575,15 @@ def start_health_server():
                 if path == "/save":
                     if not _check_session(self.headers.get("Cookie")):
                         self._redirect("/"); return
-                    cfg = {k: v[0] for k, v in form.items() if k != "new_password"}
-                    applied = save_settings(cfg, form.get("new_password", [""])[0])
+                    group = form.get("group", [""])[0]
+                    if group == "security":
+                        save_settings({}, form.get("new_password", [""])[0])
+                        self._redirect("/page/security?saved=1"); return
+                    valid_keys = {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
+                    cfg = {k: v[0] for k, v in form.items() if k in valid_keys}
+                    applied = save_settings(cfg)
                     skipped = [k for k in cfg if k not in applied]
-                    self._redirect("/?saved=1" + ("&bad=1" if skipped else ""))
+                    self._redirect(f"/page/{group}?saved=1" + ("&bad=1" if skipped else ""))
                     return
                 self._send(404, b"not found", [("Content-Type", "text/plain")])
 

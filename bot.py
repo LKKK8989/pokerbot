@@ -96,6 +96,7 @@ SETTINGS_GROUPS = [
     ("points",    "积分系统",   "💰"),
     ("season",    "排位赛",     "🏆"),
     ("members",   "群组管理",   "👥"),
+    ("autodel",   "自动删除",   "🗑️"),
     ("schedule",  "定时任务",   "⏰"),
     ("commands",  "命令管理",   "⌨️"),
     ("general",   "通用与应急", "⚙️"),
@@ -166,7 +167,6 @@ SETTINGS_FIELDS = [
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板结束后删除(秒,0=不删)", "int", 0, 3600, "general"),
-    ("web_otp_enabled",         "WEB_OTP_ENABLED",         "后台登录二次验证(Telegram验证码)",      "bool", 0,   1,    "general"),
     ("web_base_url",            "WEB_BASE_URL",            "后台公网地址(/后台一键登录用)",          "text", 0,   0,    "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
@@ -178,6 +178,21 @@ SETTINGS_FIELDS = [
     ("antispam_mute_seconds",   "ANTISPAM_MUTE_SECONDS",   "命中禁言基础时长(秒,0=只删不禁)", "int",  0,   86400,"general"),
     ("antispam_mute_escalate",  "ANTISPAM_MUTE_ESCALATE",  "累犯禁言翻倍", "bool", 0,   1,    "general"),
     ("antispam_notice_seconds", "ANTISPAM_NOTICE_SECONDS", "命中通告自动删除(秒,0=不删)", "int",  0,   3600, "general"),
+    # ===== 自动删除规则中心（照阿福：按消息类型开关，命中即静默撤删，管理员豁免） =====
+    ("autodel_links",         "AUTODEL_LINKS",         "链接消息(http/t.me/链接实体)", "bool", 0, 1, "autodel"),
+    ("autodel_long_enabled",  "AUTODEL_LONG_ENABLED",  "超长消息", "bool", 0, 1, "autodel"),
+    ("autodel_long_len",      "AUTODEL_LONG_LEN",      "超长消息长度阈值", "int", 50, 4096, "autodel"),
+    ("autodel_photo",         "AUTODEL_PHOTO",         "图片消息", "bool", 0, 1, "autodel"),
+    ("autodel_video",         "AUTODEL_VIDEO",         "视频消息", "bool", 0, 1, "autodel"),
+    ("autodel_sticker",       "AUTODEL_STICKER",       "贴纸消息", "bool", 0, 1, "autodel"),
+    ("autodel_gif",           "AUTODEL_GIF",           "动图消息", "bool", 0, 1, "autodel"),
+    ("autodel_voice",         "AUTODEL_VOICE",         "语音/视频圆消息", "bool", 0, 1, "autodel"),
+    ("autodel_document",      "AUTODEL_DOCUMENT",      "文档文件", "bool", 0, 1, "autodel"),
+    ("autodel_archive",       "AUTODEL_ARCHIVE",       "压缩文件(zip/rar/7z等)", "bool", 0, 1, "autodel"),
+    ("autodel_executable",    "AUTODEL_EXECUTABLE",    "可执行文件(exe/apk/bat等)", "bool", 0, 1, "autodel"),
+    ("autodel_contact",       "AUTODEL_CONTACT",       "删除分享联系人", "bool", 0, 1, "autodel"),
+    ("autodel_service",       "AUTODEL_SERVICE",       "删除系统消息(入退群/改群名等)", "bool", 0, 1, "autodel"),
+    ("autodel_premium_emoji", "AUTODEL_PREMIUM_EMOJI", "删除会员表情(自定义表情)", "bool", 0, 1, "autodel"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "general"),
     ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "general"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
@@ -251,7 +266,7 @@ REPLY_DELETE_SECONDS = 30   # 查询类命令的 bot 回复自动删除（0=不�
 SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
 PANEL_DELETE_SECONDS = 300 # 游戏卡片/下注面板：本局结束后自动删除（0=不删）
 RACE_NOTICE_DELETE_SECONDS = 60  # 赛车倒计时提示自动删除（0=不删）
-WEB_OTP_ENABLED = True  # 网页后台二次验证：密码通过后还需 Telegram 私聊验证码（关掉则仅密码）
+WEB_OTP_ENABLED = False  # 一键登录(/后台)为主，密码直登为备用；验证码步骤默认关闭（要开改这里）
 WEB_BASE_URL = ""  # 后台公网地址（如 https://xxx.northflank.app），/后台 一键登录链接用；不配则该功能不可用
 # ---------- 群组抽奖 ----------
 LOTTERY_ENABLED = True             # 总开关（网页 general→points/lottery 可关）
@@ -261,19 +276,25 @@ LOTTERY_FEE = 0                     # 参与扣积分（0=免费）
 LOTTERY_MIN_BALANCE = 100           # 参与门槛：玩家最少持有多少积分
 LOTTERY_MAX_PRIZES = 8              # 单次抽奖最多几档奖品
 LOTTERY_MSG_START = (
-    "🎉 <b>{title}</b>\n\n"
-    "⏰ 持续 <b>{duration}</b> 秒，到点自动开奖\n"
+    "🧧━━━━━━━━━━━━━━━━━\n"
+    "🎉 <b>{title}</b>\n"
+    "🧧━━━━━━━━━━━━━━━━━\n"
+    "{desc_line}"
+    "⏰ 开奖时间：<b>{end_line}</b>\n"
     "🎁 奖品：\n{prize_list}\n"
-    "{fee_line}\n"
-    "💬 发送 <code>{keyword}</code> 或 /抽奖 即可参与"
+    "{min_line}{fee_line}👥 已参与 <b>{n}</b> 人\n"
+    "💬 发送 <code>{keyword}</code> 或 /抽奖 立即参与"
 )
 LOTTERY_MSG_JOINED = "✅ {nick} 参与成功！你是第 <b>{n}</b> 位参与者\n💰 余额：<b>{balance}</b>"
 LOTTERY_MSG_DUP = "⚠️ {nick} 你已经参与过啦，等开奖即可"
 LOTTERY_MSG_FAIL = "❌ {nick} {reason}"
 LOTTERY_MSG_RESULT = (
-    "🎊 <b>{title}</b> 开奖结果：\n\n"
-    "{winners}\n\n"
-    "— 共 <b>{n}</b> 位参与者，中奖 <b>{w}</b> 位，感谢捧场！"
+    "🎊━━━━━━━━━━━━━━━━━\n"
+    "🎉 <b>{title}</b> · 开奖结果\n"
+    "🎊━━━━━━━━━━━━━━━━━\n"
+    "{winners}\n"
+    "📊 共 <b>{n}</b> 人参与，中奖 <b>{w}</b> 人\n"
+    "🙏 感谢参与，中奖信息永久保留"
 )
 OBSERVE_ENABLED = 0         # 新成员观察期开关（1=开启：入群未满时长的成员发言即删并禁言到期满）
 OBSERVE_SECONDS = 300       # 观察期时长（秒）
@@ -289,6 +310,21 @@ ANTISPAM_NOTICE_SECONDS = 60  # 命中通告自动删除（秒，0=不删）
 ANTISPAM_MIN_LEN = 5        # 参与统计的最短内容长度（防误伤"哈哈哈"类闲聊）
 antispam_hist = {}          # (cid, uid, 内容归一化) -> [ts,...] 最多保留 12 条
 antispam_offense = {}       # (cid, uid) -> [命中 ts,...] 用于累犯加重
+# ===== 自动删除规则中心默认值（网页「自动删除」页可改，保存立即生效） =====
+AUTODEL_LINKS = 1           # 链接消息
+AUTODEL_LONG_ENABLED = 1    # 超长消息开关
+AUTODEL_LONG_LEN = 200      # 超长阈值
+AUTODEL_PHOTO = 0
+AUTODEL_VIDEO = 0
+AUTODEL_STICKER = 0
+AUTODEL_GIF = 0
+AUTODEL_VOICE = 0
+AUTODEL_DOCUMENT = 0
+AUTODEL_ARCHIVE = 0
+AUTODEL_EXECUTABLE = 1
+AUTODEL_CONTACT = 1
+AUTODEL_SERVICE = 1
+AUTODEL_PREMIUM_EMOJI = 0
 WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
 WELCOME_TPL = "🎉 欢迎 {name} 加入本群！\n积分游戏请在群内发送 /start 查看玩法。"
 REDPACKET_ENABLED = 1
@@ -4618,6 +4654,74 @@ async def _antispam_hit(update, context, cid, uid, reason):
             schedule_delete(context.application, cid, m, ANTISPAM_NOTICE_SECONDS)
     except TelegramError: pass
 
+def _autodel_text_hit(message, text):
+    """自动删除规则（文本类）：返回规则名或 None。开关即法律，网页「自动删除」页可改。"""
+    if AUTODEL_LINKS and text and ("http://" in text or "https://" in text or "t.me/" in text
+            or any(getattr(e, "type", None) in ("url", "text_link") for e in (message.entities or []))):
+        return "links"
+    if AUTODEL_LONG_ENABLED and text and len(text) > max(50, int(AUTODEL_LONG_LEN)):
+        return "long"
+    if AUTODEL_PREMIUM_EMOJI and any(getattr(e, "type", None) == "custom_emoji" for e in (message.entities or [])):
+        return "premium_emoji"
+    return None
+
+def _autodel_media_hit(message):
+    """自动删除规则（媒体类）：返回规则名或 None。"""
+    if message is None:
+        return None
+    if (message.new_chat_members or message.left_chat_member or message.new_chat_title
+            or message.new_chat_photo or message.pinned_message or message.group_chat_created
+            or message.supergroup_chat_created or message.migrate_to_chat_id):
+        return "service" if AUTODEL_SERVICE else None
+    if message.sticker is not None:
+        return "sticker" if AUTODEL_STICKER else None
+    if message.animation is not None:
+        return "gif" if AUTODEL_GIF else None
+    if message.voice is not None or message.video_note is not None:
+        return "voice" if AUTODEL_VOICE else None
+    if message.contact is not None:
+        return "contact" if AUTODEL_CONTACT else None
+    if message.document is not None:
+        name = (message.document.file_name or "").lower()
+        mt = message.document.mime_type or ""
+        if AUTODEL_ARCHIVE and (mt in ("application/zip", "application/x-rar-compressed",
+                                       "application/x-7z-compressed", "application/gzip", "application/x-tar")
+                or name.endswith((".zip", ".rar", ".7z", ".tar", ".gz"))):
+            return "archive"
+        if AUTODEL_EXECUTABLE and (mt in ("application/x-msdownload", "application/vnd.android.package-archive",
+                                          "application/x-dosexec")
+                or name.endswith((".exe", ".msi", ".bat", ".cmd", ".scr", ".apk", ".com"))):
+            return "executable"
+        return "document" if AUTODEL_DOCUMENT else None
+    if message.photo:
+        return "photo" if AUTODEL_PHOTO else None
+    if message.video is not None:
+        return "video" if AUTODEL_VIDEO else None
+    return None
+
+async def _autodel_enforce(update, context):
+    """自动删除规则执行：命中即静默撤删。返回 True 表示已删（调用方应停止后续处理）。管理员豁免。"""
+    user, message = update.effective_user, update.effective_message
+    if not user or user.is_bot or not message or not is_group_chat(update):
+        return False
+    if is_bot_admin(user.id):
+        return False
+    if _autodel_text_hit(message, message.text or message.caption or "") or _autodel_media_hit(message):
+        try:
+            await message.delete()
+        except TelegramError:
+            pass
+        return True
+    return False
+
+async def on_media(update, context):
+    """自动删除规则中心：非文本消息（图/视频/贴纸/文件/联系人/系统消息等）按开关静默撤删。"""
+    try:
+        if await _autodel_enforce(update, context):
+            return
+    except Exception:
+        logger.exception("自动删除(媒体)异常（已吞并）")
+
 async def on_text(update, context):
     # 外层 try 包命令分发；开头校验单独内层 try（消息结构异常属噪音，静默忽略）
     try:
@@ -4649,6 +4753,10 @@ async def on_text(update, context):
                 except TelegramError: pass
                 return
 
+        # 自动删除规则中心：链接/超长/会员表情（媒体消息走 on_media；管理员豁免）
+        if await _autodel_enforce(update, context):
+            return
+
         # 定时刷屏识别：复读机 + 定时器特征（管理员豁免；内容太短不参与统计防误伤闲聊）
         if (ANTISPAM_ENABLED and is_group_chat(update) and not is_bot_admin(user.id)
                 and len(re.sub(r"\s+", "", text)) >= ANTISPAM_MIN_LEN):
@@ -4659,6 +4767,13 @@ async def on_text(update, context):
                     return
             except Exception:
                 logger.exception("定时刷屏识别异常（已吞并）")
+
+        # 抽奖触发词：公告宣传的关键词直接参与（支持每个活动自带关键词；修复此前自定义词没反应）
+        if is_group_chat(update) and text.strip():
+            _alo = _lottery_active(cid)
+            if _alo and text.strip() in {LOTTERY_KEYWORD, (_alo.get("keyword") or "").strip()}:
+                await _dispatch_alias("抽奖", [], update, context)
+                return
 
         # 不带 / 的命令直达：若首词是已知命令别名，按命令处理（全部命令均可不带 / 触发）
         _words = text.split()
@@ -5018,6 +5133,77 @@ def _lottery_render_prizes(prizes):
     """奖品列表渲染为多行：• 名称 × 数量"""
     return "\n".join(f"  • {html.escape(p['name'])} × {int(p['count'])}" for p in prizes)
 
+def _lottery_parse_end(spec: str):
+    """解析开奖时间字段：纯数字=秒数；'20:00'=今天(已过顺延明天)；'09-08 20:00'=今年(已过顺延明年)；
+    '2026-09-08 20:00'=指定日期。均按北京时间。非法返回 None。"""
+    s = (spec or "").strip().replace("：", ":")
+    if not s:
+        return None
+    if s.isdigit():
+        return time.time() + max(10, min(7 * 86400, int(s)))
+    now = now_bj()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%m-%d %H:%M", "%m-%d %H:%M:%S", "%H:%M"):
+        try:
+            t = datetime.strptime(s, fmt).replace(tzinfo=BEIJING_TZ)  # strptime 产出 naive，必须补时区才能与 now_bj 比较
+        except ValueError:
+            continue
+        if fmt == "%H:%M":
+            dt = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+            if dt <= now:
+                dt += timedelta(days=1)
+        elif fmt.startswith("%m-%d"):
+            dt = t.replace(year=now.year)
+            if dt <= now:
+                dt = dt.replace(year=now.year + 1)
+        else:
+            dt = t
+        ts = dt.timestamp()
+        return time.time() + 10 if ts < time.time() + 10 else ts  # 至少留 10 秒
+    return None
+
+def _lottery_form_parse(form):
+    """网页创建抽奖表单（阿福格式）→ (fields, err)。
+
+    fields: title/desc/keyword/prizes/min_bal/end_ts。
+    奖品：结构化行 prize_name[] + prize_count[]（优先），无则回退旧 textarea prizes。
+    开奖方式 mode：'time'=定时开奖（按北京时间解析 endtime）；'duration'=倒计时秒数。
+    """
+    title = (form.get("title", [""])[0] or "").strip()
+    if not title or len(title) > 50:
+        return None, "标题不能为空或超过 50 字"
+    desc = (form.get("desc", [""])[0] or "").strip()[:300]
+    keyword = (form.get("keyword", [""])[0] or "").strip() or LOTTERY_KEYWORD
+    mode = form.get("mode", ["duration"])[0]
+    min_bal_raw = (form.get("min_bal", [""])[0] or "").strip()
+    try:
+        min_bal = max(0, int(min_bal_raw)) if min_bal_raw else 0
+    except ValueError:
+        return None, "参与门槛（最低积分）必须是数字"
+    # 奖品：结构化行优先，回退 textarea
+    names = [x.strip() for x in form.get("prize_name", [])]
+    if names:
+        counts = [x.strip() for x in form.get("prize_count", [])]
+        spec = ",".join(f"{n}:{(counts[i] if i < len(counts) and counts[i] else '1')}"
+                        for i, n in enumerate(names) if n)
+    else:
+        spec = (form.get("prizes", [""])[0] or "").strip().replace("\r", "").replace("\n", ",")
+    prizes, perr = _lottery_parse_prizes(spec)
+    if perr:
+        return None, perr
+    if mode == "time":
+        end_ts = _lottery_parse_end(form.get("endtime", [""])[0])
+        if end_ts is None:
+            return None, "开奖时间格式不对：支持 20:00 / 09-08 20:00 / 2026-09-08 20:00"
+    else:
+        dur_raw = (form.get("duration", [""])[0] or "").strip()
+        try:
+            duration = max(10, min(7 * 86400, int(dur_raw)))
+        except ValueError:
+            return None, "持续秒数必须是数字"
+        end_ts = time.time() + duration
+    return {"title": title, "desc": desc, "keyword": keyword, "prizes": prizes,
+            "min_bal": min_bal, "end_ts": end_ts}, ""
+
 def _lottery_parse_prizes(spec: str):
     """解析「奖品A:数量,奖品B:数量」；空 / 非法返回 ([], err)。"""
     if not spec:
@@ -5071,18 +5257,41 @@ def _lottery_join(lo, uid, name):
 async def _lottery_publish(app, cid, lo):
     """编辑/发送活动公告消息；记录 msg_id 用于开奖后编辑。"""
     if not LOTTERY_ENABLED: return
-    duration = int(lo["end_ts"] - lo["start_ts"])
-    fee_line = f"💰 参与扣 <b>{lo['fee']}</b> 积分\n" if lo["fee"] else ""
-    text = LOTTERY_MSG_START.format(
-        title=html.escape(lo["title"]),
-        duration=duration,
-        prize_list=_lottery_render_prizes(lo["prizes"]),
-        fee_line=fee_line,
-        keyword=html.escape(lo["keyword"]),
-    )
-    msg = await safe_send(app.bot, cid, text, parse_mode="HTML")
+    msg = await safe_send(app.bot, cid, _lottery_announce_text(lo), parse_mode="HTML")
     if msg:
         lo["msg_id"] = msg.message_id
+
+def _lottery_announce_text(lo):
+    """公告文案：横幅版式 + 实时参与人数。"""
+    end_line = (datetime.fromtimestamp(lo["end_ts"], BEIJING_TZ).strftime("%m-%d %H:%M")
+                + f"（还剩 {max(0, int(lo['end_ts'] - time.time()) // 60)} 分"
+                  f"{max(0, int(lo['end_ts'] - time.time())) % 60} 秒）")
+    fee_line = f"💰 参与扣 <b>{lo['fee']}</b> 积分\n" if lo["fee"] else ""
+    min_bal = int(lo.get("min_bal") or 0)
+    min_line = f"门槛：<b>{min_bal}</b> 积分以上可参与\n" if min_bal else ""
+    desc = (lo.get("desc") or "").strip()
+    desc_line = f"📖 {html.escape(desc)}\n" if desc else ""
+    return LOTTERY_MSG_START.format(
+        title=html.escape(lo["title"]),
+        desc_line=desc_line,
+        end_line=end_line,
+        duration=int(lo["end_ts"] - lo["start_ts"]),
+        prize_list=_lottery_render_prizes(lo["prizes"]),
+        min_line=min_line,
+        fee_line=fee_line,
+        keyword=html.escape(lo["keyword"]),
+        n=len(lo.get("participants", [])),
+    )
+
+async def _lottery_refresh_announce(app, cid, lo):
+    """有人参与后刷新公告上的已参与人数（编辑失败静默，不影响参与流程）。"""
+    if not lo.get("msg_id"):
+        return
+    try:
+        await app.bot.edit_message_text(chat_id=cid, message_id=lo["msg_id"],
+                                        text=_lottery_announce_text(lo), parse_mode="HTML")
+    except Exception:
+        pass
 
 async def _lottery_draw(app, cid, lo):
     """开奖：从参与者中按奖品库存随机抽；写回 lo['winners']/prizes 剩余库存；发群通知 + 私聊中奖者。"""
@@ -5105,9 +5314,9 @@ async def _lottery_draw(app, cid, lo):
         prize["left"] -= 1
     lo["prizes"] = prizes
     lo["winners"] = winners
-    # 群内通知
+    # 群内通知：结果单独发一条醒目消息（绝不自动删除，永久保留在群里）
     if winners:
-        win_lines = [f"  🎁 <b>{html.escape(w['name'])}</b> → {html.escape(w['prize'])}" for w in winners]
+        win_lines = [f"  🏆 <b>{html.escape(w['name'])}</b> → {html.escape(w['prize'])}" for w in winners]
         text = LOTTERY_MSG_RESULT.format(
             title=html.escape(lo["title"]),
             winners="\n".join(win_lines),
@@ -5115,17 +5324,33 @@ async def _lottery_draw(app, cid, lo):
             w=len(winners),
         )
     else:
-        text = "🎊 <b>" + html.escape(lo["title"]) + "</b> 开奖啦——但本轮无人中奖 😢"
-    # 编辑原公告消息（如果有），同时新发一条开奖消息（更醒目）
+        text = ("🎊━━━━━━━━━━━━━━━━━\n"
+                f"🎉 <b>{html.escape(lo['title'])}</b> · 开奖结果\n"
+                "🎊━━━━━━━━━━━━━━━━━\n"
+                "😢 本轮无人中奖（参与人数不足）\n"
+                f"📊 共 <b>{len(lo['participants'])}</b> 人参与")
+    # 原公告编辑为已开奖状态（原文不再覆盖成结果——结果要独立醒目公布）
+    done_line = f"🎊 <b>{html.escape(lo['title'])}</b> 已开奖 ✅ 结果见下方开奖公告"
     try:
         if lo.get("msg_id"):
             await app.bot.edit_message_text(chat_id=cid, message_id=lo["msg_id"],
-                                            text=text, parse_mode="HTML")
-        else:
-            await safe_send(app.bot, cid, text, parse_mode="HTML")
+                                            text=done_line, parse_mode="HTML")
     except Exception:
-        logger.exception("编辑开奖消息失败，改发送新消息")
-        await safe_send(app.bot, cid, text, parse_mode="HTML")
+        logger.exception("编辑公告为已开奖状态失败（忽略）")
+    result_msg = await safe_send(app.bot, cid, text, parse_mode="HTML")
+    if not result_msg:
+        # 编辑路径已废弃，新消息也失败则退回编辑公告兜底
+        try:
+            if lo.get("msg_id"):
+                await app.bot.edit_message_text(chat_id=cid, message_id=lo["msg_id"],
+                                                text=text, parse_mode="HTML")
+        except Exception:
+            logger.exception("开奖结果兜底编辑也失败")
+    # 中奖信息推送一份给管理员私聊（与群内同文，永久保留）
+    try:
+        await app.bot.send_message(ADMIN_USER_ID, "📬 抽奖开奖推送\n\n" + text, parse_mode="HTML")
+    except Exception:
+        logger.exception("开奖结果推送管理员失败（忽略）")
     # 私聊中奖者
     for w in winners:
         try:
@@ -5154,7 +5379,15 @@ async def cmd_lottery(update, context):
     cid = update.effective_chat.id
     uid = update.effective_user.id
     text = (update.message.text or "").strip()
-    args_part = text[len("/开奖"):].strip()
+    # 参与形态：/开奖、/抽奖、全局触发词、或本活动自定义关键词；其余原样交给开局参数
+    _alo = _lottery_active(cid)
+    _join_words = {LOTTERY_KEYWORD, "抽奖", (_alo.get("keyword") or "").strip() if _alo else ""}
+    if text.startswith("/开奖"):
+        args_part = text[len("/开奖"):].strip()
+    elif text in _join_words:
+        args_part = ""
+    else:
+        args_part = text
     # 管理员子命令
     if is_bot_admin(uid):
         if args_part in ("开奖", "开奖开奖", "开", "开奖", "开奖开奖"):
@@ -5184,7 +5417,8 @@ async def cmd_lottery(update, context):
         if not lo:
             await update.message.reply_text(
                 f"❌ 当前没有进行中的抽奖\n\n"
-                f"管理员开局：<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数</code>")
+                f"管理员开局：<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数或时间</code>",
+                parse_mode="HTML")
             return
         ok, info = await _lottery_try_join(context.application, lo, uid, cid)
         if ok:
@@ -5193,6 +5427,8 @@ async def cmd_lottery(update, context):
             await update.message.reply_text(
                 LOTTERY_MSG_JOINED.format(nick=html.escape(name), n=info, balance=bal),
                 parse_mode="HTML")
+            # 公告上的已参与人数实时刷新
+            await _lottery_refresh_announce(context.application, cid, lo)
         elif info == "dup":
             name = await get_name(context.application, uid)
             await update.message.reply_text(LOTTERY_MSG_DUP.format(nick=html.escape(name)))
@@ -5213,18 +5449,29 @@ async def cmd_lottery(update, context):
     if len(parts) < 2:
         await update.message.reply_text(
             "用法：\n"
-            "<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数</code>\n\n"
-            "示例：<code>/开奖 群友福利 | 100积分:1,小星星:5 | 60</code>",
+            "<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数或开奖时间</code>\n\n"
+            "示例：\n"
+            "<code>/开奖 群友福利 | 100积分:1,小星星:5 | 60</code>（60 秒后开）\n"
+            "<code>/开奖 群友福利 | 100积分:1 | 20:00</code>（今晚 8 点开）\n"
+            "<code>/开奖 群友福利 | 100积分:1 | 09-08 20:00</code>（指定日期）",
             parse_mode="HTML"); return
     prizes, perr = _lottery_parse_prizes(parts[1])
     if perr:
         await update.message.reply_text(f"❌ {perr}"); return
-    duration = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else LOTTERY_DEFAULT_DURATION
-    duration = max(10, min(3600, duration))
+    # 第三段：纯数字=秒数倒计时；或指定开奖时间（20:00 / 09-08 20:00 / 2026-09-08 20:00）
+    end_ts = None
+    if len(parts) >= 3 and parts[2]:
+        end_ts = _lottery_parse_end(parts[2])
+        if end_ts is None:
+            await update.message.reply_text(
+                "❌ 开奖时间格式不对\n\n支持：<code>90</code>（90秒后）、<code>20:00</code>、"
+                "<code>09-08 20:00</code>、<code>2026-09-08 20:00</code>",
+                parse_mode="HTML"); return
+    duration = max(10, int(end_ts - time.time())) if end_ts else LOTTERY_DEFAULT_DURATION
     lotteries[cid] = {
         "title": title, "prizes": prizes, "fee": int(LOTTERY_FEE),
         "keyword": LOTTERY_KEYWORD, "start_ts": time.time(),
-        "end_ts": time.time() + duration, "msg_id": None,
+        "end_ts": end_ts or (time.time() + duration), "msg_id": None,
         "participants": [], "status": "open", "winners": [],
         "creator": uid, "chat_id": cid,
     }
@@ -5238,8 +5485,9 @@ async def _lottery_try_join(app, lo, uid, cid):
     if time.time() >= lo["end_ts"]:
         return False, "活动已结束"
     balance = game_chips.get(cid, {}).get(uid, 0)
-    if LOTTERY_MIN_BALANCE > 0 and balance < LOTTERY_MIN_BALANCE:
-        return False, f"余额不足 {LOTTERY_MIN_BALANCE}，无法参与"
+    min_bal = int(lo.get("min_bal") or 0) or LOTTERY_MIN_BALANCE  # 活动自带门槛优先，回退全局
+    if min_bal > 0 and balance < min_bal:
+        return False, f"余额不足 {min_bal}，无法参与"
     fee = int(lo.get("fee", 0))
     if fee > 0 and balance < fee:
         return False, f"余额不足（需 {fee}）"
@@ -6329,7 +6577,8 @@ async def _dispatch_alias(cmd, args, update, context):
         await update.message.reply_text("❓ 未知命令，发送 /开始 查看可用命令")
         return
     context.args = args
-    if POINTS_DELETE_SECONDS > 0 and is_group_chat(update):
+    # 抽奖相关消息（参与关键词/开奖命令）不删：参与痕迹与开奖信息都要保留在群里
+    if POINTS_DELETE_SECONDS > 0 and handler is not cmd_lottery and is_group_chat(update):
         schedule_delete(context.application, update.effective_chat.id, update.message, POINTS_DELETE_SECONDS)
     await handler(update, context)
 
@@ -6616,14 +6865,14 @@ def start_health_server():
                     "document.querySelector('.backdrop').classList.toggle('show')\" aria-label='菜单'>☰</button>"
                     f"<div class='logo'>🤖 机器人后台</div>"
                     f"<div class='crumb'>· {html.escape(title)}</div>"
-                    "<div class='right'>阿福积分机器人 v1.0</div>"
+                    "<div class='right'>机器人后台</div>"
                     "</header>"
                     "<div class='backdrop' onclick=\"document.querySelector('.side').classList.remove('open');"
                     "this.classList.remove('show')\"></div>"
                     "<div class='wrap'>"
                     f"<nav class='side'>{''.join(items)}</nav>"
                     f"<main class='main'>{body}</main>{_id_picker_js()}</div>"
-                    "<footer class='ft'>© 2026 机器人后台 · Made with ❤️ for 阿福积分机器人</footer>"
+                    "<footer class='ft'>© 机器人后台</footer>"
                     "</body></html>").encode("utf-8")
 
         def _group_options():
@@ -6695,7 +6944,7 @@ def start_health_server():
                     "<form method='post' action='/login' class='resend'>"
                     f"<input type='hidden' name='resend' value='{html.escape(otp_token)}'>"
                     "<button type='submit'>🔄 重新发送验证码</button></form>"
-                    "<div class='ft'>© 2026 阿福积分机器人 · 二次验证保护</div>"
+                    "<div class='ft'>© 机器人后台 · 二次验证保护</div>"
                     "</div></body></html>").encode("utf-8")
 
         def _admin_receivers():
@@ -6771,11 +7020,11 @@ def start_health_server():
                     "color:#6a6982;text-align:center}"
                     "</style></head><body><div class='login'>"
                     "<h1>🤖 机器人后台</h1>"
-                    "<div class='desc'>阿福积分机器人 · 登录管理</div>" + msg +
+                    "<div class='desc'>管理员登录</div>" + msg +
                     "<form method='post' action='/login'>"
                     "<label>管理密码</label><input type='password' name='password' autofocus required>"
                     "<button type='submit'>登 录</button></form>"
-                    "<div class='ft'>💡 管理员可在 Telegram 发 <b>/后台</b> 获取一键登录链接<br>© 2026 阿福积分机器人</div>"
+                    "<div class='ft'>💡 推荐：Telegram 发 <b>/后台</b>，点链接免密登录（密码为备用通道）<br>© 机器人后台</div>"
                     "</div></body></html>").encode("utf-8")
 
         def _field_rows(gkey):
@@ -7124,19 +7373,52 @@ def start_health_server():
                     body = (f"<h1>{gicon} {sname}</h1>"
                             f"<div class='sub'>在这里创建抽奖 → 机器人自动发到群里 → 群成员发「{html.escape(LOTTERY_KEYWORD)}」参与 → 到点自动开奖</div>"
                             f"{msg}{err}{status_html}"
-                            # 新增抽奖表单
+                            # 新增抽奖表单（照阿福格式：描述/关键词/开奖方式下拉/结构化奖品行）
                             "<div class='card'><h3>➕ 新增抽奖</h3>"
-                            "<form method='post' action='/lottery_create'>"
-                            "<div class='row'><div class='lbl'>发到哪个群</div>"
+                            "<form method='post' action='/lottery_create' id='lottery_form'>"
+                            "<div class='row'><div class='lbl'>发到哪个群 *</div>"
                             f"<select name='cid' required>{_group_options()}</select></div>"
-                            "<div class='row'><div class='lbl'>活动标题</div>"
+                            "<div class='row'><div class='lbl'>抽奖标题 *</div>"
                             "<input type='text' name='title' maxlength='50' required placeholder='例：群友福利'></div>"
                             "<div style='padding:12px 0;border-bottom:1px solid #26273a'>"
-                            "<div class='lbl'>奖品<small>每行一条「名称:数量」，如：100积分:1</small></div>"
-                            "<textarea name='prizes' rows='3' required placeholder='100积分:1&#10;小星星:5'></textarea></div>"
-                            "<div class='row'><div class='lbl'>持续秒数<small>到点自动开奖（10 ~ 3600）</small></div>"
-                            f"<input type='number' name='duration' value='{max(10, int(LOTTERY_DEFAULT_DURATION))}' min='10' max='3600'></div>"
-                            "<button type='submit'>🎉 创建并发布到群</button></form></div>"
+                            "<div class='lbl'>抽奖描述<small>（可选）显示在公告标题下方</small></div>"
+                            "<textarea name='desc' rows='2' placeholder='活动说明、注意事项等（可留空）'></textarea></div>"
+                            "<div class='row'><div class='lbl'>参与关键词 *</div>"
+                            f"<input type='text' name='keyword' maxlength='20' value='{html.escape(LOTTERY_KEYWORD)}' placeholder='群友发这个词参与抽奖'></div>"
+                            "<div class='row'><div class='lbl'>开奖方式 *</div>"
+                            "<select name='mode' id='mode_sel'>"
+                            "<option value='time'>定时开奖</option>"
+                            "<option value='duration'>倒计时开奖</option></select></div>"
+                            "<div class='row' id='row_time'><div class='lbl'>开奖时间 *<small>输入的时间将按北京时间解析执行：20:00 / 09-08 20:00 / 2026-09-08 20:00</small></div>"
+                            "<input type='text' name='endtime' id='endtime' placeholder='例：21:30 或 09-08 20:00'></div>"
+                            "<div class='row' id='row_duration' style='display:none'><div class='lbl'>持续秒数 *<small>到点自动开奖（10 ~ 604800）</small></div>"
+                            f"<input type='number' name='duration' id='duration' value='{max(10, int(LOTTERY_DEFAULT_DURATION))}' min='10'></div>"
+                            "<div style='padding:12px 0;border-bottom:1px solid #26273a'>"
+                            "<div class='lbl'>奖品设置 *</div>"
+                            "<div id='prize_rows'>"
+                            "<div class='row' style='display:flex;gap:10px'>"
+                            "<input type='text' name='prize_name' placeholder='奖品名称 *' required style='flex:2'>"
+                            "<input type='number' name='prize_count' value='1' min='1' placeholder='数量' style='flex:1'></div></div>"
+                            "<button type='button' onclick='add_prize()' style='margin-top:8px;background:#3b3c5c'>➕ 添加奖品</button></div>"
+                            "<div class='row'><div class='lbl'>参与条件（可选）<small>最低持有积分，留空不限制</small></div>"
+                            "<input type='number' name='min_bal' min='0' placeholder='例：500'></div>"
+                            "<button type='submit'>🎉 创建并发布到群</button></form>"
+                            "<script>"
+                            "function add_prize(){"
+                            "var d=document.createElement('div');"
+                            "d.className='row';d.style.cssText='display:flex;gap:10px;margin-top:8px';"
+                            "d.innerHTML=\"<input type='text' name='prize_name' placeholder='奖品名称' style='flex:2'>"
+                            "<input type='number' name='prize_count' value='1' min='1' style='flex:1'>\";"
+                            "document.getElementById('prize_rows').appendChild(d);}"
+                            "document.getElementById('mode_sel').addEventListener('change',function(){"
+                            "var t=this.value==='time';"
+                            "document.getElementById('row_time').style.display=t?'':'none';"
+                            "document.getElementById('row_duration').style.display=t?'none':'';"
+                            "document.getElementById('endtime').required=t;"
+                            "document.getElementById('duration').required=!t;"
+                            "});"
+                            "document.getElementById('mode_sel').dispatchEvent(new Event('change'));"
+                            "</script></div>"
                             # 活动列表
                             "<div class='card'><h3>📋 活动列表（最近 20 条，进行中置顶）</h3>"
                             "<table class='tbl'><tr><th>群</th><th>标题</th><th>状态</th><th>参与</th><th>中奖</th><th>参与费</th><th>开局</th><th>操作</th></tr>"
@@ -7570,31 +7852,24 @@ def start_health_server():
                         _back(err="参数错误"); return
                     return
                 if path == "/lottery_create":
-                    """网页创建抽奖：选群/标题/奖品/时长 → 落库 + bot 发公告到群。"""
+                    """网页创建抽奖（阿福格式）：解析 → 落库 + bot 发公告到群。"""
                     def _lc_back(note="", err=""):
                         q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
                         self._redirect("/page/points/lottery" + q)
                     try: cid = int(form.get("cid", ["0"])[0] or 0)
                     except ValueError: cid = 0
-                    title = (form.get("title", [""])[0] or "").strip()
-                    prizes_raw = (form.get("prizes", [""])[0] or "").strip()
-                    try: duration = int(form.get("duration", ["0"])[0] or 0)
-                    except ValueError: duration = 0
                     if not cid or cid not in (set(AUTHORIZED_GROUPS) | set(game_chips.keys())):
                         _lc_back(err="请选择有效的群"); return
-                    if not title:
-                        _lc_back(err="标题不能为空"); return
                     if _lottery_active(cid):
                         _lc_back(err="该群已有进行中的抽奖，请先取消或等开奖"); return
-                    # textarea 每行一条 → 换行转逗号交给统一解析器
-                    prizes, perr = _lottery_parse_prizes(prizes_raw.replace("\r", "").replace("\n", ","))
-                    if perr:
-                        _lc_back(err=perr); return
-                    duration = max(10, min(3600, duration or LOTTERY_DEFAULT_DURATION))
+                    fields, ferr = _lottery_form_parse(form)
+                    if ferr:
+                        _lc_back(err=ferr); return
                     lotteries[cid] = {
-                        "title": title, "prizes": prizes, "fee": int(LOTTERY_FEE),
-                        "keyword": LOTTERY_KEYWORD, "start_ts": time.time(),
-                        "end_ts": time.time() + duration, "msg_id": None,
+                        "title": fields["title"], "desc": fields["desc"], "prizes": fields["prizes"],
+                        "fee": int(LOTTERY_FEE), "keyword": fields["keyword"],
+                        "min_bal": fields["min_bal"], "start_ts": time.time(),
+                        "end_ts": fields["end_ts"], "msg_id": None,
                         "participants": [], "status": "open", "winners": [],
                         "creator": 0, "chat_id": cid,
                     }
@@ -7609,7 +7884,7 @@ def start_health_server():
                         except Exception as exc:
                             logger.exception("网页创建抽奖：公告发送失败")
                             pub_err = f"（公告发送失败：{type(exc).__name__}，活动已创建，可在群内发 /开奖 触发参与）"
-                    _lc_back(note=f"✅ 抽奖「{title[:20]}」已创建并发到群 {cid}{pub_err}")
+                    _lc_back(note=f"✅ 抽奖「{fields['title'][:20]}」已创建并发到群 {cid}{pub_err}")
                     return
                 if path == "/points_adj":
                     def _back(note="", err=""):
@@ -7732,6 +8007,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^/'), route_command))
     app.add_handler(CallbackQueryHandler(on_button)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))
+    app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_media))  # 自动删除规则中心：媒体类
     app.add_handler(ChatMemberHandler(on_member_event))       # 退群/入群事件（bot 需群管理员）
     app.add_handler(ChatJoinRequestHandler(on_join_request))  # 入群申请事件（群需开「申请加入」）
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)

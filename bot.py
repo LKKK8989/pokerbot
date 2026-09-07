@@ -80,7 +80,12 @@ DATA_BACKUP_FILE, DATA_TEMP_FILE = f"{DATA_FILE}.bak", f"{DATA_FILE}.tmp"
 # ---------- 网页后台：可在线调整的设置 ----------
 # 设置存在独立文件 bot_settings.json，网页保存后立即覆盖内存中的全局常量，无需重启。
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(DATA_FILE)), "bot_settings.json")
-WEB_DEFAULT_PASSWORD = "admin888"  # 首次登录用，登录后请在面板里立即修改
+# 设置快照：与 bot_data.json 同步持久化。
+# 无持久磁盘的平台（Northflank 等）重建容器会清空 bot_settings.json，导致每次重新部署后
+# 网页设置全部回退成代码默认值。把整份设置快照嵌进 bot_data.json 的 _settings 键后，
+# 设置就能跟着数据一起被自动备份 / /restore 恢复，重新部署不再丢设置。
+SETTINGS_SNAPSHOT = {}
+WEB_DEFAULT_PASSWORD = "qwer1234"  # 首次登录用，登录后请在面板里立即修改
 # 左侧菜单分组：(分组键, 显示名, 图标)
 SETTINGS_GROUPS = [
     ("dashboard", "群体总览",   "📊"),
@@ -142,6 +147,7 @@ SETTINGS_FIELDS = [
     ("race_track_length",       "RACE_TRACK_LENGTH",       "赛道长度(格)",              "int",   5,   50,      "race"),
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
+    ("race_notice_delete_seconds", "RACE_NOTICE_DELETE_SECONDS", "赛车倒计时提示自动删除(秒,0=不删)", "int", 0, 3600, "race"),
     ("broadcast_enabled",       "BROADCAST_ENABLED",       "大奖战报自动广播开关",      "bool",  0,   1,       "general"),
     ("broadcast_min_amount",    "BROADCAST_MIN_AMOUNT",    "战报阈值(单局净赢≥此值广播)", "int",  100, 10000000,"general"),
     ("game_starting_chips",     "GAME_STARTING_CHIPS",     "新玩家初始积分(全游戏统一)", "int",  100, 1000000, "general"),
@@ -158,6 +164,7 @@ SETTINGS_FIELDS = [
     ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,重启后生效)", "int", 1, 168,   "schedule"),
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
+    ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板结束后删除(秒,0=不删)", "int", 0, 3600, "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "general"),
@@ -220,6 +227,8 @@ CHAT_DAILY_CAP = 500
 POINTS_DELETE_SECONDS = 30
 REPLY_DELETE_SECONDS = 30   # 查询类命令的 bot 回复自动删除（0=不删）
 SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
+PANEL_DELETE_SECONDS = 300 # 游戏卡片/下注面板：本局结束后自动删除（0=不删）
+RACE_NOTICE_DELETE_SECONDS = 60  # 赛车倒计时提示自动删除（0=不删）
 OBSERVE_ENABLED = 0         # 新成员观察期开关（1=开启：入群未满时长的成员发言即删并禁言到期满）
 OBSERVE_SECONDS = 300       # 观察期时长（秒）
 WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
@@ -285,17 +294,25 @@ ledger = []                                          # 资金流台账 [{"ts","c
 inherit_daily = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # inherit_daily[date][cid][uid] = 当日累计转赠支出
 user_first_seen = {}                                 # uid -> 首次与 bot 互动的时间戳（兑换门槛用）
 backup_msg_ids = []                                  # 自动备份文件消息ID（管理员私聊，轮换只留7份）
+settings_backup_msg_ids = []                         # 设置备份文件消息ID（单独轮换只留7份）
 
 def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=None):
+    payload = {"fields": cfg, "web_password": password,
+               "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or []}
     try:
         tmp = f"{SETTINGS_FILE}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"fields": cfg, "web_password": password,
-                       "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or []},
-                      f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, SETTINGS_FILE)
     except Exception:
         logger.exception("设置文件写盘失败")
+    # 同步进快照：随 bot_data.json 一起落盘与备份，容器重建后可从数据文件还原设置
+    try:
+        SETTINGS_SNAPSHOT.clear()
+        SETTINGS_SNAPSHOT.update(payload)
+        save_data()
+    except Exception:
+        logger.exception("设置快照同步失败")
 
 _DYN_CMD_OWNED = {}  # gname -> 上次注册的动态指令名（改名后移除旧指令）
 
@@ -434,32 +451,63 @@ def apply_settings(cfg: dict):
             applied[key] = vals
     return applied
 
+def _load_settings_payload():
+    """依次尝试：bot_settings.json → bot_data.json 内嵌快照。
+
+    容器重建会清空 bot_settings.json，但 bot_data.json 有自动备份，
+    所以从数据文件的 _settings 键还原，能让重新部署后的设置保持原样。
+    """
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f), "file"
+        except Exception:
+            logger.exception("设置文件读取失败，尝试从数据文件还原")
+    for src in (DATA_FILE, DATA_BACKUP_FILE):
+        if not os.path.exists(src):
+            continue
+        try:
+            with open(src, "r", encoding="utf-8") as f:
+                embedded = json.load(f).get("_settings")
+            if isinstance(embedded, dict) and embedded.get("fields"):
+                logger.warning("设置文件缺失，已从 %s 内嵌快照还原设置", src)
+                return embedded, "data"
+        except Exception:
+            continue
+    return None, ""
+
+
 def load_settings():
-    """启动时读取 bot_settings.json 并套用；无文件则用代码内默认值。"""
+    """启动时读取设置并套用；无设置文件则用数据内嵌快照，仍无则用代码内默认值。"""
     global _web_password
+    payload, origin = _load_settings_payload()
+    if not payload:
+        logger.info("无可用设置（%s 与数据快照均无），全部使用默认配置", SETTINGS_FILE)
+        return
     try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        apply_settings(data.get("fields", {}))
-        pwd = str(data.get("web_password", "")).strip()
+        apply_settings(payload.get("fields", {}))
+        pwd = str(payload.get("web_password", "")).strip()
         if pwd:
             _web_password = pwd
         # 命令管理：别名覆盖层 + Telegram / 菜单
-        ca = data.get("cmd_aliases") or {}
+        ca = payload.get("cmd_aliases") or {}
         if isinstance(ca, dict):
             CMD_ALIAS_OVERRIDES.clear()
             CMD_ALIAS_OVERRIDES.update({str(k): str(v) for k, v in ca.items()})
-        tm = data.get("tg_menu") or []
+        tm = payload.get("tg_menu") or []
         if isinstance(tm, list) and tm:
             cleaned = [list(x) for x in tm if isinstance(x, (list, tuple)) and len(x) == 2]
             if cleaned:
                 TG_MENU.clear(); TG_MENU.extend(cleaned)
         apply_command_aliases()
-        logger.info("设置已从 %s 加载", SETTINGS_FILE)
-    except FileNotFoundError:
-        logger.info("无设置文件（%s），全部使用默认配置", SETTINGS_FILE)
+        SETTINGS_SNAPSHOT.clear(); SETTINGS_SNAPSHOT.update(payload)
+        # 从数据还原的：立刻回写设置文件，保证网页端与后续保存读到一致内容
+        if origin == "data":
+            _write_settings_file(payload.get("fields", {}), _web_password,
+                                 payload.get("cmd_aliases") or {}, payload.get("tg_menu") or [])
+        logger.info("设置已加载（来源：%s）", "设置文件" if origin == "file" else "数据内嵌快照")
     except Exception:
-        logger.exception("设置文件读取失败，使用默认配置")
+        logger.exception("设置套用失败，使用默认配置")
 
 def save_settings(cfg: dict, new_password: str = ""):
     """网页保存入口：套用内存 + 与已有存档合并写盘（分页保存互不覆盖）+ 可选改密码。"""
@@ -721,6 +769,8 @@ def force_save_now():
                 "ledger": ledger[-5000:],
                 "inherit_daily": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in cids.items()} for date, cids in inherit_daily.items()},
                 "user_first_seen": {str(uid): ts for uid, ts in user_first_seen.items()},
+                # 设置快照内嵌进数据：跟着备份/恢复一起走，容器重建后设置不回退
+                "_settings": dict(SETTINGS_SNAPSHOT),
             }
             os.makedirs(os.path.dirname(os.path.abspath(DATA_FILE)), exist_ok=True)
             with open(DATA_TEMP_FILE, "w", encoding="utf-8") as file:
@@ -767,6 +817,14 @@ def load_data():
             logger.warning("主数据文件损坏，已从备份恢复")
         except Exception:
             logger.exception("备份读取失败"); return
+    try:
+        # 设置快照：数据文件里内嵌的网页设置，供 load_settings 在 bot_settings.json 缺失时还原
+        embedded = data.get("_settings")
+        if isinstance(embedded, dict) and embedded.get("fields") and not SETTINGS_SNAPSHOT:
+            SETTINGS_SNAPSHOT.update(embedded)
+            logger.info("已从数据文件读出内嵌设置快照（%s 项）", len(embedded.get("fields", {})))
+    except Exception:
+        logger.exception("内嵌设置快照读取失败")
     try:
         # 兼容旧存档：group_chips 键迁移为统一积分
         restore_nested(game_chips, data.get("game_chips", data.get("group_chips", {})))
@@ -1074,18 +1132,26 @@ async def safe_delete(bot, cid, msg_id):
         except TelegramError: pass
 
 
-def schedule_delete(app, cid, msgs, seconds):
-    """seconds 秒后自动删除 bot 发出的消息（0=不删）。msgs 可为单条 Message 或 Message 列表。
-    用于：查询类回复（REPLY_DELETE_SECONDS）、游戏结算消息（SETTLE_DELETE_SECONDS）。"""
-    if seconds <= 0 or not msgs: return
-    if not isinstance(msgs, (list, tuple)): msgs = [msgs]
-    ids = [m.message_id for m in msgs if m is not None and getattr(m, "message_id", None)]
+def schedule_delete_ids(app, cid, ids, seconds):
+    """延迟删除指定 message_id（用于只有 id、拿不到 Message 对象的场景，如原地编辑的下注面板）。"""
+    if seconds <= 0 or not ids: return
+    if isinstance(ids, int): ids = [ids]
+    ids = [int(i) for i in ids if i]
     if not ids: return
     async def _del_later():
         await asyncio.sleep(seconds)
         for mid in ids: await safe_delete(app.bot, cid, mid)
     try: asyncio.create_task(_del_later())
     except RuntimeError: pass
+
+
+def schedule_delete(app, cid, msgs, seconds):
+    """seconds 秒后自动删除 bot 发出的消息（0=不删）。msgs 可为单条 Message 或 Message 列表。
+    用于：查询类回复（REPLY_DELETE_SECONDS）、游戏结算消息（SETTLE_DELETE_SECONDS）。"""
+    if seconds <= 0 or not msgs: return
+    if not isinstance(msgs, (list, tuple)): msgs = [msgs]
+    ids = [m.message_id for m in msgs if m is not None and getattr(m, "message_id", None)]
+    schedule_delete_ids(app, cid, ids, seconds)
 
 
 def card_str(card):
@@ -1679,6 +1745,8 @@ async def settle_poker(game, app):
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
         if SETTLE_DELETE_SECONDS > 0:
             schedule_delete(app, game.chat_id, delivered, SETTLE_DELETE_SECONDS)
+        # 牌桌卡片此前结算后一直留在群里，结束后延迟清理
+        schedule_delete_ids(app, game.chat_id, game.game_msg_id, PANEL_DELETE_SECONDS)
         # 单赢场景（只剩一人未弃牌）：提供可选亮牌按钮，尊重德州 muck 规则，不强制亮牌
         if len(game.showdown_order) <= 1:
             winner = game.showdown_order[0] if game.showdown_order else None
@@ -1902,7 +1970,9 @@ class HorseRace:
                 for threshold in thresholds:
                     if remain <= threshold and threshold not in self.notified:
                         self.notified.add(threshold)
-                        await safe_send(app.bot, self.chat_id, f"⏰ 赛车还剩 {threshold // 60} 分钟 {threshold % 60} 秒！")
+                        notice = await safe_send(app.bot, self.chat_id, f"⏰ 赛车还剩 {threshold // 60} 分钟 {threshold % 60} 秒！")
+                        # 之前这条提示发出后就一直留在群里，需要自动删除
+                        schedule_delete(app, self.chat_id, notice, RACE_NOTICE_DELETE_SECONDS)
                 
                 if not remain: break
                 
@@ -2076,6 +2146,8 @@ class HorseRace:
                 save_data()
             finally:
                 await safe_delete(app.bot, self.chat_id, self.animation_msg_id)
+                # 下注面板此前全程只做原地编辑、从不删除，会一直堆在群里；结算后延迟清理
+                schedule_delete_ids(app, self.chat_id, self.game_msg_id, PANEL_DELETE_SECONDS)
                 if active_horse_races.get(self.chat_id) is self: active_horse_races.pop(self.chat_id, None)
                 if self.mode == "official":
                     for uid in self.bets: await emergency_if_needed(self.chat_id, uid, app)
@@ -2092,6 +2164,8 @@ class HorseRace:
             save_data()
             if active_horse_races.get(self.chat_id) is self: active_horse_races.pop(self.chat_id, None)
             await safe_edit(app.bot, self.chat_id, self.game_msg_id, notice, reply_markup=None)
+            # 取消/退款后的面板同样只留一小会儿，避免残留占位
+            schedule_delete_ids(app, self.chat_id, self.game_msg_id, PANEL_DELETE_SECONDS)
 
 
 # ---------- 权限与命令 ----------
@@ -3655,6 +3729,8 @@ async def refund_poker(game, app, notice):
         active_poker_games.pop(game.chat_id, None)
     await safe_delete(app.bot, game.chat_id, game.action_msg_id)
     await safe_edit(app.bot, game.chat_id, game.game_msg_id, notice, reply_markup=None)
+    # 解散提示牌桌也延迟清理，避免一堆「已解散」卡片堆在群里
+    schedule_delete_ids(app, game.chat_id, game.game_msg_id, PANEL_DELETE_SECONDS)
     save_data()
 
 
@@ -5398,8 +5474,19 @@ async def cmd_backup(update, context):
                 chat_id=uid,
                 document=f,
                 filename=f"bot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                caption="📦 数据备份完成",
+                caption="📦 数据备份完成（此文件内含网页设置快照，恢复数据即恢复设置）",
             )
+        # 同时发一份纯设置备份，便于「只恢复设置、保留现有数据」
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=uid, document=f,
+                        filename=f"bot_settings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        caption="⚙️ 网页设置备份（只需恢复设置：回复此文件发 /restore）",
+                    )
+            except Exception:
+                logger.exception("设置备份发送失败")
         # 在群里发的命令时，提示一下文件已发到私聊
         if update.effective_chat.id != uid:
             await update.message.reply_text("✅ 备份文件已发送到你的私聊")
@@ -5428,6 +5515,30 @@ async def cmd_restore(update, context):
             data = json.load(f)
         if not isinstance(data, dict):
             raise ValueError("备份文件格式错误：不是字典")
+        # 设置备份文件（顶层是 fields/web_password，没有 game_chips）→ 只恢复设置，不动积分数据
+        if "fields" in data and "game_chips" not in data:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            try:
+                _write_settings_file(data.get("fields", {}),
+                                     data.get("web_password") or globals().get("_web_password", ""),
+                                     data.get("cmd_aliases") or {}, data.get("tg_menu") or [])
+                load_settings()
+                await asyncio.to_thread(force_save_now)
+                await update.message.reply_text("\n".join([
+                    "✅ 网页设置恢复成功，已立即生效",
+                    "━━━━━━━━━━━━━━━",
+                    f"⚙️ 恢复设置项：{len(data.get('fields', {}))} 项",
+                    "",
+                    "本次只恢复设置，积分与数据未改动。",
+                ]))
+                logger.warning("管理员 %s 恢复了网页设置", uid)
+            except Exception:
+                logger.exception("设置恢复失败")
+                await update.message.reply_text("⚠️ 设置恢复失败，文件可能已损坏")
+            return
         # 验证通过：先阻止后台保存线程用旧数据覆盖新文件
         data_dirty = False
         if save_event is not None:
@@ -5440,6 +5551,28 @@ async def cmd_restore(update, context):
         # 原实现 os._exit(1) 等平台重启后重新加载，但重启若重建容器，刚写入的文件会被清空 → 恢复失效。
         load_data()
         data_dirty = False
+        # 一并还原网页设置：备份里内嵌了设置快照，恢复数据即恢复设置，
+        # 避免重新部署后网页设置回退成代码默认值。
+        try:
+            embedded = data.get("_settings")
+            if isinstance(embedded, dict) and embedded.get("fields"):
+                SETTINGS_SNAPSHOT.clear(); SETTINGS_SNAPSHOT.update(embedded)
+                apply_settings(embedded.get("fields", {}))
+                ca = embedded.get("cmd_aliases") or {}
+                if isinstance(ca, dict):
+                    CMD_ALIAS_OVERRIDES.clear()
+                    CMD_ALIAS_OVERRIDES.update({str(k): str(v) for k, v in ca.items()})
+                tm = embedded.get("tg_menu") or []
+                if isinstance(tm, list) and tm:
+                    TG_MENU.clear()
+                    TG_MENU.extend([list(x) for x in tm if isinstance(x, (list, tuple)) and len(x) == 2])
+                apply_command_aliases()
+                _write_settings_file(embedded.get("fields", {}),
+                                     embedded.get("web_password") or globals().get("_web_password", ""),
+                                     embedded.get("cmd_aliases") or {}, embedded.get("tg_menu") or [])
+                logger.warning("数据恢复：已一并还原网页设置（%s 项）", len(embedded.get("fields", {})))
+        except Exception:
+            logger.exception("数据恢复：设置还原失败")
         # 恢复摘要：一眼确认恢复成没成功，不用再翻 /列表
         try:
             all_players = {u for users in list(game_chips.values()) for u in users}
@@ -5511,6 +5644,20 @@ async def post_init(app):
         await app.bot.set_my_commands(menu)
     except Exception:
         logger.warning("注册命令菜单失败（不影响主功能）")
+    # 全新部署检测：容器重建会清空 bot_settings.json，数据里也没有快照时，
+    # 主动私聊提醒管理员恢复设置，避免「设置莫名回退成默认值」却没人知道。
+    try:
+        if not SETTINGS_SNAPSHOT:
+            await app.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text="⚠️ 检测到全新部署：网页后台的设置已回退为代码默认值。\n\n"
+                     "恢复方法（二选一）：\n"
+                     "1️⃣ 回复最近一份「⚙️ 网页设置备份」文件 → 发送 /restore\n"
+                     "2️⃣ 回复「🤖 每日自动备份」数据文件 → 发送 /restore（设置已内嵌在数据里）\n\n"
+                     "要重新配置的话，忽略本条即可。",
+            )
+    except Exception:
+        logger.warning("全新部署提醒发送失败（不影响运行）")
 
 
 async def post_shutdown(app):
@@ -5876,7 +6023,6 @@ def start_health_server():
                     "<form method='post' action='/login'>"
                     "<label>管理密码</label><input type='password' name='password' autofocus>"
                     "<button type='submit'>登 录</button></form>"
-                    "<div class='tip'>初始密码 admin888，登录后请立即在「安全」页修改。</div>"
                     "</div></body></html>").encode("utf-8")
 
         def _field_rows(gkey):
@@ -6534,6 +6680,22 @@ async def auto_backup(context):
                 old = backup_msg_ids.pop(0)
                 try: await context.bot.delete_message(chat_id=ADMIN_USER_ID, message_id=old)
                 except Exception: pass  # 消息可能已被手动删除，忽略
+        # 设置单独备份：只要设置、不要数据时（例如重新部署想全新开局但保留配置），
+        # 回复这份文件发 /restore 即可，无需连带恢复积分数据。
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "rb") as f:
+                sent_cfg = await context.bot.send_document(
+                    chat_id=ADMIN_USER_ID,
+                    document=f,
+                    filename=f"bot_settings_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                    caption="⚙️ 网页设置备份（只需恢复设置：回复此文件发 /restore）",
+                )
+            if sent_cfg:
+                settings_backup_msg_ids.append(sent_cfg.message_id)
+                while len(settings_backup_msg_ids) > 7:
+                    old = settings_backup_msg_ids.pop(0)
+                    try: await context.bot.delete_message(chat_id=ADMIN_USER_ID, message_id=old)
+                    except Exception: pass
         logger.info("自动备份完成")
     except Exception:
         logger.exception("自动备份失败")

@@ -119,6 +119,7 @@ SUBPAGES = {
         ("god",       "赌神称号"),
         ("seasonpts", "排位分调整"),
         ("orders",    "商城订单"),
+        ("fundflow",  "资金流审查"),
     ],
 }
 SETTINGS_FIELDS = [
@@ -141,6 +142,8 @@ SETTINGS_FIELDS = [
     ("race_track_length",       "RACE_TRACK_LENGTH",       "赛道长度(格)",              "int",   5,   50,      "race"),
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
+    ("broadcast_enabled",       "BROADCAST_ENABLED",       "大奖战报自动广播开关",      "bool",  0,   1,       "general"),
+    ("broadcast_min_amount",    "BROADCAST_MIN_AMOUNT",    "战报阈值(单局净赢≥此值广播)", "int",  100, 10000000,"general"),
     ("game_starting_chips",     "GAME_STARTING_CHIPS",     "新玩家初始积分(全游戏统一)", "int",  100, 1000000, "general"),
     ("small_blind",             "SMALL_BLIND",             "德州小盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
     ("big_blind",               "BIG_BLIND",               "德州大盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
@@ -150,7 +153,10 @@ SETTINGS_FIELDS = [
     ("daily_reset_time",        "DAILY_RESET_TIME",        "每日重置时间(时:分,排位分重置等)", "short", 0, 0, "schedule"),
     ("leaderboard_time",        "LEADERBOARD_TIME",        "德州日榜推送时间(时:分)",   "short", 0, 0,      "schedule"),
     ("race_hourly_minute",      "RACE_HOURLY_MINUTE",      "赛车每小时自动开赛(第几分钟)", "int", 0, 59,    "schedule"),
+    ("race_hourly_start",       "RACE_HOURLY_START",       "自动开赛时段-从几点(含)",   "int",   0,   23,      "schedule"),
+    ("race_hourly_end",         "RACE_HOURLY_END",         "自动开赛时段-到几点(含)",   "int",   0,   23,      "schedule"),
     ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,重启后生效)", "int", 1, 168,   "schedule"),
+    ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
@@ -187,7 +193,11 @@ SETTINGS_FIELDS = [
     ("redpacket_enabled",       "REDPACKET_ENABLED",       "积分红包开关",              "bool",  0,   1,       "points/rp"),
     ("point_levels",            "POINT_LEVELS",            "积分等级表(每行 等级名:最低积分)", "levels", 0, 0,  "points/level"),
     ("mall_items",              "MALL_ITEMS",              "商城商品表(每行 商品名:价格)", "items", 0, 0,      "points/mall"),
+    ("mall_min_age_days",       "MALL_MIN_AGE_DAYS",       "兑换门槛-使用满N天(0=不限,防小号)", "int", 0, 365, "points/mall"),
+    ("mall_min_active_days",    "MALL_MIN_ACTIVE_DAYS",    "兑换门槛-游戏活跃天数≥N(0=不限)", "int", 0, 365,   "points/mall"),
     ("inherit_enabled",         "INHERIT_ENABLED",         "积分转赠(继承)开关",        "bool",  0,   1,       "points/inherit"),
+    ("inherit_daily_limit",     "INHERIT_DAILY_LIMIT",     "每日转赠上限(0=不限,防小号)", "int",  0,   1000000, "points/inherit"),
+    ("fund_flow_alert",         "FUND_FLOW_ALERT",         "资金流标红阈值(单对单向累计)", "int",  100, 10000000,"admin/fundflow"),
     ("inherit_fee_percent",     "INHERIT_FEE_PERCENT",     "转赠手续费(%,0=无)",        "int",   0,   50,      "points/inherit"),
     ("auction_enabled",         "AUCTION_ENABLED",         "积分拍卖开关",              "bool",  0,   1,       "points/auction"),
     ("auction_step",            "AUCTION_STEP",            "每次加价幅度(积分)",        "int",   10,  100000,  "points/auction"),
@@ -268,6 +278,13 @@ member_joined_at = defaultdict(lambda: defaultdict(float))  # member_joined_at[c
 _bot_app = None   # 运行中的 Application（网页后台跨线程调 bot API 用，post_init 里赋值）
 _bot_loop = None  # bot 主事件循环
 admin_logs = []                                      # [{"ts","cid","admin","action","target"}] 管理员操作记录(留300)
+
+# ---------- 防小号资金监管 ----------
+BOT_BOOT_TS = time.time()                            # 进程启动时间（/status 运行时长用）
+ledger = []                                          # 资金流台账 [{"ts","cid","frm","to","amt","typ"}] 红包领取/转赠逐笔(留5000)
+inherit_daily = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # inherit_daily[date][cid][uid] = 当日累计转赠支出
+user_first_seen = {}                                 # uid -> 首次与 bot 互动的时间戳（兑换门槛用）
+backup_msg_ids = []                                  # 自动备份文件消息ID（管理员私聊，轮换只留7份）
 
 def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=None):
     try:
@@ -701,6 +718,9 @@ def force_save_now():
                 "leave_records": {str(cid): v[-100:] for cid, v in leave_records.items()},
                 "join_requests": {str(cid): v[-100:] for cid, v in join_requests.items()},
                 "admin_logs": admin_logs[-300:],
+                "ledger": ledger[-5000:],
+                "inherit_daily": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in cids.items()} for date, cids in inherit_daily.items()},
+                "user_first_seen": {str(uid): ts for uid, ts in user_first_seen.items()},
             }
             os.makedirs(os.path.dirname(os.path.abspath(DATA_FILE)), exist_ok=True)
             with open(DATA_TEMP_FILE, "w", encoding="utf-8") as file:
@@ -833,6 +853,15 @@ def load_data():
         for cid, v in data.get("join_requests", {}).items():
             join_requests[int(cid)] = list(v)[-100:]
         admin_logs.extend(data.get("admin_logs", [])[-300:])
+        ledger.clear(); ledger.extend(data.get("ledger", [])[-5000:])
+        for date, cids in data.get("inherit_daily", {}).items():
+            for cid, users in cids.items():
+                for uid, v in users.items():
+                    try: inherit_daily[str(date)][int(cid)][int(uid)] = int(v)
+                    except (ValueError, TypeError): continue
+        for uid, ts in data.get("user_first_seen", {}).items():
+            try: user_first_seen[int(uid)] = float(ts)
+            except (ValueError, TypeError): continue
         AUTHORIZED_GROUPS.update(int(cid) for cid in data.get("authorized_groups", []))
         BOT_ADMINS.clear(); BOT_ADMINS.update(ADMIN_USER_IDS)
         BOT_ADMINS.update(int(x) for x in data.get("bot_admins", []))
@@ -1071,6 +1100,27 @@ async def action_notice(cid, app, uid, desc):
         async def delete_later():
             await asyncio.sleep(10); await safe_delete(app.bot, cid, message.message_id)
         asyncio.create_task(delete_later())
+
+
+def ledger_add(cid, frm, to, amt, typ):
+    """资金流台账：红包领取/转赠等人对人转移逐笔记账（防小号审查用，留 5000 条）。"""
+    ledger.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "frm": frm, "to": to, "amt": amt, "typ": typ})
+    if len(ledger) > 5000: del ledger[:len(ledger) - 5000]
+
+
+async def broadcast_big_win(app, cid, uid, game_name, net, detail=""):
+    """大奖战报：单局净赢超阈值时推送到其他授权群（排除事发群），制造全群气氛。"""
+    try:
+        if not BROADCAST_ENABLED or net < max(1, BROADCAST_MIN_AMOUNT): return
+        if cid not in AUTHORIZED_GROUPS: return
+        name = await get_name(app, uid, cid=cid)
+        extra = f"\n{detail}" if detail else ""
+        text = (f"📣 <b>战报快讯</b>\n{game_name}｜{html.escape(name)} 单局豪赢 <b>{net}</b> 积分{extra}")
+        for g in AUTHORIZED_GROUPS:
+            if g == cid: continue
+            await safe_send(app.bot, g, text, parse_mode="HTML")
+    except Exception:
+        logger.exception("大奖战报广播失败（不影响结算）")
 
 
 async def emergency_if_needed(cid, uid, app, wallet=None, poker=None):
@@ -1590,6 +1640,14 @@ async def settle_poker(game, app):
                 poker_profit_by_date[date][game.chat_id][uid] += net
             lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
 
+        # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（排位赛不播）
+        if game.mode == "official" and not game.season:
+            top_uid, top_net = None, 0
+            for uid in game.players:
+                _n = game.chips[uid] - game.initial_chips[uid]
+                if _n > top_net: top_uid, top_net = uid, _n
+            if top_uid: await broadcast_big_win(app, game.chat_id, top_uid, "🃏 德州扑克", top_net)
+
         # 排位赛：累计局数 + 破产应急补分（已取消淘汰；赛季已结束的进行中牌局只正常派奖、不计入、不误判破产）
         if game.season and season_active:
             for p in game.players:
@@ -1961,6 +2019,12 @@ class HorseRace:
                     wallet[self.chat_id][uid] += payout; total_payout += payout
                 payouts_applied = True
 
+                # 大奖战报：押中独赢且净赢超阈值 → 广播其他授权群
+                best = max(settlements, key=lambda s: s[5])
+                if best[5] > 0:
+                    detail = f"🐴 押中 {HORSE_EMOJI[winner]}{HORSE_NAMES[winner]}（赔率 {best[6]:.1f}）"
+                    await broadcast_big_win(app, self.chat_id, best[0], "🏎️ 赛车大赛", best[5], detail)
+
                 available_pool = self.jackpot + self.pool
                 supplement = max(0, total_payout - available_pool)
                 if self.mode == "official":
@@ -2036,6 +2100,9 @@ def is_bot_admin(uid): return uid in BOT_ADMINS
 async def need_auth(update):
     # 授权只针对「群聊」：私聊没有群组概念，不应被「群组未授权」拦截。
     # 私聊里真正受限的游戏/管理命令，各自还有 require_group_chat / is_bot_admin 兜底。
+    _u = update.effective_user
+    if _u and _u.id and _u.id not in user_first_seen:
+        user_first_seen[_u.id] = time.time()  # 首次互动时间（商城兑换门槛用）
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
         if not is_auth(chat.id):
@@ -2224,6 +2291,11 @@ async def update_blackjack_ui(game, app):
             payouts_done = True
             save_data(); await asyncio.to_thread(force_save_now)
 
+            # 大奖战报：官方模式玩家净赢超阈值 → 广播其他授权群
+            if game.mode == "official" and payout_plan:
+                best = max(payout_plan, key=lambda x: x[2])
+                if best[2] > 0: await broadcast_big_win(app, game.chat_id, best[0], "♠️ 21点", best[2])
+
             # 记录庄家历史 (仅记录本局主要趋势)
             if game.mode == "official":
                 # 计算本局玩家总体输赢，用于生成庄家路书图标
@@ -2372,6 +2444,15 @@ JINHUA_SEEN_DOUBLE = 0   # 炸金花看牌者投注加倍开关（1=经典规则
 DAILY_RESET_TIME = "00:00"   # 每日重置时刻（排位分重置、德州日榜翻日等）
 LEADERBOARD_TIME = "23:50"   # 德州当日榜定时推送时刻
 RACE_HOURLY_MINUTE = 0       # 赛车每小时自动开赛：整点后第几分钟
+RACE_HOURLY_START = 0        # 自动开赛时段-起始点(几点,含)，如 9 = 9点起才开赛
+ADMIN_REPORT_TIME = "09:00"  # 经营日报推送时刻（私聊管理员）
+RACE_HOURLY_END = 23         # 自动开赛时段-结束点(几点,含)，如 22 = 22点那场仍开；起始>结束=全天不开
+INHERIT_DAILY_LIMIT = 0      # 每人每日转赠总额上限（0=不限，防小号互刷）
+MALL_MIN_AGE_DAYS = 0        # 商城兑换门槛：与机器人首次互动满 N 天（0=不限）
+MALL_MIN_ACTIVE_DAYS = 0     # 商城兑换门槛：有游戏盈亏记录的天数 ≥N（0=不限）
+FUND_FLOW_ALERT = 10000      # 资金流审查页：单对单向累计超过此值标红
+BROADCAST_ENABLED = 1        # 大奖战报自动广播开关（推送到其他授权群，制造气氛）
+BROADCAST_MIN_AMOUNT = 20000 # 战报阈值：单局净赢 ≥ 此值才广播
 BACKUP_INTERVAL_HOURS = 24   # 自动备份间隔（小时），启动时读取
 JINHUA_HAND_NAMES = {5: "豹子", 4: "同花顺", 3: "金花", 2: "顺子", 1: "对子", 0: "散牌"}
 
@@ -2893,6 +2974,16 @@ async def settle_jinhua(game, app):
             if game.mode == "official":
                 jinhua_profit_by_date[date][game.chat_id][uid] += net
             lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
+        # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（豹子特别标注）
+        if game.mode == "official":
+            top_uid, top_net = None, 0
+            for uid in game.players:
+                _n = game.chips[uid] - game.initial_chips[uid]
+                if _n > top_net: top_uid, top_net = uid, _n
+            if top_uid and top_net > 0:
+                _ht = str(hand_types.get(top_uid, ""))
+                detail = f"🃏 牌型：{_ht}{' 🔥豹子！' if '豹子' in _ht else ''}"
+                await broadcast_big_win(app, game.chat_id, top_uid, "♣️ 炸金花", top_net, detail)
         if getattr(game, "penalty_log", []):
             lines.extend(["", "比牌惩罚："])
             for payer, payee, amount in game.penalty_log:
@@ -4534,6 +4625,18 @@ async def cmd_mall_buy(update, context):
         await update.message.reply_text("❌ 没有这个商品，用「积分商城」查看列表。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     price = item["value"]
+    if MALL_MIN_AGE_DAYS > 0:  # 兑换门槛1：与 bot 首次互动满 N 天（小号没有历史）
+        seen = user_first_seen.get(uid)
+        days = (now_bj().timestamp() - seen) / 86400 if seen else 0.0
+        if days < MALL_MIN_AGE_DAYS:
+            await update.message.reply_text(f"❌ 兑换门槛：使用满 {MALL_MIN_AGE_DAYS} 天才能兑换（当前 {days:.0f} 天）。"); return
+    if MALL_MIN_ACTIVE_DAYS > 0:  # 兑换门槛2：有游戏盈亏记录的天数 ≥N
+        active_days = set()
+        for prof in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date):
+            for d, chats in prof.items():
+                if uid in (chats.get(cid) or {}): active_days.add(d)
+        if len(active_days) < MALL_MIN_ACTIVE_DAYS:
+            await update.message.reply_text(f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"); return
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
             await update.message.reply_text(f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"); return
@@ -4550,30 +4653,101 @@ async def cmd_mall_buy(update, context):
     except Exception:
         logger.exception("商城订单通知管理员失败")
 
+async def cmd_record(update, context):
+    """个人战绩：本群四游戏累计盈亏汇总。用法：战绩 / 回复成员消息发「战绩」/「战绩 用户ID」。"""
+    if not await need_auth(update): return
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 战绩请在群聊中查看。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    args = context.args or []
+    reply = update.message.reply_to_message
+    if reply is not None and reply.from_user and not reply.from_user.is_bot:
+        target = reply.from_user.id
+    elif args and args[0].lstrip("-").isdigit():
+        target = int(args[0])
+    else:
+        target = uid
+    per, days = {}, set()
+    for label, prof in (("🃏 德州", poker_profit_by_date), ("🏎️ 赛车", race_profit_by_date),
+                        ("♠️ 21点", blackjack_profit_by_date), ("♣️ 炸金花", jinhua_profit_by_date)):
+        total = 0
+        for d, chats in prof.items():
+            v = (chats.get(cid) or {}).get(target)
+            if v: total += v; days.add(d)
+        per[label] = total
+    balance = game_chips[cid].get(target, 0)
+    name = await get_name(context.application, target, cid=cid)
+    lines = [f"📊 {name} 的战绩（本群）", "━━━━━━━━━━━━"]
+    for label, total in per.items():
+        lines.append(f"{label}：{total:+d}")
+    lines.append("━━━━━━━━━━━━")
+    lines.append(f"💰 累计：{sum(per.values()):+d}")
+    lines.append(f"📅 活跃 {len(days)} 天｜💳 当前余额 {balance}")
+    reply_msg = await update.message.reply_text("\n".join(lines))
+    schedule_delete(context.application, cid, reply_msg, REPLY_DELETE_SECONDS)
+
+
+async def cmd_status(update, context):
+    """机器人自检（管理员）：运行时长/各游戏活跃局/台账/数据文件/调度任务。"""
+    if not is_bot_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅机器人管理员可用。"); return
+    uptime = int(time.time() - BOT_BOOT_TS)
+    uptime_txt = f"{uptime // 86400}天{uptime % 86400 // 3600}小时{uptime % 3600 // 60}分"
+    try: dsz = f"{os.path.getsize(DATA_FILE) / 1024:.0f} KB"
+    except OSError: dsz = "无"
+    lines = [
+        "🩺 机器人自检", "━━━━━━━━━━━━",
+        f"⏱ 运行时长：{uptime_txt}",
+        f"🃏 德州进行中：{len(active_poker_games)} 局",
+        f"♠️ 21点进行中：{len(active_blackjack_games)} 局",
+        f"♣️ 炸金花进行中：{len(active_jinhua_games)} 局",
+        f"🏎️ 赛车进行中：{len(active_horse_races)} 场",
+        f"🧧 未结算红包：{len(rp_packets)} 个",
+        f"📒 资金流台账：{len(ledger)} 条",
+        f"💾 数据文件：{dsz}｜后台任务：{len(background_tasks)} 个",
+    ]
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_redpacket(update, context):
     if not await need_auth(update): return
     if not REDPACKET_ENABLED:
         await update.message.reply_text("ℹ️ 红包功能未开启。"); return
     if not is_group_chat(update):
         await update.message.reply_text("⚠️ 红包请在群聊中发。"); return
+    cid = update.effective_chat.id
+
+    async def _reply(text):  # 机器人提示语也按后台设置自动删除
+        reply = await update.message.reply_text(text)
+        schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
+
     args = context.args
+    reply_to = update.message.reply_to_message
+    target = 0  # 0=人人可抢；>0=专属红包仅 TA 可抢
+    if reply_to is not None and reply_to.from_user and not reply_to.from_user.is_bot:
+        target = reply_to.from_user.id
+    elif len(args) >= 3 and args[2].lstrip("-").isdigit():
+        target = int(args[2])
     if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
-        await update.message.reply_text("用法：红包 总积分 份数（如：红包 1000 5）"); return
+        await _reply("用法：红包 总积分 份数（如：红包 1000 5）\n🎁 专属红包：回复某人消息发同样命令，或「红包 1000 5 用户ID」，仅 TA 能抢"); return
     total, count = int(args[0]), int(args[1])
-    if not (1 <= total <= 1000000 and 1 <= count <= 100 and count <= total):
-        await update.message.reply_text("❌ 总积分 1~100 万，份数 1~100 且不超过总积分。"); return
-    cid, uid = update.effective_chat.id, update.effective_user.id
+    if not (1 <= total <= 1000000 and 2 <= count <= 100 and count <= total):
+        await _reply("❌ 份数至少 2 份（防小号互刷），总积分 1~100 万且份数不超过总积分。"); return
+    uid = update.effective_user.id
+    if target == uid:
+        await _reply("❌ 专属红包不能指定自己。"); return
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < total:
-            await update.message.reply_text(f"❌ 积分不足：需要 {total}，当前 {game_chips[cid][uid]}。"); return
+            await _reply(f"❌ 积分不足：需要 {total}，当前 {game_chips[cid][uid]}。"); return
         game_chips[cid][uid] -= total
         pid = secrets.token_urlsafe(8)
         rp_packets[pid] = {"cid": cid, "from": uid, "left_amt": total, "left_n": count,
-                           "grabbed": {}, "ts": now_bj().timestamp(), "msg_id": None}
+                           "grabbed": {}, "ts": now_bj().timestamp(), "msg_id": None, "target": target}
         save_data()
     await action_notice(cid, context.application, uid, f"发出了 {total} 积分 / {count} 份红包")
+    who = f"\n🎯 仅 {await get_name(context.application, target, cid=cid)} 可抢" if target else ""
     msg = await safe_send(context.bot, cid,
-        f"🧧 {await get_name(context.application, uid)} 的积分红包\n💰 {total} 积分 × {count} 份\n点击下方按钮抢！",
+        f"🧧 {await get_name(context.application, uid)} 的积分红包\n💰 {total} 积分 × {count} 份{who}\n点击下方按钮抢！",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧧 抢红包", callback_data=f"rp_grab_{pid}")]]))
     if msg:
         rp_packets[pid]["msg_id"] = msg.message_id
@@ -4592,6 +4766,9 @@ async def _rp_grab(p, pid, uid, context, q):
         return
     if uid in p["grabbed"]:
         await q.answer(f"你已经抢过 {p['grabbed'][uid]} 积分啦", show_alert=True); return
+    tgt = p.get("target") or 0  # 旧数据无 target 键按普通红包处理
+    if tgt and uid != tgt:
+        await q.answer(f"这是专属红包，只有 {await get_name(context.application, tgt, cid=cid)} 能抢", show_alert=True); return
     if p["left_n"] <= 0:
         await q.answer("手慢了，红包已被抢完", show_alert=True); return
     if p["left_n"] == 1:
@@ -4602,6 +4779,7 @@ async def _rp_grab(p, pid, uid, context, q):
         p["grabbed"][uid] = amt
         p["left_amt"] -= amt; p["left_n"] -= 1
         game_chips[cid][uid] += amt
+        ledger_add(cid, p["from"], uid, amt, "红包")  # 资金流台账：发包人→领取人
         save_data()
     await q.answer(f"🧧 抢到 {amt} 积分！")
     total, count = sum(p["grabbed"].values()), len(p["grabbed"])
@@ -4643,11 +4821,19 @@ async def cmd_inherit(update, context):
         await update.message.reply_text("⚠️ 转赠双方有正在进行的游戏，请先结束。"); return
     fee = amount * INHERIT_FEE_PERCENT // 100
     recv = amount - fee
+    if INHERIT_DAILY_LIMIT > 0:  # 每日转赠总额上限（防小号互刷）
+        today = now_bj().strftime("%Y-%m-%d")
+        used = inherit_daily[today][cid].get(uid, 0)
+        if used + amount > INHERIT_DAILY_LIMIT:
+            await update.message.reply_text(f"❌ 超出每日转赠上限：今日已转出 {used}，上限 {INHERIT_DAILY_LIMIT}（网页「积分继承」可调）。"); return
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < amount:
             await update.message.reply_text(f"❌ 你的积分不足：需要 {amount}，当前 {game_chips[cid][uid]}。"); return
         game_chips[cid][uid] -= amount
         game_chips[cid][target] += recv
+        if INHERIT_DAILY_LIMIT > 0:
+            inherit_daily[now_bj().strftime("%Y-%m-%d")][cid][uid] += amount
+        ledger_add(cid, uid, target, amount, "转赠")  # 资金流台账
         save_data()
     fee_txt = f"（手续费 {fee}）" if fee else ""
     await update.message.reply_text(
@@ -5106,12 +5292,75 @@ async def leaderboard_scheduler(app):
         except Exception:
             logger.exception("leaderboard_scheduler 本轮异常（已吞并继续，下个周期重试）")
 
+async def build_daily_report_text(app, yesterday):
+    """经营日报内容拼装（昨日四游戏人次/总流水/盈亏TOP/异常警示/富豪榜）。"""
+    games = (("🃏德州", poker_profit_by_date), ("🏎️赛车", race_profit_by_date),
+             ("♠️21点", blackjack_profit_by_date), ("♣️炸金花", jinhua_profit_by_date))
+    total_flow, net_map, parts = 0, defaultdict(int), []
+    for label, prof in games:
+        day = prof.get(yesterday, {})
+        cnt = sum(1 for chats in day.values() for v in chats.values() if v)
+        parts.append(f"{label}{cnt}人次")
+        for chats in day.values():
+            for uid, v in chats.items(): total_flow += abs(v); net_map[uid] += v
+    lines = [f"📊 经营日报（{yesterday}）", "━━━━━━━━━━━━"]
+    lines.append("🎮 " + ("｜".join(parts) if total_flow else "昨日无对局"))
+    lines.append(f"💰 总流水 {total_flow}")
+    winners = sorted(net_map.items(), key=lambda x: -x[1])
+    losers = sorted(net_map.items(), key=lambda x: x[1])
+    win_parts = []
+    for u, v in winners[:3]:
+        if v > 0: win_parts.append(f"{await get_name(app, u, with_title=False)} +{v}")
+    if win_parts:
+        lines.append("🏆 昨日净赢 TOP3：" + "｜".join(win_parts))
+    lose_parts = []
+    for u, v in losers[:3]:
+        if v < 0: lose_parts.append(f"{await get_name(app, u, with_title=False)} {v}")
+    if lose_parts:
+        lines.append("💸 昨日净亏 TOP3：" + "｜".join(lose_parts))
+    alerts = [(u, v) for u, v in winners if v >= max(5000, total_flow * 0.2)]
+    if alerts:
+        lines.append("🚨 异常警示（单人大额集中赢钱，注意小号对刷）：")
+        for u, v in alerts[:3]:
+            lines.append(f"　{await get_name(app, u, with_title=False)} 净赢 +{v}（占流水 {v * 100 // max(1, total_flow)}%）")
+    lines.append("👑 当前富豪榜：")
+    for cid in sorted(AUTHORIZED_GROUPS):
+        chips = game_chips.get(cid, {})
+        if not chips: continue
+        gname = chat_name_cache.get(cid) or str(cid)
+        top_parts = []
+        for u, v in sorted(chips.items(), key=lambda x: -x[1])[:3]:
+            top_parts.append(f"{await get_name(app, u, cid=cid, with_title=False)} {v}")
+        lines.append(f"　[{gname}] " + "｜".join(top_parts))
+    return "\n".join(lines)
+
+
+async def admin_report_scheduler(app):
+    """经营日报：每天定时把昨日经营数据私聊推送管理员（时间网页可配，改完即时生效）。"""
+    sent_date = None
+    while True:
+        now = now_bj()
+        rh, rm = parse_hm(ADMIN_REPORT_TIME, 9, 0)
+        target = now.replace(hour=rh, minute=rm, second=0, microsecond=0)
+        if target <= now: target += timedelta(days=1)
+        await asyncio.sleep(max(1, (target - now).total_seconds()))
+        try:
+            yesterday = (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")
+            if sent_date == yesterday: continue
+            sent_date = yesterday
+            text = await build_daily_report_text(app, yesterday)
+            await safe_send_long(app.bot, ADMIN_USER_ID, text)
+        except Exception:
+            logger.exception("admin_report_scheduler 本轮异常（已吞并继续）")
+
 async def hourly_race_scheduler(app):
     last_key = None
     while True:
         try:
             now = now_bj(); key = now.strftime("%Y%m%d%H")
-            if now.minute == max(0, min(59, RACE_HOURLY_MINUTE)) and key != last_key:  # 开赛分钟数网页可配
+            if (now.minute == max(0, min(59, RACE_HOURLY_MINUTE))
+                    and max(0, min(23, RACE_HOURLY_START)) <= now.hour <= max(0, min(23, RACE_HOURLY_END))
+                    and key != last_key):  # 开赛分钟/时段均网页可配；起始>结束=全天不开
                 last_key = key
                 for cid, enabled in list(hourly_race_enabled.items()):
                     if not enabled or cid in active_horse_races: continue
@@ -5234,6 +5483,7 @@ DEFAULT_TG_MENU = [
     ("mytitles", "查看我的称号"), ("equip", "佩戴称号"), ("seasonpoints", "加减排位分(管理员)"),
     ("ban", "拉黑玩家(管理员)"), ("unban", "解封玩家(管理员)"), ("banlist", "查看黑名单(管理员)"),
     ("list", "管理总览(管理员/群/黑名单)"),
+    ("record", "个人战绩"), ("status", "机器人自检(管理员)"),
 ]
 TG_MENU = [list(t) for t in DEFAULT_TG_MENU]
 
@@ -5241,10 +5491,11 @@ async def post_init(app):
     global _bot_app, _bot_loop
     _bot_app, _bot_loop = app, asyncio.get_running_loop()  # 供网页后台跨线程调用 bot API（入群批准/拒绝等）
     background_tasks.update({
-        asyncio.create_task(daily_reset_scheduler(app)), 
-        asyncio.create_task(leaderboard_scheduler(app)), 
-        asyncio.create_task(season_settle_scheduler(app)), 
+        asyncio.create_task(daily_reset_scheduler(app)),
+        asyncio.create_task(leaderboard_scheduler(app)),
+        asyncio.create_task(season_settle_scheduler(app)),
         asyncio.create_task(hourly_race_scheduler(app)),
+        asyncio.create_task(admin_report_scheduler(app)),
         asyncio.create_task(data_save_worker())
     })
     # 重启恢复：进行中的拍卖继续倒计时结算（托管分在存档里，不丢）
@@ -5295,6 +5546,8 @@ CMD_ALIASES = {
     "我的积分": cmd_my_points, "积分排行": cmd_points_rank,
     "积分商城": cmd_mall, "商城": cmd_mall, "购买": cmd_mall_buy,
     "红包": cmd_redpacket, "发红包": cmd_redpacket,
+    "战绩": cmd_record, "个人战绩": cmd_record, "record": cmd_record,
+    "自检": cmd_status, "运行状态": cmd_status, "status": cmd_status,
     "排位": cmd_season_play, "排位赛": cmd_season_play, "赛季": cmd_season_play, "赛季赛": cmd_season_play,
     "排位报名": cmd_season_join, "报名排位": cmd_season_join, "赛季报名": cmd_season_join,
     "排位榜": cmd_season_rank, "赛季榜": cmd_season_rank, "赛季排名": cmd_season_rank,
@@ -5586,12 +5839,12 @@ def start_health_server():
             return "".join(f"<option value='{cid}'>{html.escape(chat_name_cache.get(cid) or '')} {cid}</option>"
                            for cid in sorted(set(AUTHORIZED_GROUPS) | set(game_chips.keys())))
 
-        def _all_user_options():
-            """全部已知用户 datalist 选项（value=ID，label=昵称）。"""
+        def _all_user_options(selected=0):
+            """全部已知用户选项（value=ID，label=昵称；selected=回显选中）。"""
             seen = {}
             for chips in game_chips.values():
                 for u in chips: seen[u] = user_names.get(u, str(u))
-            return "".join(f"<option value='{u}'>{html.escape(n)}</option>" for u, n in sorted(seen.items()))
+            return "".join(f"<option value='{u}'{' selected' if u == selected else ''}>{html.escape(n)}</option>" for u, n in sorted(seen.items()))
 
         def _id_picker_js():
             """群选择联动用户 datalist 的脚本：select[data-users-for] 选中群后自动填充对应成员。"""
@@ -5739,7 +5992,7 @@ def start_health_server():
                          + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows[-30:]) + "</div>")
             return "".join(parts)
 
-        def _admin_page(gkey, sub=None, saved=False, bad=False, note="", err=""):
+        def _admin_page(gkey, sub=None, saved=False, bad=False, note="", err="", uid=0):
             gname, gicon = next((n, i) for k, n, i in SETTINGS_GROUPS if k == gkey)
             msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
             msg += "<div class='err'>部分数值超出范围或非法，已跳过这些项</div>" if bad else ""
@@ -5802,6 +6055,43 @@ def start_health_server():
                             "<div class='row'><div class='lbl'>排位分变动<small>正数=加，负数=减</small></div>"
                             "<input type='number' name='amount' value='100' required></div>"
                             "<button type='submit'>💾 执行调整</button></form></div>")
+                elif sub == "fundflow":
+                    sel = uid or 0
+                    recv_map, send_map = defaultdict(int), defaultdict(int)
+                    for e in ledger:
+                        if sel and e.get("to") == sel: recv_map[e.get("frm")] += e.get("amt", 0)
+                        if sel and e.get("frm") == sel: send_map[e.get("to")] += e.get("amt", 0)
+                    def _ff_rows(m, empty_txt):
+                        if not m: return f"<tr><td colspan='3'>{empty_txt}</td></tr>"
+                        out = []
+                        for peer, total in sorted(m.items(), key=lambda x: -x[1])[:10]:
+                            red = " style='color:#ff7b7b;font-weight:700'" if total >= FUND_FLOW_ALERT else ""
+                            out.append(f"<tr{red}><td><code>{peer}</code> {html.escape(user_names.get(peer, ''))}</td>"
+                                       f"<td>{total}</td><td>{'🚨 超阈值，重点核查' if total >= FUND_FLOW_ALERT else ''}</td></tr>")
+                        return "".join(out)
+                    detail = "".join(
+                        f"<tr><td>{html.escape(str(e.get('ts', '')))}</td>"
+                        f"<td><code>{e.get('frm')}</code> → <code>{e.get('to')}</code></td>"
+                        f"<td>{html.escape(str(e.get('typ', '')))}</td><td>{e.get('amt', 0)}</td></tr>"
+                        for e in reversed([x for x in ledger if sel in (x.get("frm"), x.get("to"))][-15:]))
+                    sel_txt = f"<code>{sel}</code> {html.escape(user_names.get(sel, ''))}" if sel else ""
+                    body = (f"<h1>{gicon} 资金流审查</h1>"
+                            f"<div class='sub'>红包/转赠等人对人转移全部记账（留 5000 条）；兑换周边前先查一眼，小号一查一个准。累计 ≥ {FUND_FLOW_ALERT} 标红</div>{msg}"
+                            "<div class='card'><form method='get' action='/page/admin/fundflow'>"
+                            "<div class='row'><div class='lbl'>选择要审查的用户</div>"
+                            f"<select name='uid' required>{_all_user_options(sel)}</select></div>"
+                            "<button type='submit' style='margin-top:10px'>🔍 审查</button></form></div>"
+                            + (f"<div class='card'><h3>给 {sel_txt} 送钱的 TOP（收到）</h3>"
+                               f"<table class='tbl'><tr><th>来源</th><th>累计</th><th>警示</th></tr>{_ff_rows(recv_map, '该用户没有收钱记录')}</table>"
+                               f"<h3 style='margin-top:16px'>{sel_txt} 送钱的 TOP（转出）</h3>"
+                               f"<table class='tbl'><tr><th>去向</th><th>累计</th><th>警示</th></tr>{_ff_rows(send_map, '该用户没有转出记录')}</table>"
+                               f"<h3 style='margin-top:16px'>最近明细（15 笔）</h3>"
+                               f"<table class='tbl'><tr><th>时间</th><th>流向</th><th>类型</th><th>金额</th></tr>"
+                               + (detail or "<tr><td colspan='4'>暂无明细</td></tr>") + "</table></div>" if sel else "")
+                            + f"<div class='card'><form method='post' action='/save'>"
+                              f"<input type='hidden' name='group' value='admin/fundflow'>"
+                              + _field_rows("admin/fundflow") +
+                              "<button type='submit' style='margin-top:10px'>💾 保存阈值</button></form></div>")
                 elif sub == "orders":
                     rows = "".join(f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{html.escape(str(o.get('name', '')))}</td>"
                                    f"<td>{html.escape(str(o.get('item', '')))}</td><td>{o.get('price', 0)}</td>"
@@ -6000,7 +6290,9 @@ def start_health_server():
                                 ("Content-Disposition", f"attachment; filename=points_{cid}.csv")]); return
                 m = re.fullmatch(r"/page/([a-z]+)(?:/([a-z0-9_]+))?", path)
                 if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
-                    self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err)); return
+                    try: sel_uid = int(qs.get("uid", ["0"])[0])
+                    except ValueError: sel_uid = 0
+                    self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err, uid=sel_uid)); return
                 self._send(404, b"not found", [("Content-Type", "text/plain")])
 
             def do_POST(self):
@@ -6229,12 +6521,19 @@ async def auto_backup(context):
             logger.warning("自动备份：数据文件不存在，跳过本次")
             return
         with open(DATA_FILE, "rb") as f:
-            await context.bot.send_document(
+            sent = await context.bot.send_document(
                 chat_id=ADMIN_USER_ID,
                 document=f,
                 filename=f"auto_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
                 caption="🤖 每日自动备份（需要恢复时：回复此文件发 /restore）",
             )
+        # 备份轮换：只保留最近 7 份，删掉更早的备份文件消息（私聊里 bot 可删自己发的文件）
+        if sent:
+            backup_msg_ids.append(sent.message_id)
+            while len(backup_msg_ids) > 7:
+                old = backup_msg_ids.pop(0)
+                try: await context.bot.delete_message(chat_id=ADMIN_USER_ID, message_id=old)
+                except Exception: pass  # 消息可能已被手动删除，忽略
         logger.info("自动备份完成")
     except Exception:
         logger.exception("自动备份失败")

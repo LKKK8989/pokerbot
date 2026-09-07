@@ -95,6 +95,22 @@ SETTINGS_GROUPS = [
     ("members",   "群组管理",   "👥"),
     ("security",  "安全",       "🔒"),
 ]
+# 子页面制：有子页的分组在侧边栏折叠展开（照阿福模板）。None=未开通占位页
+SUBPAGES = {
+    "points": [
+        ("set",      "积分设置"),
+        ("cap",      "积分每日上限"),
+        ("sign",     "每日签到"),
+        ("rule",     "积分规则"),
+        ("rp",       "积分红包"),
+        ("level",    "积分等级"),
+        ("inherit",  "积分继承"),
+        ("auction",  "积分拍卖"),
+        ("mall",     "积分商城"),
+        ("buy",      "购买积分"),
+    ],
+}
+_POINTS_UNOPENED = {"rule", "inherit", "auction", "buy"}  # 未开通：只读说明页
 SETTINGS_FIELDS = [
     # (settings键, 模块全局变量名, 面板显示名, 类型, 最小, 最大, 所属分组)
     ("starting_chips",          "STARTING_CHIPS",          "新玩家初始积分",            "int",   100, 1000000, "texas"),
@@ -115,6 +131,10 @@ SETTINGS_FIELDS = [
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("game_starting_chips",     "GAME_STARTING_CHIPS",     "通用积分·新玩家初始值",     "int",   100, 1000000, "general"),
     ("texas_exchange_rate",     "TEXAS_EXCHANGE_RATE",     "几通用积分换1德州积分",     "int",   1,   100,     "general"),
+    ("small_blind",             "SMALL_BLIND",             "德州小盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
+    ("big_blind",               "BIG_BLIND",               "德州大盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
+    ("ante",                    "ANTE",                    "德州前注(每人发牌前强制投入)", "int", 0,  100000,  "general"),
+    ("stale_text_command_seconds","STALE_TEXT_COMMAND_SECONDS","过期消息忽略(秒,防翻旧账命令)", "int", 5, 3600, "general"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
     ("emergency_max_uses",      "EMERGENCY_MAX_USES",      "归零每日赠送次数",          "int",   0,   99,      "general"),
     ("season_start_chips",      "SEASON_START_CHIPS",      "每人起始分",                "int",   100, 1000000, "season"),
@@ -123,18 +143,18 @@ SETTINGS_FIELDS = [
     ("season_days",             "SEASON_DAYS",             "赛季天数",                  "int",   1,   90,      "season"),
     ("season_rebuy_count",      "SEASON_REBUY_COUNT",      "每日重买次数上限",          "int",   0,   20,      "season"),
     ("season_rebuy_amount",     "SEASON_REBUY_AMOUNT",     "每次重买金额",              "int",   0,   1000000, "season"),
-    # ---------- 积分系统 ----------
-    ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points"),
-    ("sign_base_reward",        "SIGN_BASE_REWARD",        "签到基础奖励",              "int",   0,   1000000, "points"),
-    ("sign_streak_bonus",       "SIGN_STREAK_BONUS",       "连续签到满7天额外奖励",     "int",   0,   1000000, "points"),
-    ("chat_enabled",            "CHAT_ENABLED",            "聊天积分开关(需关机器人隐私模式)", "bool", 0, 1,    "points"),
-    ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points"),
-    ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points"),
-    ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points"),
-    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "积分查询消息自动删除(秒,0=不删)", "int", 0, 300,     "points"),
-    ("redpacket_enabled",       "REDPACKET_ENABLED",       "积分红包开关",              "bool",  0,   1,       "points"),
-    ("point_levels",            "POINT_LEVELS",            "积分等级表(每行 等级名:最低积分)", "levels", 0, 0,  "points"),
-    ("mall_items",              "MALL_ITEMS",              "商城商品表(每行 商品名:价格)", "items", 0, 0,      "points"),
+    # ---------- 积分系统（子页面制：points/子页键，照阿福模板） ----------
+    ("chat_enabled",            "CHAT_ENABLED",            "聊天积分开关(需关机器人隐私模式)", "bool", 0, 1,    "points/set"),
+    ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points/set"),
+    ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points/set"),
+    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "积分查询消息自动删除(秒,0=不删)", "int", 0, 300,     "points/set"),
+    ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points/cap"),
+    ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points/sign"),
+    ("sign_base_reward",        "SIGN_BASE_REWARD",        "签到基础奖励",              "int",   0,   1000000, "points/sign"),
+    ("sign_streak_bonus",       "SIGN_STREAK_BONUS",       "连续签到满7天额外奖励",     "int",   0,   1000000, "points/sign"),
+    ("redpacket_enabled",       "REDPACKET_ENABLED",       "积分红包开关",              "bool",  0,   1,       "points/rp"),
+    ("point_levels",            "POINT_LEVELS",            "积分等级表(每行 等级名:最低积分)", "levels", 0, 0,  "points/level"),
+    ("mall_items",              "MALL_ITEMS",              "商城商品表(每行 商品名:价格)", "items", 0, 0,      "points/mall"),
 ]
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
@@ -5027,11 +5047,25 @@ def start_health_server():
             return False
 
         def _page(title, sidebar_active, body):
-            """阿福风格布局：左侧深色菜单栏 + 右侧内容区，手机窄屏折叠为顶部横排。"""
+            """阿福风格布局：左侧深色菜单栏（分组可折叠子页面）+ 右侧内容区，窄屏折叠为顶部横排。"""
+            sidebar_active = sidebar_active or ""
             items = []
             for gkey, name, icon in SETTINGS_GROUPS:
-                cls = "item active" if gkey == sidebar_active else "item"
-                items.append(f"<a class='{cls}' href='/page/{gkey}'>{icon}<span>{name}</span></a>")
+                active_now = sidebar_active == gkey or sidebar_active.startswith(gkey + "/")
+                if gkey in SUBPAGES:
+                    subs = []
+                    for skey, sname in SUBPAGES[gkey]:
+                        unopened = (gkey == "points" and skey in _POINTS_UNOPENED)
+                        badge = "<span class='badge'>未开通</span>" if unopened else ""
+                        cls = "active" if sidebar_active == f"{gkey}/{skey}" else ""
+                        subs.append(f"<a class='{cls}' href='/page/{gkey}/{skey}'>{sname}{badge}</a>")
+                    items.append(
+                        f"<details{' open' if active_now else ''}>"
+                        f"<summary class='{'active' if active_now else ''}'>{icon}<span>{name}</span></summary>"
+                        f"<div class='sub'>{''.join(subs)}</div></details>")
+                else:
+                    cls = "item active" if active_now else "item"
+                    items.append(f"<a class='{cls}' href='/page/{gkey}'>{icon}<span>{name}</span></a>")
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     f"<title>{title} - 机器人后台</title><style>"
@@ -5044,6 +5078,18 @@ def start_health_server():
                     "font-size:14px;padding:10px 12px;border-radius:10px;margin-bottom:2px}"
                     ".side a:hover{background:#1c1d2e;color:#e6e5f0}"
                     ".side a.active{background:#2b2854;color:#fff}"
+                    ".side details{margin-bottom:2px}"
+                    ".side summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;"
+                    "font-size:14px;color:#e6e5f0;padding:10px 12px;border-radius:10px;user-select:none}"
+                    ".side summary::-webkit-details-marker{display:none}"
+                    ".side summary:hover{background:#1c1d2e}"
+                    ".side summary::after{content:'⌄';margin-left:auto;color:#8a89a0;font-size:12px;transition:transform .15s}"
+                    ".side details[open] summary::after{transform:rotate(180deg)}"
+                    ".side summary.active{background:#2b2854;color:#fff}"
+                    ".sub a{padding:8px 12px 8px 30px;font-size:13px;position:relative}"
+                    ".sub a::before{content:'○';position:absolute;left:13px;font-size:9px;color:#7a7990}"
+                    ".badge{margin-left:auto;font-size:10px;background:#34354a;color:#a9a8bd;"
+                    "border-radius:6px;padding:1px 6px}"
                     ".main{flex:1;padding:22px;max-width:860px}"
                     ".card{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:22px;margin-bottom:18px}"
                     "h1{font-size:18px;font-weight:500;margin:0 0 4px}"
@@ -5085,7 +5131,10 @@ def start_health_server():
                     ".tbl tr:last-child td{border-bottom:none}"
                     "@media(max-width:720px){.wrap{flex-direction:column}.side{width:100%;display:flex;"
                     "overflow-x:auto;border-right:none;border-bottom:1px solid #26273a;padding:10px}"
-                    ".logo{display:none}.side a{flex-shrink:0}.main{padding:14px}}"
+                    ".logo{display:none}.side a{flex-shrink:0}.main{padding:14px}"
+                    ".side details{display:contents}.side summary{flex-shrink:0;padding:8px 12px;font-size:13px}"
+                    ".side summary::after{display:none}.sub{display:contents}.sub a{padding:8px 12px}"
+                    ".sub a::before{display:none}}"
                     "</style></head><body><div class='wrap'>"
                     f"<nav class='side'><div class='logo'>🤖 机器人后台</div>{''.join(items)}</nav>"
                     f"<main class='main'>{body}</main></div></body></html>").encode("utf-8")
@@ -5204,7 +5253,7 @@ def start_health_server():
                          + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows[-30:]) + "</div>")
             return "".join(parts)
 
-        def _admin_page(gkey, saved=False, bad=False):
+        def _admin_page(gkey, sub=None, saved=False, bad=False):
             gname, gicon = next((n, i) for k, n, i in SETTINGS_GROUPS if k == gkey)
             msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
             msg += "<div class='err'>部分数值超出范围或非法，已跳过这些项</div>" if bad else ""
@@ -5218,12 +5267,54 @@ def start_health_server():
                         "<input type='hidden' name='group' value='security'>"
                         "<label>新密码（至少4位）<input type='password' name='new_password'></label>"
                         "<button type='submit'>💾 保存密码</button></form>")
+            elif sub:
+                # 子页面制（照阿福模板：积分相关 → 积分设置/每日签到/…）
+                subs = {k: n for k, n in SUBPAGES.get(gkey, [])}
+                sname = subs.get(sub, sub)
+                if gkey == "points" and sub in _POINTS_UNOPENED:
+                    tip = {
+                        "rule": "本页展示当前生效的积分规则（随上面各页设置自动更新）。",
+                        "inherit": "积分继承：群主解散群/成员退群时把积分转给指定成员。待开通。",
+                        "auction": "积分拍卖：定期开拍稀有物品，价高者得。待开通。",
+                        "buy": "购买积分：需要接入人民币支付通道，暂未开通（可先用签到/聊天/红包攒积分）。",
+                    }[sub]
+                    if sub == "rule":
+                        cap = f"每日上限 {CHAT_DAILY_CAP} 分" if CHAT_DAILY_CAP else "不设上限"
+                        body = (f"<h1>💰 {sname}</h1><div class='sub'>当前生效规则（改设置自动更新）</div>{msg}"
+                                "<div class='card'><table class='tbl'>"
+                                f"<tr><th>获取</th><td>聊天：每满 {CHAT_CHARS_PER} 字符记 {CHAT_REWARD} 分，{cap}；"
+                                f"签到：基础 {SIGN_BASE_REWARD} 分，连续满 7 天额外 +{SIGN_STREAK_BONUS} 分；抢积分红包</td></tr>"
+                                "<tr><th>消耗</th><td>发积分红包；积分商城下单（"
+                                + "、".join(f"{x['name']} {x['value']}分" for x in MALL_ITEMS) + "）</td></tr>"
+                                "<tr><th>等级</th><td>"
+                                + " ≥ ".join(f"{x['name']} {x['value']}分" for x in POINT_LEVELS) + "</td></tr>"
+                                "</table></div>")
+                    else:
+                        body = (f"<h1>{gicon} {sname}</h1><div class='sub'>{tip}</div>{msg}"
+                                "<div class='card'><div class='sub' style='margin-top:6px'>该功能尚未开通，开通后这里会出现配置项。</div></div>")
+                else:
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
+                            "<div class='card'><form method='post' action='/save'>"
+                            f"<input type='hidden' name='group' value='{gkey}/{sub}'>"
+                            + _field_rows(f"{gkey}/{sub}") +
+                            "<button type='submit'>💾 保 存</button></form></div>")
             else:
+                # 无子页分组照旧；有子页分组落到第一个子页
+                if gkey in SUBPAGES and SUBPAGES[gkey]:
+                    first = SUBPAGES[gkey][0][0]
+                    return _admin_page(gkey, sub=first, saved=saved, bad=bad)
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
                         "<div class='card'><form method='post' action='/save'>"
                         f"<input type='hidden' name='group' value='{gkey}'>"
                         + _field_rows(gkey) +
                         "<button type='submit'>💾 保 存</button></form></div>")
+                if gkey == "general":
+                    admin_rows = "".join(
+                        f"<tr><td><code>{a}</code></td><td>{'种子管理员(代码写入,不可移除)' if a in ADMIN_USER_IDS else '运行时新增'}</td></tr>"
+                        for a in sorted(BOT_ADMINS))
+                    body += ("<div class='card'><h1>🛡️ Bot 管理员</h1>"
+                             "<div class='sub'>不可在网页改（防止改错把自己锁死）。群里用 /addadmin ID 新增、/deladmin ID 移除，重启不丢。</div>"
+                             f"<table class='tbl'><tr><th>ID</th><th>来源</th></tr>{admin_rows}</table></div>")
             return _page(gname, gkey, body)
 
         class _AdminHandler(BaseHTTPRequestHandler):
@@ -5256,9 +5347,9 @@ def start_health_server():
                 saved, bad = "saved" in qs, "bad" in qs
                 if path == "/":
                     self._send(200, _home_page()); return
-                m = re.fullmatch(r"/page/([a-z]+)", path)
+                m = re.fullmatch(r"/page/([a-z]+)(?:/([a-z0-9_]+))?", path)
                 if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
-                    self._send(200, _admin_page(m.group(1), saved=saved, bad=bad)); return
+                    self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad)); return
                 self._send(404, b"not found", [("Content-Type", "text/plain")])
 
             def do_POST(self):

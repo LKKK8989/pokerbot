@@ -191,12 +191,17 @@ SETTINGS_FIELDS = [
     ("stale_text_command_seconds","STALE_TEXT_COMMAND_SECONDS","过期消息忽略(秒,防翻旧账命令)", "int", 5, 3600, "general"),
     # ---------- 定时任务（时间可自行设置） ----------
     ("daily_reset_time",        "DAILY_RESET_TIME",        "每日重置时间(时:分,排位分重置等)", "short", 0, 0, "schedule"),
+    ("daily_reset_enabled",     "DAILY_RESET_ENABLED",     "每日重置开关",              "bool",  0,   1,       "schedule"),
     ("leaderboard_time",        "LEADERBOARD_TIME",        "德州日榜推送时间(时:分)",   "short", 0, 0,      "schedule"),
+    ("leaderboard_enabled",     "LEADERBOARD_ENABLED",     "德州日榜推送开关",          "bool",  0,   1,       "schedule"),
     ("race_hourly_minute",      "RACE_HOURLY_MINUTE",      "赛车每小时自动开赛(第几分钟)", "int", 0, 59,    "schedule"),
+    ("race_auto_enabled",       "RACE_AUTO_ENABLED",       "赛车自动开赛开关(仍受时段限制)", "bool", 0, 1,    "schedule"),
     ("race_hourly_start",       "RACE_HOURLY_START",       "自动开赛时段-从几点(含)",   "int",   0,   23,      "schedule"),
     ("race_hourly_end",         "RACE_HOURLY_END",         "自动开赛时段-到几点(含)",   "int",   0,   23,      "schedule"),
-    ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,重启后生效)", "int", 1, 168,   "schedule"),
+    ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,改间隔重启后生效)", "int", 1, 168,   "schedule"),
+    ("backup_enabled",          "BACKUP_ENABLED",          "自动备份开关(保存即时生效)", "bool",  0,   1,       "schedule"),
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
+    ("admin_report_enabled",    "ADMIN_REPORT_ENABLED",    "经营日报推送开关",          "bool",  0,   1,       "schedule"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("web_base_url",            "WEB_BASE_URL",            "后台公网地址(/后台一键登录用)",          "text", 0,   0,    "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "members/join"),
@@ -500,6 +505,7 @@ warn_counts = defaultdict(lambda: defaultdict(int))  # warn_counts[cid][uid] = �
 redeem_goods = []                                    # 积分兑换商品 [{"name","price","left","redeemed","desc","on"}] left=0 不限
 redeem_counts = {}                                   # uid -> 全期已兑换次数（每人限购用）
 redeem_orders = []                                   # 兑换订单（防伪）：[{"no","ts","cid","uid","item","price","bal"}]，只留最近 500 条
+game_flows = []                                      # 游戏对局人对人净转移（德州/金花/竞猜，审查"通过游戏故意输牌送分"用），只留最近 2000 条
 
 # ---------- 群组管理数据 ----------
 member_profiles = defaultdict(lambda: defaultdict(dict))  # member_profiles[cid][uid] = {"name","first","last","msgs"}
@@ -1015,6 +1021,7 @@ def force_save_now():
                 "buy_orders": {oid: dict(o) for oid, o in buy_orders.items()},
                 "redeem_counts": {str(uid): int(v) for uid, v in redeem_counts.items()},
                 "redeem_orders": redeem_orders[-500:],
+                "game_flows": game_flows[-2000:],
                 "warn_counts": {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in warn_counts.items()},
                 "member_profiles": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in member_profiles.items()},
                 "whitelist": {str(cid): sorted(users) for cid, users in whitelist.items()},
@@ -1219,6 +1226,9 @@ def load_data():
         redeem_orders.clear()
         for o in data.get("redeem_orders", [])[-500:]:
             if isinstance(o, dict): redeem_orders.append(dict(o))
+        game_flows.clear()
+        for o in data.get("game_flows", [])[-2000:]:
+            if isinstance(o, dict): game_flows.append(dict(o))
         for cid, users in data.get("warn_counts", {}).items():
             for uid, v in users.items():
                 try: warn_counts[int(cid)][int(uid)] = int(v)
@@ -1532,6 +1542,28 @@ def ledger_add(cid, frm, to, amt, typ):
     """资金流台账：红包领取/转赠等人对人转移逐笔记账（防小号审查用，留 5000 条）。"""
     ledger.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "frm": frm, "to": to, "amt": amt, "typ": typ})
     if len(ledger) > 5000: del ledger[:len(ledger) - 5000]
+
+
+def record_game_flows(cid, nets, typ):
+    """一局游戏的人对人净转移记入 game_flows（资金流审查页可见，防"通过游戏故意输牌送分"）。
+
+    nets: {uid: 本局净输赢}（正=赢，负=输）。牌局是池模式，无法精确知道谁输给谁，
+    按惯例分摊：每个输家的损失按赢家净赢比例折算成 输家→赢家 流向（二人局=精确值）。
+    只记真实用户（uid>0）；全输（奖池沉没）/全赢/打平无人对人转移不记。
+    21点/赛车是对庄家局，不存在人对人转移，不接此记账。
+    """
+    losers = {u: -n for u, n in nets.items() if u > 0 and n < 0}
+    winners = {u: n for u, n in nets.items() if u > 0 and n > 0}
+    if not losers or not winners:
+        return
+    lose_total = sum(losers.values())
+    ts = now_bj().strftime("%Y-%m-%d %H:%M")
+    for w, w_net in winners.items():
+        for l, l_loss in losers.items():
+            amt = int(l_loss * w_net // lose_total)
+            if amt > 0:
+                game_flows.append({"ts": ts, "cid": cid, "frm": l, "to": w, "amt": amt, "typ": typ})
+    del game_flows[:-2000]
 
 
 async def broadcast_big_win(app, cid, uid, game_name, net, detail=""):
@@ -2075,6 +2107,10 @@ async def settle_poker(game, app):
             elif game.mode == "official":
                 poker_profit_by_date[date][game.chat_id][uid] += net
             lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
+
+        # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌送分"）；排位分不记
+        if game.mode == "official" and not game.season:
+            record_game_flows(game.chat_id, {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}, "德州")
 
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（排位赛不播）
         if game.mode == "official" and not game.season:
@@ -2904,10 +2940,14 @@ JINHUA_BASE = 100        # 闷牌单位（看牌者跟注/加注金额为其 2 �
 RACE_ODDS_CAP = 10.0     # 赔率上限（倍）。0=无上限。防低胜率马一把押中爆出几万分冲垮经济
 JINHUA_SEEN_DOUBLE = 0   # 炸金花看牌者投注加倍开关（1=经典规则看牌×2；0=看牌闷牌同价，群反馈中途看牌被加倍劝退）
 DAILY_RESET_TIME = "00:00"   # 每日重置时刻（排位分重置、德州日榜翻日等）
+DAILY_RESET_ENABLED = 1      # 每日重置开关（后台「定时任务」可关；关闭期间到点跳过，重开后从下一周期生效）
 LEADERBOARD_TIME = "23:50"   # 德州当日榜定时推送时刻
+LEADERBOARD_ENABLED = 1      # 德州日榜推送开关
 RACE_HOURLY_MINUTE = 0       # 赛车每小时自动开赛：整点后第几分钟
+RACE_AUTO_ENABLED = 1        # 赛车自动开赛总开关（仍受时段/分钟与赛车游戏开关限制）
 RACE_HOURLY_START = 0        # 自动开赛时段-起始点(几点,含)，如 9 = 9点起才开赛
 ADMIN_REPORT_TIME = "09:00"  # 经营日报推送时刻（私聊管理员）
+ADMIN_REPORT_ENABLED = 1     # 经营日报推送开关
 RACE_HOURLY_END = 23         # 自动开赛时段-结束点(几点,含)，如 22 = 22点那场仍开；起始>结束=全天不开
 INHERIT_DAILY_LIMIT = 0      # 每人每日转赠总额上限（0=不限，防小号互刷）
 MALL_MIN_AGE_DAYS = 0        # 商城兑换门槛：与机器人首次互动满 N 天（0=不限）
@@ -2916,6 +2956,7 @@ FUND_FLOW_ALERT = 10000      # 资金流审查页：单对单向累计超过此�
 BROADCAST_ENABLED = 1        # 大奖战报自动广播开关（推送到其他授权群，制造气氛）
 BROADCAST_MIN_AMOUNT = 20000 # 战报阈值：单局净赢 ≥ 此值才广播
 BACKUP_INTERVAL_HOURS = 24   # 自动备份间隔（小时），启动时读取
+BACKUP_ENABLED = 1           # 自动备份开关（job 常驻，回调里查开关，保存即时生效）
 JINHUA_HAND_NAMES = {5: "豹子", 4: "同花顺", 3: "金花", 2: "顺子", 1: "对子", 0: "散牌"}
 
 
@@ -3455,6 +3496,9 @@ async def settle_jinhua(game, app):
             if game.mode == "official":
                 jinhua_profit_by_date[date][game.chat_id][uid] += net
             lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
+        # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌/比牌倒赔送分"）
+        if game.mode == "official":
+            record_game_flows(game.chat_id, {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}, "金花")
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（豹子特别标注）
         if game.mode == "official":
             top_uid, top_net = None, 0
@@ -5373,15 +5417,16 @@ async def _redeem_execute(context, cid, uid, item):
         del redeem_orders[:-500]  # 只留最近 500 条，防膨胀
         save_data()
     uname = await get_name(context.application, uid)
+    # 群通知不带防伪单号（群友能看到别人的单号就失去核验意义）；单号只发用户私聊+管理员对账
     await send_settle(context.application, cid, _fmt_tpl("redeem_msg_ok_group",
         name=uname, goodsName=item["name"], pointNum=price,
-        balance=game_chips[cid][uid]) + f"\n🔎 防伪单号 {order_no}")
+        balance=game_chips[cid][uid]))
     await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
     try:
         await context.bot.send_message(uid, _fmt_tpl("redeem_msg_ok_dm", goodsName=item["name"], pointNum=price)
                                        + f"\n🔎 防伪单号 {order_no}（管理员发货凭此号核对）")
     except TelegramError:
-        pass  # 未私聊过 bot 的用户收不到 DM，群通知已足
+        pass  # 未私聊过 bot 的用户收不到 DM；单号仍在管理员对账+后台兑换订单页可查
     try:
         await context.bot.send_message(ADMIN_USER_ID,
             f"🧾 积分兑换订单｜单号 {order_no}\n群：{chat_name_cache.get(cid, cid)}\n"
@@ -6345,6 +6390,13 @@ async def _guess_do_settle(app, cid, winner):
             old = game_chips[cid].get(uid, 0)
             game_chips[cid][uid] = old + amt
         paid.append((uid, stake, amt, old))
+    # 资金流审查：竞猜是人对人瓜分，净转移记账（赢家净得=派付-押注，输家净损=押注）
+    nets = {}
+    for uid, bets in g["bets"].items():
+        staked = int(bets.get("A", 0)) + int(bets.get("B", 0))
+        won = next((a for w, _s, a, _o in paid if w == uid), 0)
+        nets[uid] = won - staked
+    record_game_flows(cid, nets, "竞猜")
     guesses.pop(cid, None)
     save_data()
     ans_txt = g["a"] if winner == "A" else g["b"]
@@ -6766,6 +6818,8 @@ async def daily_reset_scheduler(app):
         target = now.replace(hour=rh, minute=rm, second=1, microsecond=0)
         if target <= now: target += timedelta(days=1)
         await asyncio.sleep((target-now).total_seconds())
+        if not DAILY_RESET_ENABLED:  # 后台「定时任务」开关：关闭期间到点不执行
+            continue
         try:
             today = now_bj().strftime("%Y-%m-%d")
             # 排位赛到点自动结算已移至独立的 season_settle_scheduler（精确到分钟），此处不再处理
@@ -6824,6 +6878,8 @@ async def leaderboard_scheduler(app):
         target = now.replace(hour=lh, minute=lm, second=0, microsecond=0)
         if target <= now: target += timedelta(days=1)
         await asyncio.sleep((target-now).total_seconds())
+        if not LEADERBOARD_ENABLED:  # 后台「定时任务」开关：关闭期间到点不推送
+            continue
         try:
             # 只推送并清空德州当日榜；其他游戏榜保留累计（总数）
             date = now_bj().strftime("%Y-%m-%d"); texas_snapshot = poker_profit_by_date.pop(date, {})
@@ -6907,6 +6963,8 @@ async def admin_report_scheduler(app):
         target = now.replace(hour=rh, minute=rm, second=0, microsecond=0)
         if target <= now: target += timedelta(days=1)
         await asyncio.sleep(max(1, (target - now).total_seconds()))
+        if not ADMIN_REPORT_ENABLED:  # 后台「定时任务」开关：关闭期间到点不推送
+            continue
         try:
             yesterday = (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")
             if sent_date == yesterday: continue
@@ -6921,7 +6979,7 @@ async def hourly_race_scheduler(app):
     while True:
         try:
             now = now_bj(); key = now.strftime("%Y%m%d%H")
-            if (now.minute == max(0, min(59, RACE_HOURLY_MINUTE))
+            if (RACE_AUTO_ENABLED and now.minute == max(0, min(59, RACE_HOURLY_MINUTE))
                     and max(0, min(23, RACE_HOURLY_START)) <= now.hour <= max(0, min(23, RACE_HOURLY_END))
                     and key != last_key):  # 开赛分钟/时段均网页可配；起始>结束=全天不开
                 last_key = key
@@ -8007,14 +8065,41 @@ def start_health_server():
                         + (f"<a href='/page/members/mlist?cid={sel_cid}&q={quote(q)}&per={per}&page={page+1}'><button type='button'>下一页 ›</button></a>" if page < pages else "")
                         + "</div></div>")
             elif gkey == "members":
-                body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body("records" if sub == "records" else "ops")
+                if sub == "join":
+                    body = (f"<h1>{gicon} 入群与观察</h1><div class='sub'>新成员观察期与入群欢迎，保存立即生效</div>{msg}"
+                            "<div class='card'><form method='post' action='/save'>"
+                            "<input type='hidden' name='group' value='members/join'>"
+                            + _field_rows("members/join") +
+                            "<button type='submit'>💾 保 存</button></form></div>")
+                else:
+                    body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body("records" if sub == "records" else "ops")
             elif gkey == "admin":
                 def _btn(action, key, val, label, color="#7c6cf0"):
                     return (f"<form style='display:inline' method='post' action='/adminops2'>"
                             f"<input type='hidden' name='op' value='{action}'>"
                             f"<input type='hidden' name='{key}' value='{val}'>"
                             f"<button style='margin:0;padding:4px 12px;font-size:12px;background:{color};margin-top:0'>{label}</button></form>")
-                if sub == "auth":
+                if sub == "admins":
+                    admin_rows = ""
+                    for a in sorted(BOT_ADMINS):
+                        if a in ADMIN_USER_IDS:
+                            src = "种子管理员(代码写入,不可移除)"
+                        else:
+                            src = (f"<form style='display:inline' method='post' action='/adminops'>"
+                                   f"<input type='hidden' name='action' value='del'>"
+                                   f"<input type='hidden' name='uid' value='{a}'>"
+                                   f"<button style='margin:0;padding:4px 12px;font-size:12px;background:#e06666;margin-top:0'>移除</button></form>")
+                        admin_rows += f"<tr><td><code>{a}</code></td><td>{src}</td></tr>"
+                    body = ("<h1>🛡️ Bot 管理员</h1>"
+                            "<div class='sub'>种子管理员来自代码/环境变量，防锁死不可移除；新增的重启不丢。</div>"
+                            f"{msg}<div class='card'>"
+                            f"<table class='tbl'><tr><th>ID</th><th>操作</th></tr>{admin_rows}</table>"
+                            "<form method='post' action='/adminops' style='display:flex;gap:10px;margin-top:14px'>"
+                            "<input type='hidden' name='action' value='add'>"
+                            "<input type='number' name='uid' list='dl_users_admin' placeholder='用户数字ID' required style='flex:1'>"
+                            f"<datalist id='dl_users_admin'>{_all_user_options()}</datalist>"
+                            "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
+                elif sub == "auth":
                     rows = "".join(f"<tr><td><code>{g}</code></td><td>{_btn('authdel', 'cid', g, '取消授权', '#e06666')}</td></tr>"
                                    for g in sorted(AUTHORIZED_GROUPS))
                     body = (f"<h1>{gicon} 授权群管理</h1>"
@@ -8066,7 +8151,7 @@ def start_health_server():
                 elif sub == "fundflow":
                     sel = uid or 0
                     recv_map, send_map = defaultdict(int), defaultdict(int)
-                    for e in ledger:
+                    for e in list(ledger) + list(game_flows):
                         if sel and e.get("to") == sel: recv_map[e.get("frm")] += e.get("amt", 0)
                         if sel and e.get("frm") == sel: send_map[e.get("to")] += e.get("amt", 0)
                     def _ff_rows(m, empty_txt):
@@ -8077,14 +8162,16 @@ def start_health_server():
                             out.append(f"<tr{red}><td><code>{peer}</code> {html.escape(user_names.get(peer, ''))}</td>"
                                        f"<td>{total}</td><td>{'🚨 超阈值，重点核查' if total >= FUND_FLOW_ALERT else ''}</td></tr>")
                         return "".join(out)
+                    _flows = sorted([x for x in list(ledger) + list(game_flows) if sel in (x.get("frm"), x.get("to"))],
+                                    key=lambda x: str(x.get("ts", "")))[-15:]
                     detail = "".join(
                         f"<tr><td>{html.escape(str(e.get('ts', '')))}</td>"
                         f"<td><code>{e.get('frm')}</code> → <code>{e.get('to')}</code></td>"
                         f"<td>{html.escape(str(e.get('typ', '')))}</td><td>{e.get('amt', 0)}</td></tr>"
-                        for e in reversed([x for x in ledger if sel in (x.get("frm"), x.get("to"))][-15:]))
+                        for e in reversed(_flows))
                     sel_txt = f"<code>{sel}</code> {html.escape(user_names.get(sel, ''))}" if sel else ""
                     body = (f"<h1>{gicon} 资金流审查</h1>"
-                            f"<div class='sub'>红包/转赠等人对人转移全部记账（留 5000 条）；兑换周边前先查一眼，小号一查一个准。累计 ≥ {FUND_FLOW_ALERT} 标红</div>{msg}"
+                            f"<div class='sub'>红包/转赠/游戏送分（德州·金花·竞猜故意输牌）等人对人转移全部记账；兑换周边前先查一眼，小号一查一个准。累计 ≥ {FUND_FLOW_ALERT} 标红</div>{msg}"
                             "<div class='card'><form method='get' action='/page/admin/fundflow'>"
                             "<div class='row'><div class='lbl'>选择要审查的用户</div>"
                             f"<select name='uid' required>{_all_user_options(sel)}</select></div>"
@@ -8111,7 +8198,11 @@ def start_health_server():
                             + (rows or "<tr><td colspan='5'>暂无订单</td></tr>") + "</table></div>")
                 else:
                     first = SUBPAGES["admin"][0][0]
-                    return _admin_page(gkey, sub=first, saved=saved, bad=bad, note=note, err=err)
+                    if first == sub:
+                        # 防自递归：兜底要跳的子页就是当前子页 → 渲染占位页，绝不能自己跳自己
+                        body = f"<h1>{gicon} {gname}</h1><div class='sub'>该子页暂未开通</div>{msg}"
+                    else:
+                        return _admin_page(gkey, sub=first, saved=saved, bad=bad, note=note, err=err)
             elif gkey == "commands":
                 rows = []
                 for fn_name in sorted(_HANDLERS_BY_NAME):
@@ -8448,7 +8539,7 @@ def start_health_server():
                             + _field_rows("points/redeem")
                             + "<div class='sub' style='margin-top:16px'>商品行占位符：<code>{goodsName}</code> <code>{pointNum}</code> <code>{leftNum}</code>；"
                               "成功通知占位符：<code>{name}</code> <code>{goodsName}</code> <code>{pointNum}</code> <code>{balance}</code>；"
-                              "防伪单号由系统自动附加在群通知/私聊/管理员对账消息末尾，无需模板配置</div>"
+                              "防伪单号由系统自动生成，只发用户私聊和管理员对账（群里不显示，防群友看到别人单号冒领），无需模板配置</div>"
                             "<button type='submit' style='margin-top:8px'>💾 保存兑换设置</button></form></div>")
                 elif gkey == "points" and sub == "guess":
                     gs_rows = ""
@@ -8508,26 +8599,6 @@ def start_health_server():
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/buy'>"
                             + _field_rows("points/buy") + "<button type='submit'>💾 保存</button></form></div>")
-                elif gkey == "admin" and sub == "admins":
-                    admin_rows = ""
-                    for a in sorted(BOT_ADMINS):
-                        if a in ADMIN_USER_IDS:
-                            src = "种子管理员(代码写入,不可移除)"
-                        else:
-                            src = (f"<form style='display:inline' method='post' action='/adminops'>"
-                                   f"<input type='hidden' name='action' value='del'>"
-                                   f"<input type='hidden' name='uid' value='{a}'>"
-                                   f"<button style='margin:0;padding:4px 12px;font-size:12px;background:#e06666;margin-top:0'>移除</button></form>")
-                        admin_rows += f"<tr><td><code>{a}</code></td><td>{src}</td></tr>"
-                    body = ("<h1>🛡️ Bot 管理员</h1>"
-                            "<div class='sub'>种子管理员来自代码/环境变量，防锁死不可移除；新增的重启不丢。</div>"
-                            f"{msg}<div class='card'>"
-                            f"<table class='tbl'><tr><th>ID</th><th>操作</th></tr>{admin_rows}</table>"
-                            "<form method='post' action='/adminops' style='display:flex;gap:10px;margin-top:14px'>"
-                            "<input type='hidden' name='action' value='add'>"
-                            "<input type='number' name='uid' list='dl_users_admin' placeholder='用户数字ID' required style='flex:1'>"
-                            f"<datalist id='dl_users_admin'>{_all_user_options()}</datalist>"
-                            "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
                 else:
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
                             "<div class='card'><form method='post' action='/save'>"
@@ -8539,8 +8610,25 @@ def start_health_server():
                 if gkey in SUBPAGES and SUBPAGES[gkey]:
                     first = SUBPAGES[gkey][0][0]
                     return _admin_page(gkey, sub=first, saved=saved, bad=bad)
+                form_open = "<div class='card'>"
+                if gkey == "schedule":
+                    # 定时任务状态总览：一眼看出哪些任务在跑（与下方开关实时联动）
+                    def _badge(_on):
+                        return ("<span style='color:#6fd08c;font-weight:700'>✅ 开启</span>" if _on
+                                else "<span style='color:#f09595;font-weight:700'>⛔ 关闭</span>")
+                    _rows = ""
+                    for _name, _on in (("每日重置", DAILY_RESET_ENABLED), ("德州日榜推送", LEADERBOARD_ENABLED),
+                                       ("赛车自动开赛", RACE_AUTO_ENABLED), ("自动备份", BACKUP_ENABLED),
+                                       ("经营日报推送", ADMIN_REPORT_ENABLED)):
+                        _rows += ("<div style='display:flex;justify-content:space-between;padding:7px 2px;"
+                                  "border-bottom:1px solid #26273a'><span>" + _name + "</span>" + _badge(_on) + "</div>")
+                    form_open = ("<div class='card'><h3>📋 当前任务状态</h3>"
+                                 "<div class='sub' style='margin-bottom:8px'>与下方开关实时联动；关闭后到点不再执行，"
+                                 "重新开启从下一个周期生效（自动备份开关即时生效）</div>" + _rows + "</div>"
+                                 "<div class='card' style='margin-top:18px'>")
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
-                        "<div class='card'><form method='post' action='/save'>"
+                        + form_open +
+                        "<form method='post' action='/save'>"
                         f"<input type='hidden' name='group' value='{gkey}'>"
                         + _field_rows(gkey) +
                         "<button type='submit'>💾 保 存</button></form></div>")
@@ -8716,7 +8804,14 @@ def start_health_server():
                            "join_from": (qs.get("join_from", [""])[0] or "")[:16],
                            "join_to": (qs.get("join_to", [""])[0] or "")[:16],
                            "page": max(1, _qi("page", 1)), "per": _qi("per", 20)}
-                    self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err, uid=sel_uid, flt=flt)); return
+                    try:
+                        self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err, uid=sel_uid, flt=flt)); return
+                    except Exception as _pg_exc:
+                        # 渲染出错返回可读错误页（带异常信息），绝不静默断连让用户看到"上游连接错误"
+                        logger.exception("后台页面渲染失败：%s", path)
+                        self._send(500, ("<h1>页面渲染出错</h1><p>" + html.escape(str(_pg_exc))
+                                         + "</p><p>请截图本页反馈给开发者排查</p>").encode("utf-8"),
+                                   [("Content-Type", "text/html; charset=utf-8")]); return
                 self._send(404, b"not found", [("Content-Type", "text/plain")])
 
             def do_POST(self):
@@ -9176,6 +9271,8 @@ async def auto_backup(context):
     无持久磁盘的平台容器重启会清空磁盘，有这份备份就能用 /restore 恢复，
     最坏只丢一个备份周期（30 分钟）的积分变动。
     """
+    if not BACKUP_ENABLED:  # 后台「定时任务」开关：关了就不备份，保存即时生效
+        return
     try:
         ok = await asyncio.to_thread(force_save_now)
         if not ok:

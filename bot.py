@@ -117,6 +117,7 @@ SUBPAGES = {
         ("auction",  "积分拍卖"),
         ("mall",     "积分商城"),
         ("buy",      "购买积分"),
+        ("lottery",  "群组抽奖"),
     ],
     "admin": [
         ("auth",      "授权群管理"),
@@ -165,6 +166,7 @@ SETTINGS_FIELDS = [
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板结束后删除(秒,0=不删)", "int", 0, 3600, "general"),
+    ("web_otp_enabled",         "WEB_OTP_ENABLED",         "后台登录二次验证(Telegram验证码)",      "bool", 0,   1,    "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "general"),
@@ -209,6 +211,17 @@ SETTINGS_FIELDS = [
     ("auction_enabled",         "AUCTION_ENABLED",         "积分拍卖开关",              "bool",  0,   1,       "points/auction"),
     ("auction_step",            "AUCTION_STEP",            "每次加价幅度(积分)",        "int",   10,  100000,  "points/auction"),
     ("auction_duration",        "AUCTION_DURATION",        "拍卖时长(秒)",              "int",   30,  3600,    "points/auction"),
+    # 群组抽奖（基础版：1 个 prize+count 形式；点数抽奖/乐透等高级类型后续按需扩展）
+    ("lottery_enabled",         "LOTTERY_ENABLED",         "群组抽奖总开关",            "bool",  0,   1,       "points/lottery"),
+    ("lottery_keyword",         "LOTTERY_KEYWORD",         "参与触发词(也支持 /开奖)",   "short", 0,   0,       "points/lottery"),
+    ("lottery_default_duration","LOTTERY_DEFAULT_DURATION","默认持续秒数",              "int",   10,  3600,    "points/lottery"),
+    ("lottery_fee",             "LOTTERY_FEE",             "参与扣积分(0=免费)",         "int",   0,   10000,   "points/lottery"),
+    ("lottery_min_balance",     "LOTTERY_MIN_BALANCE",     "参与门槛(最低持有积分,0=不限)","int", 0,   1000000, "points/lottery"),
+    ("lottery_msg_start",       "LOTTERY_MSG_START",       "活动公告模板",              "text", 0,   0,       "points/lottery"),
+    ("lottery_msg_joined",      "LOTTERY_MSG_JOINED",      "参与成功模板",              "text", 0,   0,       "points/lottery"),
+    ("lottery_msg_dup",         "LOTTERY_MSG_DUP",         "重复参与模板",              "text", 0,   0,       "points/lottery"),
+    ("lottery_msg_fail",        "LOTTERY_MSG_FAIL",        "参与失败模板(余额不足等)",  "text", 0,   0,       "points/lottery"),
+    ("lottery_msg_result",      "LOTTERY_MSG_RESULT",      "开奖结果模板",              "text", 0,   0,       "points/lottery"),
     ("buy_enabled",             "BUY_ENABLED",             "购买积分开关(管理员人工确认)", "bool", 0, 1,     "points/buy"),
     ("buy_min",                 "BUY_MIN",                 "单次最低购买数量",          "int",   100, 1000000, "points/buy"),
     ("buy_max",                 "BUY_MAX",                 "单次最高购买数量",          "int",   100, 10000000,"points/buy"),
@@ -229,12 +242,46 @@ REPLY_DELETE_SECONDS = 30   # 查询类命令的 bot 回复自动删除（0=不�
 SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
 PANEL_DELETE_SECONDS = 300 # 游戏卡片/下注面板：本局结束后自动删除（0=不删）
 RACE_NOTICE_DELETE_SECONDS = 60  # 赛车倒计时提示自动删除（0=不删）
+WEB_OTP_ENABLED = True  # 网页后台二次验证：密码通过后还需 Telegram 私聊验证码（关掉则仅密码）
+# ---------- 群组抽奖 ----------
+LOTTERY_ENABLED = True             # 总开关（网页 general→points/lottery 可关）
+LOTTERY_KEYWORD = "抽奖"            # 玩家参与的触发词（也支持 /开奖 命令）
+LOTTERY_DEFAULT_DURATION = 60       # 默认持续秒数（解析失败时兜底）
+LOTTERY_FEE = 0                     # 参与扣积分（0=免费）
+LOTTERY_MIN_BALANCE = 100           # 参与门槛：玩家最少持有多少积分
+LOTTERY_MAX_PRIZES = 8              # 单次抽奖最多几档奖品
+LOTTERY_MSG_START = (
+    "🎉 <b>{title}</b>\n\n"
+    "⏰ 持续 <b>{duration}</b> 秒，到点自动开奖\n"
+    "🎁 奖品：\n{prize_list}\n"
+    "{fee_line}\n"
+    "💬 发送 <code>{keyword}</code> 或 /抽奖 即可参与"
+)
+LOTTERY_MSG_JOINED = "✅ {nick} 参与成功！你是第 <b>{n}</b> 位参与者\n💰 余额：<b>{balance}</b>"
+LOTTERY_MSG_DUP = "⚠️ {nick} 你已经参与过啦，等开奖即可"
+LOTTERY_MSG_FAIL = "❌ {nick} {reason}"
+LOTTERY_MSG_RESULT = (
+    "🎊 <b>{title}</b> 开奖结果：\n\n"
+    "{winners}\n\n"
+    "— 共 <b>{n}</b> 位参与者，中奖 <b>{w}</b> 位，感谢捧场！"
+)
 OBSERVE_ENABLED = 0         # 新成员观察期开关（1=开启：入群未满时长的成员发言即删并禁言到期满）
 OBSERVE_SECONDS = 300       # 观察期时长（秒）
 WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
 WELCOME_TPL = "🎉 欢迎 {name} 加入本群！\n积分游戏请在群内发送 /start 查看玩法。"
 REDPACKET_ENABLED = 1
-POINT_LEVELS = [{"name": "青铜", "value": 0}, {"name": "白银", "value": 5000}, {"name": "黄金", "value": 20000}, {"name": "铂金", "value": 50000}, {"name": "钻石", "value": 100000}]
+POINT_LEVELS = [
+    {"name": "练气期", "value": 0},
+    {"name": "筑基期", "value": 15000},
+    {"name": "金丹期", "value": 40000},
+    {"name": "元婴期", "value": 100000},
+    {"name": "化神期", "value": 250000},
+    {"name": "炼虚期", "value": 500000},
+    {"name": "合体期", "value": 1000000},
+    {"name": "大乘期", "value": 2000000},
+    {"name": "渡劫期", "value": 5000000},
+    {"name": "真仙", "value": 10000000},
+]
 MALL_ITEMS = []  # [{"name": 商品名, "value": 价格}]
 INHERIT_ENABLED = 1
 INHERIT_FEE_PERCENT = 0
@@ -295,6 +342,11 @@ inherit_daily = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # in
 user_first_seen = {}                                 # uid -> 首次与 bot 互动的时间戳（兑换门槛用）
 backup_msg_ids = []                                  # 自动备份文件消息ID（管理员私聊，轮换只留7份）
 settings_backup_msg_ids = []                         # 设置备份文件消息ID（单独轮换只留7份）
+web_pending_otp = {}                                 # 后台二次验证待确认：otp_token -> {"code","exp","ip"}
+# 群组抽奖：每群同时最多一个进行中活动
+# lotteries[cid] = {title, prizes, fee, keyword, start_ts, end_ts, msg_id,
+#                   participants:[(uid, ts, name)], status, winners, creator, chat_id}
+lotteries = {}
 
 def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=None):
     payload = {"fields": cfg, "web_password": password,
@@ -771,6 +823,9 @@ def force_save_now():
                 "user_first_seen": {str(uid): ts for uid, ts in user_first_seen.items()},
                 # 设置快照内嵌进数据：跟着备份/恢复一起走，容器重建后设置不回退
                 "_settings": dict(SETTINGS_SNAPSHOT),
+                # 群组抽奖：每群活动（含已结束的，方便历史展示）
+                "_lotteries": {str(cid): {k: v for k, v in lo.items() if k != "msg_id"}
+                               for cid, lo in lotteries.items()},
             }
             os.makedirs(os.path.dirname(os.path.abspath(DATA_FILE)), exist_ok=True)
             with open(DATA_TEMP_FILE, "w", encoding="utf-8") as file:
@@ -825,6 +880,20 @@ def load_data():
             logger.info("已从数据文件读出内嵌设置快照（%s 项）", len(embedded.get("fields", {})))
     except Exception:
         logger.exception("内嵌设置快照读取失败")
+    # 群组抽奖恢复
+    try:
+        lotteries.clear()
+        for cid_s, lo in (data.get("_lotteries") or {}).items():
+            try: cid = int(cid_s)
+            except (ValueError, TypeError): continue
+            if not isinstance(lo, dict): continue
+            lo.setdefault("status", "open")
+            # 启动时若活动已超时且仍 open → 立即标记 finished（避免重部署后仍显示在进行中）
+            if lo["status"] == "open" and time.time() >= lo.get("end_ts", 0):
+                lo["status"] = "finished"
+            lotteries[cid] = lo
+    except Exception:
+        logger.exception("抽奖数据恢复失败")
     try:
         # 兼容旧存档：group_chips 键迁移为统一积分
         restore_nested(game_chips, data.get("game_chips", data.get("group_chips", {})))
@@ -1609,12 +1678,17 @@ async def poker_table_text(game, app):
 
 
 def poker_buttons(game, uid):
-    rows = [[InlineKeyboardButton("🃏 查看手牌", callback_data="texas_hand")]]
-    if uid != game.current() or uid in game.folded or uid in game.all_in: return InlineKeyboardMarkup(rows)
+    acting = (uid == game.current() and uid not in game.folded and uid not in game.all_in)
+    if not acting:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🃏 查看手牌", callback_data="texas_hand")]])
     to_call = max(0, game.current_bet - game.round_bets[uid])
-    rows.append([InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold"), InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}", callback_data="texas_check" if not to_call else "texas_call")])
-    # 半池/全池快捷加注（同栏）：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底，保证池子小时也有加注入口
+    # 第一行三连：手牌/弃牌/跟注（压缩整体高度，5 行 → 3 行）
+    rows = [[InlineKeyboardButton("🃏 手牌", callback_data="texas_hand"),
+             InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold"),
+             InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}",
+                                  callback_data="texas_check" if not to_call else "texas_call")]]
     if uid not in game.raise_locked:
+        # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底
         half_amt = max(FIXED_MIN_RAISE, game.pot // 2)
         pot_amt = max(FIXED_MIN_RAISE, game.pot)
         pot_row = []
@@ -1623,10 +1697,15 @@ def poker_buttons(game, uid):
         if game.chips[uid] >= to_call + pot_amt:
             pot_row.append(InlineKeyboardButton(f"💰 全池 +{pot_amt}", callback_data="texas_raise_pot"))
         if pot_row: rows.append(pot_row)
-        # 固定额加注：加注 100（最低加注额）；筹码不足时隐藏，半池本身就是 100 时不再重复显示
+        # 固定额加注（最低加注额）与全下并排一行；各自筹码不足时隐藏
+        last_row = []
         if game.chips[uid] >= to_call + FIXED_MIN_RAISE and half_amt > FIXED_MIN_RAISE:
-            rows.append([InlineKeyboardButton(f"➕ 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}")])
-    if game.chips[uid] > 0: rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
+            last_row.append(InlineKeyboardButton(f"🔼 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}"))
+        if game.chips[uid] > 0:
+            last_row.append(InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin"))
+        if last_row: rows.append(last_row)
+    elif game.chips[uid] > 0:
+        rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -4763,6 +4842,285 @@ async def cmd_record(update, context):
     schedule_delete(context.application, cid, reply_msg, REPLY_DELETE_SECONDS)
 
 
+async def cmd_webcode(update, context):
+    """后台登录验证码（管理员）：bot 私聊推送失败时的备用取码通道。
+
+    Telegram 不允许 bot 主动给「从未私聊过」的用户发消息，此时网页端拿不到码，
+    用这条命令主动索取即可——命令是用户发起的，不受该限制。
+    """
+    if not is_bot_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅机器人管理员可用。"); return
+    now = time.time()
+    alive = [(k, v) for k, v in web_pending_otp.items() if v["exp"] > now]
+    if not alive:
+        await update.message.reply_text(
+            "当前没有待验证的登录请求。\n\n"
+            "用法：先在网页端输入密码 → 再回来发 /网页码 取验证码。")
+        return
+    _tok, rec = alive[-1]
+    left = int(rec["exp"] - now)
+    await update.message.reply_text(
+        f"🔐 <b>后台登录验证码</b>\n\n"
+        f"验证码：<code>{rec['code']}</code>\n"
+        f"来源 IP：<code>{rec['ip']}</code>\n"
+        f"剩余有效：{left} 秒\n\n"
+        f"⚠️ 不是你本人操作请立即改后台密码。",
+        parse_mode="HTML")
+
+# =============== 群组抽奖 ===============
+def _lottery_render_prizes(prizes):
+    """奖品列表渲染为多行：• 名称 × 数量"""
+    return "\n".join(f"  • {html.escape(p['name'])} × {int(p['count'])}" for p in prizes)
+
+def _lottery_parse_prizes(spec: str):
+    """解析「奖品A:数量,奖品B:数量」；空 / 非法返回 ([], err)。"""
+    if not spec:
+        return [], "奖品不能为空"
+    out, seen = [], set()
+    for chunk in spec.replace("，", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" not in chunk:
+            return [], f"奖品格式错误：{chunk}（应为 名称:数量）"
+        name, _, cnt = chunk.partition(":")
+        name = name.strip()
+        cnt = cnt.strip()
+        if not name:
+            return [], f"奖品名称不能为空：{chunk}"
+        try:
+            n = int(cnt)
+        except ValueError:
+            return [], f"奖品数量必须是数字：{chunk}"
+        if n <= 0:
+            return [], f"奖品数量必须 >0：{chunk}"
+        if name in seen:
+            return [], f"重复奖品：{name}"
+        seen.add(name)
+        out.append({"name": name, "count": n})
+    if not out:
+        return [], "奖品不能为空"
+    if len(out) > LOTTERY_MAX_PRIZES:
+        return [], f"奖品最多 {LOTTERY_MAX_PRIZES} 档"
+    return out, ""
+
+def _lottery_total_prizes(prizes):
+    return sum(int(p["count"]) for p in prizes)
+
+def _lottery_active(cid):
+    """返回进行中的活动；不存在或已结束返回 None。"""
+    lo = lotteries.get(cid)
+    if not lo or lo.get("status") != "open":
+        return None
+    return lo
+
+def _lottery_join(lo, uid, name):
+    """加入参与者；返回 (ok, reason_or_index)。已加入返回 (False, 'dup')。"""
+    for i, (u, _, _) in enumerate(lo["participants"]):
+        if u == uid:
+            return False, "dup"
+    lo["participants"].append((uid, time.time(), name))
+    return True, len(lo["participants"])
+
+async def _lottery_publish(app, cid, lo):
+    """编辑/发送活动公告消息；记录 msg_id 用于开奖后编辑。"""
+    if not LOTTERY_ENABLED: return
+    duration = int(lo["end_ts"] - lo["start_ts"])
+    fee_line = f"💰 参与扣 <b>{lo['fee']}</b> 积分\n" if lo["fee"] else ""
+    text = LOTTERY_MSG_START.format(
+        title=html.escape(lo["title"]),
+        duration=duration,
+        prize_list=_lottery_render_prizes(lo["prizes"]),
+        fee_line=fee_line,
+        keyword=html.escape(lo["keyword"]),
+    )
+    msg = await safe_send(app.bot, cid, text, parse_mode="HTML")
+    if msg:
+        lo["msg_id"] = msg.message_id
+
+async def _lottery_draw(app, cid, lo):
+    """开奖：从参与者中按奖品库存随机抽；写回 lo['winners']/prizes 剩余库存；发群通知 + 私聊中奖者。"""
+    lo["status"] = "drawing"
+    prizes = [dict(p) for p in lo["prizes"]]  # 拷贝并加 left 字段
+    for p in prizes:
+        p["left"] = int(p["count"])
+    pool = list(lo["participants"])
+    winners = []
+    # 总中奖数 ≤ 总奖品数 且 ≤ 参与人数
+    while pool and any(p["left"] > 0 for p in prizes):
+        # 选一个仍有库存的奖品
+        avail = [p for p in prizes if p["left"] > 0]
+        if not avail: break
+        prize = random.choice(avail)
+        # 选一个参与者
+        idx = random.randrange(len(pool))
+        uid, _ts, name = pool.pop(idx)
+        winners.append({"uid": uid, "name": name, "prize": prize["name"]})
+        prize["left"] -= 1
+    lo["prizes"] = prizes
+    lo["winners"] = winners
+    # 群内通知
+    if winners:
+        win_lines = [f"  🎁 <b>{html.escape(w['name'])}</b> → {html.escape(w['prize'])}" for w in winners]
+        text = LOTTERY_MSG_RESULT.format(
+            title=html.escape(lo["title"]),
+            winners="\n".join(win_lines),
+            n=len(lo["participants"]),
+            w=len(winners),
+        )
+    else:
+        text = "🎊 <b>" + html.escape(lo["title"]) + "</b> 开奖啦——但本轮无人中奖 😢"
+    # 编辑原公告消息（如果有），同时新发一条开奖消息（更醒目）
+    try:
+        if lo.get("msg_id"):
+            await app.bot.edit_message_text(chat_id=cid, message_id=lo["msg_id"],
+                                            text=text, parse_mode="HTML")
+        else:
+            await safe_send(app.bot, cid, text, parse_mode="HTML")
+    except Exception:
+        logger.exception("编辑开奖消息失败，改发送新消息")
+        await safe_send(app.bot, cid, text, parse_mode="HTML")
+    # 私聊中奖者
+    for w in winners:
+        try:
+            await app.bot.send_message(chat_id=w["uid"],
+                text=f"🎉 恭喜！你中奖了：<b>{html.escape(w['prize'])}</b>\n来自活动：{html.escape(lo['title'])}",
+                parse_mode="HTML")
+        except Exception:
+            pass  # 对方没私聊过 bot 也没关系
+    lo["status"] = "finished"
+    lo["end_ts"] = time.time()
+    save_data()
+
+async def cmd_lottery(update, context):
+    """群组抽奖：管理员用 /开奖 <标题> | <奖品> | <秒数> 开局；玩家用 /开奖 或 关键词 参与。
+
+    用法：
+      /开奖                              → 若活动进行中视为参与；否则帮助
+      /开奖 <标题> | <奖品> | <秒数>      → 管理员开新活动
+      /开奖开奖                           → 管理员手动立即开奖
+      /开奖结束                           → 管理员强制结束并退款（按需）
+    """
+    global lotteries
+    if not await need_auth(update): return
+    if not LOTTERY_ENABLED:
+        await update.message.reply_text("❌ 群组抽奖已关闭（后台「积分系统→群组抽奖」可开启）"); return
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    text = (update.message.text or "").strip()
+    args_part = text[len("/开奖"):].strip()
+    # 管理员子命令
+    if is_bot_admin(uid):
+        if args_part in ("开奖", "开奖开奖", "开", "开奖", "开奖开奖"):
+            lo = _lottery_active(cid)
+            if not lo:
+                await update.message.reply_text("❌ 当前没有进行中的抽奖活动"); return
+            await update.message.reply_text("🎲 正在开奖…")
+            await _lottery_draw(context.application, cid, lo)
+            return
+        if args_part in ("结束", "取消"):
+            lo = _lottery_active(cid)
+            if not lo:
+                await update.message.reply_text("❌ 当前没有进行中的抽奖活动"); return
+            # 退积分（若有扣费）
+            if lo["fee"] > 0:
+                for u, _, _ in lo["participants"]:
+                    game_chips[cid][u] = game_chips[cid].get(u, 0) + lo["fee"]
+            lo["status"] = "cancelled"
+            save_data()
+            await safe_send(context.application.bot, cid,
+                f"🛑 抽奖活动「<b>{html.escape(lo['title'])}</b>」已被管理员取消" + (
+                    f"，已退还 {lo['fee']} 积分/人" if lo["fee"] else ""))
+            return
+    # 玩家参与
+    if not args_part:
+        lo = _lottery_active(cid)
+        if not lo:
+            await update.message.reply_text(
+                f"❌ 当前没有进行中的抽奖\n\n"
+                f"管理员开局：<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数</code>")
+            return
+        ok, info = await _lottery_try_join(context.application, lo, uid, cid)
+        if ok:
+            name = await get_name(context.application, uid)
+            bal = game_chips.get(cid, {}).get(uid, 0)
+            await update.message.reply_text(
+                LOTTERY_MSG_JOINED.format(nick=html.escape(name), n=info, balance=bal),
+                parse_mode="HTML")
+        elif info == "dup":
+            name = await get_name(context.application, uid)
+            await update.message.reply_text(LOTTERY_MSG_DUP.format(nick=html.escape(name)))
+        else:
+            name = await get_name(context.application, uid)
+            await update.message.reply_text(LOTTERY_MSG_FAIL.format(nick=html.escape(name), reason=info))
+        return
+    # 管理员开新活动
+    if not is_bot_admin(uid):
+        await update.message.reply_text("❌ 仅管理员可以开局"); return
+    if _lottery_active(cid):
+        await update.message.reply_text("⚠️ 当前群已有进行中的抽奖，请先 /开奖开奖 或 /开奖结束"); return
+    # 解析 "标题 | 奖品 | 秒数"（秒数可选，奖品必填）
+    parts = [p.strip() for p in args_part.split("|")]
+    title = parts[0]
+    if not title or len(title) > 50:
+        await update.message.reply_text("❌ 标题不能为空或超过 50 字"); return
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "用法：\n"
+            "<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数</code>\n\n"
+            "示例：<code>/开奖 群友福利 | 100积分:1,小星星:5 | 60</code>",
+            parse_mode="HTML"); return
+    prizes, perr = _lottery_parse_prizes(parts[1])
+    if perr:
+        await update.message.reply_text(f"❌ {perr}"); return
+    duration = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else LOTTERY_DEFAULT_DURATION
+    duration = max(10, min(3600, duration))
+    lotteries[cid] = {
+        "title": title, "prizes": prizes, "fee": int(LOTTERY_FEE),
+        "keyword": LOTTERY_KEYWORD, "start_ts": time.time(),
+        "end_ts": time.time() + duration, "msg_id": None,
+        "participants": [], "status": "open", "winners": [],
+        "creator": uid, "chat_id": cid,
+    }
+    save_data()
+    await _lottery_publish(context.application, cid, lotteries[cid])
+
+async def _lottery_try_join(app, lo, uid, cid):
+    """尝试加入抽奖：扣积分（若需）、检查门槛。返回 (ok, info_or_err_msg)。"""
+    if not lo or lo.get("status") != "open":
+        return False, "活动已结束"
+    if time.time() >= lo["end_ts"]:
+        return False, "活动已结束"
+    balance = game_chips.get(cid, {}).get(uid, 0)
+    if LOTTERY_MIN_BALANCE > 0 and balance < LOTTERY_MIN_BALANCE:
+        return False, f"余额不足 {LOTTERY_MIN_BALANCE}，无法参与"
+    fee = int(lo.get("fee", 0))
+    if fee > 0 and balance < fee:
+        return False, f"余额不足（需 {fee}）"
+    if fee > 0:
+        game_chips[cid][uid] = balance - fee
+    ok, info = _lottery_join(lo, uid, user_names.get(uid, str(uid)))
+    if not ok:
+        # 重复参与：退还已扣（按理说前面不会走到这，但保险）
+        if fee > 0:
+            game_chips[cid][uid] = game_chips[cid].get(uid, 0) + fee
+        return False, "dup"
+    save_data()
+    return True, info
+
+async def lottery_scheduler(app):
+    """每 5 秒扫一遍所有群的超时活动，到点自动开奖。"""
+    while True:
+        try:
+            now = time.time()
+            for cid, lo in list(lotteries.items()):
+                if lo.get("status") != "open": continue
+                if now < lo["end_ts"]: continue
+                await _lottery_draw(app, cid, lo)
+        except Exception:
+            logger.exception("lottery_scheduler 本轮异常（已吞并继续）")
+        await asyncio.sleep(5)
+
 async def cmd_status(update, context):
     """机器人自检（管理员）：运行时长/各游戏活跃局/台账/数据文件/调度任务。"""
     if not is_bot_admin(update.effective_user.id):
@@ -5468,31 +5826,43 @@ async def cmd_backup(update, context):
     if not os.path.exists(DATA_FILE):
         await update.message.reply_text("⚠️ 数据文件不存在")
         return
+    # 拆开 try：把「数据文件发送」单独包，失败时把真实异常返回给管理员；
+    # 之前一个大 try 吞所有，群内 /backup 失败只会看到「请先 /start」这种误导性提示。
     try:
         with open(DATA_FILE, "rb") as f:
+            data_bytes = f.read()
+        await context.bot.send_document(
+            chat_id=uid,
+            document=data_bytes,
+            filename=f"bot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            caption="📦 数据备份完成（此文件内含网页设置快照，恢复数据即恢复设置）",
+        )
+    except Exception as exc:
+        logger.exception("数据备份发送失败")
+        await update.message.reply_text(
+            f"⚠️ 数据备份失败：{type(exc).__name__}: {str(exc)[:200]}\n"
+            f"请把这条错误发我排查（常见原因：私聊未 /start、容器磁盘满、文件被另一进程锁定）"
+        )
+        return
+    # 同时发一份纯设置备份，便于「只恢复设置、保留现有数据」
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "rb") as f:
+                cfg_bytes = f.read()
             await context.bot.send_document(
-                chat_id=uid,
-                document=f,
-                filename=f"bot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                caption="📦 数据备份完成（此文件内含网页设置快照，恢复数据即恢复设置）",
+                chat_id=uid, document=cfg_bytes,
+                filename=f"bot_settings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                caption="⚙️ 网页设置备份（只需恢复设置：回复此文件发 /restore）",
             )
-        # 同时发一份纯设置备份，便于「只恢复设置、保留现有数据」
-        if os.path.exists(SETTINGS_FILE):
-            try:
-                with open(SETTINGS_FILE, "rb") as f:
-                    await context.bot.send_document(
-                        chat_id=uid, document=f,
-                        filename=f"bot_settings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        caption="⚙️ 网页设置备份（只需恢复设置：回复此文件发 /restore）",
-                    )
-            except Exception:
-                logger.exception("设置备份发送失败")
-        # 在群里发的命令时，提示一下文件已发到私聊
-        if update.effective_chat.id != uid:
-            await update.message.reply_text("✅ 备份文件已发送到你的私聊")
-    except Exception:
-        logger.exception("备份失败")
-        await update.message.reply_text("⚠️ 备份失败，请先私聊我发 /start 后再试")
+        except Exception as exc:
+            logger.exception("设置备份发送失败")
+            # 数据备份已成功，设置备份失败只是少一个文件，不影响主流程
+            await update.message.reply_text(
+                f"⚠️ 设置备份失败：{type(exc).__name__}: {str(exc)[:160]}"
+            )
+    # 在群里发的命令时，提示一下文件已发到私聊
+    if update.effective_chat.id != uid:
+        await update.message.reply_text("✅ 备份文件已发送到你的私聊")
 
 
 async def cmd_restore(update, context):
@@ -5629,6 +5999,7 @@ async def post_init(app):
         asyncio.create_task(season_settle_scheduler(app)),
         asyncio.create_task(hourly_race_scheduler(app)),
         asyncio.create_task(admin_report_scheduler(app)),
+        asyncio.create_task(lottery_scheduler(app)),
         asyncio.create_task(data_save_worker())
     })
     # 重启恢复：进行中的拍卖继续倒计时结算（托管分在存档里，不丢）
@@ -5695,6 +6066,8 @@ CMD_ALIASES = {
     "红包": cmd_redpacket, "发红包": cmd_redpacket,
     "战绩": cmd_record, "个人战绩": cmd_record, "record": cmd_record,
     "自检": cmd_status, "运行状态": cmd_status, "status": cmd_status,
+    "网页码": cmd_webcode, "验证码": cmd_webcode, "登录码": cmd_webcode, "webcode": cmd_webcode,
+    "开奖": cmd_lottery, "抽奖": cmd_lottery, "lottery": cmd_lottery,
     "排位": cmd_season_play, "排位赛": cmd_season_play, "赛季": cmd_season_play, "赛季赛": cmd_season_play,
     "排位报名": cmd_season_join, "报名排位": cmd_season_join, "赛季报名": cmd_season_join,
     "排位榜": cmd_season_rank, "赛季榜": cmd_season_rank, "赛季排名": cmd_season_rank,
@@ -5871,6 +6244,7 @@ def start_health_server():
         sessions = {}  # token -> 过期时间戳
         sess_lock = threading.Lock()
         login_fails = {}  # ip -> [连续失败次数, 锁定截止时间戳]（防爆破：连续错 5 次锁 10 分钟）
+        otp_fails = {}    # ip -> [连续验证码错误次数, 锁定截止]
 
         def _check_session(cookie_header):
             if not cookie_header:
@@ -5912,51 +6286,95 @@ def start_health_server():
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     f"<title>{title} - 机器人后台</title><style>"
                     "*{box-sizing:border-box}"
-                    "body{background:#151621;color:#e6e5f0;font-family:system-ui,sans-serif;margin:0}"
-                    ".wrap{display:flex;min-height:100vh}"
-                    ".side{width:210px;background:#101120;border-right:1px solid #26273a;padding:18px 12px;flex-shrink:0}"
-                    ".logo{font-size:16px;font-weight:500;padding:6px 10px 16px;color:#c9c4f2}"
-                    ".side a{display:flex;align-items:center;gap:10px;color:#9a99ac;text-decoration:none;"
-                    "font-size:14px;padding:10px 12px;border-radius:10px;margin-bottom:2px}"
-                    ".side a:hover{background:#1c1d2e;color:#e6e5f0}"
-                    ".side a.active{background:#2b2854;color:#fff}"
-                    ".side details{margin-bottom:2px}"
+                    "html,body{height:100%}"
+                    "body{background:#1c1d2e;color:#e6e5f0;font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;"
+                    "margin:0;font-size:14px;-webkit-font-smoothing:antialiased}"
+                    "a{color:inherit;text-decoration:none}"
+                    "code{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#d6d2f5;"
+                    "background:#151621;padding:1px 6px;border-radius:6px}"
+                    # 顶部 header
+                    ".hd{position:sticky;top:0;z-index:50;height:52px;background:#151621;"
+                    "border-bottom:1px solid #26273a;display:flex;align-items:center;padding:0 18px;gap:14px}"
+                    ".hd .logo{font-size:15px;font-weight:500;color:#fff;display:flex;align-items:center;gap:8px}"
+                    ".hd .crumb{color:#8a89a0;font-size:13px}"
+                    ".hd .right{margin-left:auto;display:flex;align-items:center;gap:14px;color:#8a89a0;font-size:12px}"
+                    ".hd .burger{display:none;background:transparent;border:1px solid #2b2c40;color:#e6e5f0;"
+                    "border-radius:8px;padding:6px 10px;cursor:pointer}"
+                    # 整体布局
+                    ".wrap{display:flex;min-height:calc(100vh - 52px)}"
+                    # 侧栏
+                    ".side{width:224px;background:#151621;border-right:1px solid #26273a;padding:14px 10px;"
+                    "flex-shrink:0;overflow-y:auto;transition:transform .2s ease}"
+                    ".side .grp-title{padding:14px 12px 6px;font-size:11px;color:#6a6982;letter-spacing:1px;"
+                    "text-transform:uppercase;font-weight:500}"
+                    ".side .grp-title:first-child{padding-top:4px}"
+                    ".side a{display:flex;align-items:center;gap:10px;color:#a9a8bd;font-size:14px;"
+                    "padding:9px 12px;border-radius:8px;margin-bottom:1px;transition:background .12s,color .12s}"
+                    ".side a:hover{background:#1d1e2e;color:#fff}"
+                    ".side a.active{background:linear-gradient(135deg,#7c6cf0 0%,#5d4dd6 100%);color:#fff;"
+                    "box-shadow:0 4px 12px rgba(124,108,240,.25)}"
+                    ".side a.active .badge{background:rgba(255,255,255,.18);color:#fff}"
+                    ".side details{margin-bottom:1px}"
                     ".side summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;"
-                    "font-size:14px;color:#e6e5f0;padding:10px 12px;border-radius:10px;user-select:none}"
+                    "font-size:14px;color:#a9a8bd;padding:9px 12px;border-radius:8px;user-select:none;"
+                    "transition:background .12s,color .12s}"
                     ".side summary::-webkit-details-marker{display:none}"
-                    ".side summary:hover{background:#1c1d2e}"
-                    ".side summary::after{content:'⌄';margin-left:auto;color:#8a89a0;font-size:12px;transition:transform .15s}"
-                    ".side details[open] summary::after{transform:rotate(180deg)}"
+                    ".side summary:hover{background:#1d1e2e;color:#fff}"
                     ".side summary.active{background:#2b2854;color:#fff}"
-                    ".sub a{padding:8px 12px 8px 30px;font-size:13px;position:relative}"
-                    ".sub a::before{content:'○';position:absolute;left:13px;font-size:9px;color:#7a7990}"
-                    ".badge{margin-left:auto;font-size:10px;background:#34354a;color:#a9a8bd;"
-                    "border-radius:6px;padding:1px 6px}"
-                    ".main{flex:1;padding:22px;max-width:860px}"
-                    ".card{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:22px;margin-bottom:18px}"
-                    "h1{font-size:18px;font-weight:500;margin:0 0 4px}"
-                    ".sub{font-size:12px;color:#8a89a0;margin-bottom:18px}"
+                    ".side summary::after{content:'⌄';margin-left:auto;color:#6a6982;font-size:11px;transition:transform .15s}"
+                    ".side details[open] summary::after{transform:rotate(180deg)}"
+                    ".side .sub a{padding:7px 12px 7px 36px;font-size:13px;position:relative}"
+                    ".side .sub a::before{content:'○';position:absolute;left:18px;font-size:8px;color:#6a6982}"
+                    ".side .sub a.active::before{content:'●';color:#fff}"
+                    ".badge{margin-left:auto;font-size:10px;background:#2b2c40;color:#a9a8bd;"
+                    "border-radius:6px;padding:1px 6px;font-weight:500}"
+                    # 主区
+                    ".main{flex:1;padding:24px 28px;max-width:920px;min-width:0}"
+                    ".main h1{font-size:20px;font-weight:500;margin:0 0 4px;color:#fff}"
+                    ".main h1 .ico{margin-right:6px}"
+                    ".main .sub{font-size:13px;color:#8a89a0;margin-bottom:18px}"
+                    # 卡片
+                    ".card{background:#1d1e2e;border:1px solid #2b2c40;border-radius:12px;padding:20px 22px;margin-bottom:16px}"
+                    ".card h3{font-size:14px;font-weight:500;margin:0 0 12px;color:#c9c8da}"
+                    # 表单
                     "label{display:block;font-size:13px;color:#a9a8bd;margin:14px 0 5px}"
-                    "input{width:100%;background:#151621;border:1px solid #34354a;color:#e6e5f0;"
-                    "border-radius:10px;padding:10px 12px;font-size:15px}"
-                    "input:focus{outline:none;border-color:#7c6cf0}"
-                    "button{background:#7c6cf0;color:#fff;border:none;border-radius:10px;padding:11px 26px;"
-                    "font-size:15px;cursor:pointer;margin-top:18px}"
-                    "button:hover{background:#8d7ef5}"
-                    ".ok{color:#6fd08c;font-size:13px;margin-bottom:12px}"
-                    ".err{color:#f09595;font-size:13px;margin-bottom:12px}"
-                    ".cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px}"
-                    ".stat{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:16px}"
-                    ".stat .v{font-size:22px;font-weight:500;margin-top:6px}"
-                    ".stat .t{font-size:12px;color:#8a89a0}"
-                    ".q{display:inline-block;margin:6px 6px 0 0;background:#2b2854;color:#d6d2f5;"
-                    "text-decoration:none;font-size:13px;padding:9px 14px;border-radius:10px}"
+                    "input,select,textarea{width:100%;background:#151621;border:1px solid #2b2c40;color:#e6e5f0;"
+                    "border-radius:8px;padding:9px 12px;font-size:14px;font-family:inherit;transition:border-color .12s}"
+                    "input:focus,select:focus,textarea:focus{outline:none;border-color:#7c6cf0;"
+                    "box-shadow:0 0 0 3px rgba(124,108,240,.12)}"
+                    "textarea{font-family:ui-monospace,Consolas,monospace;line-height:1.5}"
+                    "button{background:linear-gradient(135deg,#7c6cf0 0%,#5d4dd6 100%);color:#fff;border:none;"
+                    "border-radius:8px;padding:9px 22px;font-size:14px;cursor:pointer;font-weight:500;"
+                    "transition:transform .1s,box-shadow .12s;box-shadow:0 2px 8px rgba(124,108,240,.2)}"
+                    "button:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(124,108,240,.35)}"
+                    "button:active{transform:translateY(0)}"
+                    "button.danger{background:linear-gradient(135deg,#e06666 0%,#b94545 100%);"
+                    "box-shadow:0 2px 8px rgba(224,102,102,.2)}"
+                    # 提示
+                    ".ok{color:#6fd08c;font-size:13px;padding:10px 14px;background:rgba(111,208,140,.08);"
+                    "border:1px solid rgba(111,208,140,.2);border-radius:8px;margin-bottom:14px}"
+                    ".err{color:#f09595;font-size:13px;padding:10px 14px;background:rgba(240,149,149,.08);"
+                    "border:1px solid rgba(240,149,149,.2);border-radius:8px;margin-bottom:14px}"
+                    # 统计卡片
+                    ".cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}"
+                    ".stat{background:linear-gradient(135deg,#1d1e2e 0%,#232438 100%);border:1px solid #2b2c40;"
+                    "border-radius:12px;padding:16px 18px;transition:transform .15s,border-color .15s}"
+                    ".stat:hover{transform:translateY(-2px);border-color:#3a3b5a}"
+                    ".stat .v{font-size:24px;font-weight:500;margin-top:6px;color:#fff}"
+                    ".stat .t{font-size:12px;color:#8a89a0;display:flex;align-items:center;gap:6px}"
+                    # 快捷入口
+                    ".q{display:inline-flex;align-items:center;gap:5px;margin:5px 5px 0 0;background:#2b2854;color:#d6d2f5;"
+                    "font-size:13px;padding:8px 13px;border-radius:8px;transition:background .12s,color .12s}"
+                    ".q:hover{background:#7c6cf0;color:#fff}"
+                    # 行
                     ".row{display:flex;align-items:center;justify-content:space-between;gap:16px;"
-                    "padding:13px 2px;border-bottom:1px solid #26273a}"
+                    "padding:12px 0;border-bottom:1px solid #26273a}"
                     ".row:last-child{border-bottom:none}"
-                    ".row .lbl{font-size:14px;color:#c9c8da}"
-                    ".row .lbl small{display:block;color:#8a89a0;font-size:12px;margin-top:2px}"
-                    ".row input[type=number],.row input[type=text]{width:220px;flex-shrink:0}"
+                    ".row .lbl{font-size:14px;color:#d6d2f5;flex:1;min-width:0}"
+                    ".row .lbl small{display:block;color:#8a89a0;font-size:12px;margin-top:2px;font-weight:400}"
+                    ".row input[type=number],.row input[type=text],.row select{width:240px;flex-shrink:0}"
+                    ".row textarea{width:100%;margin-top:8px}"
+                    # 开关
                     ".tg{position:relative;width:44px;height:24px;flex-shrink:0}"
                     ".tg input{opacity:0;width:0;height:0;position:absolute}"
                     ".tg .sl{position:absolute;inset:0;background:#34354a;border-radius:24px;transition:.2s;cursor:pointer}"
@@ -5964,22 +6382,57 @@ def start_health_server():
                     "background:#fff;border-radius:50%;transition:.2s}"
                     ".tg input:checked+.sl{background:#7c6cf0}"
                     ".tg input:checked+.sl:before{transform:translateX(20px)}"
-                    "textarea{width:100%;background:#151621;border:1px solid #34354a;color:#e6e5f0;"
-                    "border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit}"
-                    "textarea:focus{outline:none;border-color:#7c6cf0}"
-                    ".tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}"
-                    ".tbl td,.tbl th{padding:8px 6px;border-bottom:1px solid #26273a;text-align:left}"
-                    ".tbl th{color:#8a89a0;font-weight:400}"
+                    # 表格
+                    ".tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}"
+                    ".tbl td,.tbl th{padding:9px 8px;border-bottom:1px solid #26273a;text-align:left}"
+                    ".tbl th{color:#8a89a0;font-weight:500;font-size:12px}"
                     ".tbl tr:last-child td{border-bottom:none}"
-                    "@media(max-width:720px){.wrap{flex-direction:column}.side{width:100%;display:flex;"
-                    "overflow-x:auto;border-right:none;border-bottom:1px solid #26273a;padding:10px}"
-                    ".logo{display:none}.side a{flex-shrink:0}.main{padding:14px}"
-                    ".side details{display:contents}.side summary{flex-shrink:0;padding:8px 12px;font-size:13px}"
-                    ".side summary::after{display:none}.sub{display:contents}.sub a{padding:8px 12px}"
-                    ".sub a::before{display:none}}"
-                    "</style></head><body><div class='wrap'>"
-                    f"<nav class='side'><div class='logo'>🤖 机器人后台</div>{''.join(items)}</nav>"
-                    f"<main class='main'>{body}</main>{_id_picker_js()}</div></body></html>").encode("utf-8")
+                    ".tbl tr:hover td{background:rgba(124,108,240,.04)}"
+                    # 内部表单行（季节/授权等用 div 套 input 而不是 .row）
+                    "[style*='padding:13px 2px']{padding:12px 0 !important;border-bottom:1px solid #26273a !important}"
+                    # footer
+                    ".ft{padding:16px 28px;text-align:center;color:#6a6982;font-size:12px;border-top:1px solid #26273a}"
+                    ".ft a{color:#7c6cf0}"
+                    # 移动端
+                    "@media(max-width:768px){"
+                    ".hd{padding:0 12px}"
+                    ".hd .burger{display:inline-flex;align-items:center;justify-content:center}"
+                    ".wrap{flex-direction:column}"
+                    ".side{position:fixed;top:52px;left:0;bottom:0;width:260px;z-index:40;transform:translateX(-100%);"
+                    "box-shadow:4px 0 20px rgba(0,0,0,.3)}"
+                    ".side.open{transform:translateX(0)}"
+                    ".backdrop{position:fixed;inset:52px 0 0 0;background:rgba(0,0,0,.5);z-index:30;display:none}"
+                    ".backdrop.show{display:block}"
+                    ".main{padding:16px}"
+                    ".main h1{font-size:18px}"
+                    ".row{flex-direction:column;align-items:stretch;gap:8px}"
+                    ".row input[type=number],.row input[type=text],.row select{width:100%}"
+                    ".cards{grid-template-columns:repeat(2,1fr);gap:10px}"
+                    ".stat{padding:14px}"
+                    ".stat .v{font-size:20px}"
+                    ".ft{padding:14px;font-size:11px}"
+                    "}"
+                    # 滚动条（深色风格）
+                    "::-webkit-scrollbar{width:8px;height:8px}"
+                    "::-webkit-scrollbar-track{background:transparent}"
+                    "::-webkit-scrollbar-thumb{background:#2b2c40;border-radius:4px}"
+                    "::-webkit-scrollbar-thumb:hover{background:#3a3b5a}"
+                    "</style></head><body>"
+                    # 顶部 header
+                    "<header class='hd'>"
+                    "<button class='burger' onclick=\"document.querySelector('.side').classList.toggle('open');"
+                    "document.querySelector('.backdrop').classList.toggle('show')\" aria-label='菜单'>☰</button>"
+                    f"<div class='logo'>🤖 机器人后台</div>"
+                    f"<div class='crumb'>· {html.escape(title)}</div>"
+                    "<div class='right'>阿福积分机器人 v1.0</div>"
+                    "</header>"
+                    "<div class='backdrop' onclick=\"document.querySelector('.side').classList.remove('open');"
+                    "this.classList.remove('show')\"></div>"
+                    "<div class='wrap'>"
+                    f"<nav class='side'>{''.join(items)}</nav>"
+                    f"<main class='main'>{body}</main>{_id_picker_js()}</div>"
+                    "<footer class='ft'>© 2026 机器人后台 · Made with ❤️ for 阿福积分机器人</footer>"
+                    "</body></html>").encode("utf-8")
 
         def _group_options():
             """已知群下拉选项（授权群 ∪ 有积分数据的群）。"""
@@ -6005,24 +6458,132 @@ def start_health_server():
                     "dl.innerHTML=Object.keys(us).map(function(u){return '<option value=\"'+u+'\">'+us[u]+'</option>';}).join('');});}"
                     "document.querySelectorAll('select[data-users-for]').forEach(function(sel){sel.addEventListener('change',fill);});fill();});</script>")
 
+        def _otp_page(otp_token, err="", notice=""):
+            """二次验证页：密码已通过，等 Telegram 私聊发来的 6 位验证码。"""
+            msg = f"<div class='err'>{html.escape(err)}</div>" if err else ""
+            msg += f"<div class='ok'>{html.escape(notice)}</div>" if notice else ""
+            return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                    "<title>二次验证 - 机器人后台</title><style>"
+                    "*{box-sizing:border-box}html,body{height:100%}"
+                    "body{background:linear-gradient(135deg,#1c1d2e 0%,#151621 100%);color:#e6e5f0;"
+                    "font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;margin:0;display:flex;"
+                    "align-items:center;justify-content:center;padding:20px;min-height:100vh}"
+                    ".login{background:#1d1e2e;border:1px solid #2b2c40;border-radius:14px;padding:32px;"
+                    "width:min(380px,100%);box-shadow:0 20px 60px rgba(0,0,0,.4)}"
+                    ".login h1{font-size:20px;font-weight:500;margin:0 0 4px;text-align:center;color:#fff}"
+                    ".login .desc{font-size:12px;color:#8a89a0;text-align:center;margin-bottom:24px;line-height:1.6}"
+                    ".login label{display:block;font-size:13px;color:#a9a8bd;margin:14px 0 6px}"
+                    ".login input{width:100%;background:#151621;border:1px solid #2b2c40;color:#e6e5f0;"
+                    "border-radius:8px;padding:11px 14px;font-size:14px;transition:border-color .12s;"
+                    "letter-spacing:6px;text-align:center;font-size:20px}"
+                    ".login input:focus{outline:none;border-color:#7c6cf0;box-shadow:0 0 0 3px rgba(124,108,240,.12)}"
+                    ".login button{width:100%;background:linear-gradient(135deg,#7c6cf0 0%,#5d4dd6 100%);"
+                    "color:#fff;border:none;border-radius:8px;padding:12px;font-size:15px;cursor:pointer;"
+                    "font-weight:500;margin-top:22px;box-shadow:0 4px 14px rgba(124,108,240,.3)}"
+                    ".login .err{color:#f09595;font-size:13px;padding:10px 14px;background:rgba(240,149,149,.08);"
+                    "border:1px solid rgba(240,149,149,.2);border-radius:8px;margin-bottom:14px;text-align:center}"
+                    ".login .ok{color:#6fd08c;font-size:13px;padding:10px 14px;background:rgba(111,208,140,.08);"
+                    "border:1px solid rgba(111,208,140,.2);border-radius:8px;margin-bottom:14px;text-align:center}"
+                    ".login .resend{margin-top:14px;text-align:center}"
+                    ".login .resend button{background:transparent;border:1px solid #2b2c40;color:#a9a8bd;"
+                    "box-shadow:none;font-size:13px;padding:8px 16px;margin-top:0}"
+                    ".login .ft{padding:14px 0 0;margin-top:20px;border-top:1px solid #26273a;font-size:11px;"
+                    "color:#6a6982;text-align:center}"
+                    "</style></head><body><div class='login'>"
+                    "<h1>🔐 二次验证</h1>"
+                    "<div class='desc'>密码已通过<br>验证码已发到你的 Telegram 私聊<br><b>5 分钟内有效</b></div>"
+                    + msg +
+                    "<form method='post' action='/login2'>"
+                    f"<input type='hidden' name='otp_token' value='{html.escape(otp_token)}'>"
+                    "<label>6 位验证码</label>"
+                    "<input type='text' name='otp' inputmode='numeric' pattern='[0-9]{6}' "
+                    "maxlength='6' autocomplete='one-time-code' autofocus required placeholder='——————'>"
+                    "<button type='submit'>验 证 并 登 录</button></form>"
+                    "<form method='post' action='/login' class='resend'>"
+                    f"<input type='hidden' name='resend' value='{html.escape(otp_token)}'>"
+                    "<button type='submit'>🔄 重新发送验证码</button></form>"
+                    "<div class='ft'>© 2026 阿福积分机器人 · 二次验证保护</div>"
+                    "</div></body></html>").encode("utf-8")
+
+        def _admin_receivers():
+            """后台通知收件人：ADMIN_USER_ID + 全部 BOT_ADMINS（去重、过滤无效 0）。"""
+            ids = {ADMIN_USER_ID}
+            ids.update(BOT_ADMINS)
+            return sorted(i for i in ids if i)
+
+        def _send_otp_code(ip):
+            """生成验证码并私聊发给所有管理员。返回 (otp_token, code, err)。
+
+            任一管理员收到即可完成登录；全部发送失败才返回错误
+            （常见原因：管理员从未私聊过机器人，Telegram 禁止 bot 主动发起）。
+            """
+            code = f"{secrets.randbelow(1000000):06d}"
+            otp_token = secrets.token_urlsafe(24)
+            with sess_lock:
+                web_pending_otp[otp_token] = {"code": code, "exp": time.time() + 300, "ip": ip}
+                # 清理过期等待
+                for k in [k for k, v in web_pending_otp.items() if v["exp"] < time.time()]:
+                    web_pending_otp.pop(k, None)
+            if not (_bot_app and _bot_loop):
+                return otp_token, code, "bot 未就绪，无法发送验证码"
+            text = (f"🔐 <b>后台登录二次验证</b>\n\n"
+                    f"验证码：<code>{code}</code>\n"
+                    f"来源 IP：<code>{ip}</code>\n"
+                    f"5 分钟内有效，一次性使用。\n\n"
+                    f"⚠️ 如果不是你本人操作，请立即修改后台密码。")
+            async def _send():
+                ok_cnt = 0
+                for rid in _admin_receivers():
+                    try:
+                        await _bot_app.bot.send_message(chat_id=rid, text=text, parse_mode="HTML")
+                        ok_cnt += 1
+                    except Exception:
+                        logger.warning("验证码发送给 %s 失败（可能未私聊过机器人）", rid)
+                return ok_cnt
+            try:
+                ok_cnt = asyncio.run_coroutine_threadsafe(_send(), _bot_loop).result(15)
+                if ok_cnt <= 0:
+                    return otp_token, code, "验证码发送失败：所有管理员均未私聊过机器人（先在 Telegram 私聊发 /start，或用 /网页码 取码）"
+                return otp_token, code, ""
+            except Exception as exc:
+                logger.exception("登录验证码发送失败")
+                return otp_token, code, f"发送失败：{type(exc).__name__}: {str(exc)[:120]}"
+
         def _login_page(err=""):
             msg = "<div class='err'>密码错误，请重试</div>" if err else ""
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     "<title>登录 - 机器人后台</title><style>"
-                    "body{background:#151621;color:#e6e5f0;font-family:system-ui,sans-serif;margin:0;"
-                    "display:flex;justify-content:center;padding-top:12vh}"
-                    ".card{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:28px;width:min(400px,92vw)}"
-                    "h1{font-size:18px;font-weight:500;margin:0 0 18px}"
-                    "label{display:block;font-size:13px;color:#a9a8bd;margin-bottom:5px}"
-                    "input{width:100%;background:#151621;border:1px solid #34354a;color:#e6e5f0;border-radius:10px;padding:10px 12px;font-size:15px}"
-                    "button{width:100%;background:#7c6cf0;color:#fff;border:none;border-radius:10px;padding:12px;font-size:15px;cursor:pointer;margin-top:16px}"
-                    ".err{color:#f09595;font-size:13px;margin-bottom:10px}"
-                    ".tip{font-size:12px;color:#8a89a0;margin-top:14px}"
-                    "</style></head><body><div class='card'><h1>🔐 机器人后台</h1>" + msg +
+                    "*{box-sizing:border-box}"
+                    "html,body{height:100%}"
+                    "body{background:linear-gradient(135deg,#1c1d2e 0%,#151621 100%);color:#e6e5f0;"
+                    "font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;margin:0;display:flex;"
+                    "align-items:center;justify-content:center;padding:20px;min-height:100vh}"
+                    ".login{background:#1d1e2e;border:1px solid #2b2c40;border-radius:14px;padding:32px;"
+                    "width:min(380px,100%);box-shadow:0 20px 60px rgba(0,0,0,.4)}"
+                    ".login h1{font-size:20px;font-weight:500;margin:0 0 4px;text-align:center;color:#fff}"
+                    ".login .desc{font-size:12px;color:#8a89a0;text-align:center;margin-bottom:24px}"
+                    ".login label{display:block;font-size:13px;color:#a9a8bd;margin:14px 0 6px}"
+                    ".login input{width:100%;background:#151621;border:1px solid #2b2c40;color:#e6e5f0;"
+                    "border-radius:8px;padding:11px 14px;font-size:14px;transition:border-color .12s}"
+                    ".login input:focus{outline:none;border-color:#7c6cf0;box-shadow:0 0 0 3px rgba(124,108,240,.12)}"
+                    ".login button{width:100%;background:linear-gradient(135deg,#7c6cf0 0%,#5d4dd6 100%);"
+                    "color:#fff;border:none;border-radius:8px;padding:12px;font-size:15px;cursor:pointer;"
+                    "font-weight:500;margin-top:22px;transition:transform .1s,box-shadow .12s;"
+                    "box-shadow:0 4px 14px rgba(124,108,240,.3)}"
+                    ".login button:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(124,108,240,.45)}"
+                    ".login .err{color:#f09595;font-size:13px;padding:10px 14px;background:rgba(240,149,149,.08);"
+                    "border:1px solid rgba(240,149,149,.2);border-radius:8px;margin-bottom:14px;text-align:center}"
+                    ".login .ft{padding:14px 0 0;margin-top:20px;border-top:1px solid #26273a;font-size:11px;"
+                    "color:#6a6982;text-align:center}"
+                    "</style></head><body><div class='login'>"
+                    "<h1>🤖 机器人后台</h1>"
+                    "<div class='desc'>阿福积分机器人 · 登录管理</div>" + msg +
                     "<form method='post' action='/login'>"
-                    "<label>管理密码</label><input type='password' name='password' autofocus>"
+                    "<label>管理密码</label><input type='password' name='password' autofocus required>"
                     "<button type='submit'>登 录</button></form>"
+                    "<div class='ft'>© 2026 阿福积分机器人</div>"
                     "</div></body></html>").encode("utf-8")
 
         def _field_rows(gkey):
@@ -6068,19 +6629,39 @@ def start_health_server():
             return "".join(rows)
 
         def _home_page():
-            def stat(label, gname):
-                return f"<div class='stat'><div class='t'>{label}</div><div class='v'>{globals().get(gname)}</div></div>"
+            all_players = {u for users in game_chips.values() for u in users}
+            total_chips = sum(sum(users.values()) for users in game_chips.values())
+            group_count = len(AUTHORIZED_GROUPS)
+            # 今日四个游戏的局数（按日期分组的 profit dict 的 key 数）
+            today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+            today_bets = sum(
+                sum(len(v) for v in d.get(today, {}).values())
+                for d in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date)
+            )
+            season_txt = (season_name + " · 进行中") if season_active else "未开启"
+            today_profit = sum(
+                sum(users.values())
+                for d in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date)
+                for users in [d.get(today, {}).get(c, {}) for c in d.get(today, {})]
+            )
+            def stat(label, value, hint=""):
+                hint_html = f"<div style='font-size:11px;color:#6a6982;margin-top:4px'>{hint}</div>" if hint else ""
+                return f"<div class='stat'><div class='t'>{label}</div><div class='v'>{value}</div>{hint_html}</div>"
+            cards = (
+                stat("👥 玩家总数", f"{len(all_players):,}", "跨所有授权群去重") +
+                stat("💰 积分总量", f"{total_chips:,}", "所有玩家钱包余额之和") +
+                stat("🏘️ 授权群数", f"{group_count}", "Bot 服务覆盖的群") +
+                stat("🎮 今日局数", f"{today_bets:,}", f"德州+赛车+21点+炸金花 · {today}") +
+                stat("📈 今日净盈亏", f"{today_profit:+,}", "正=玩家净赚，负=玩家净输") +
+                stat("🏆 赛季", season_txt, f"ID {season_id}" if season_id else "")
+            )
             quick = "".join(f"<a class='q' href='/page/{g}'>{i} {n}</a>" for g, n, i in SETTINGS_GROUPS if g != "dashboard")
             return _page("群体总览", "dashboard",
-                "<h1>📊 群体总览</h1><div class='sub'>当前生效的关键数值（改设置去左侧菜单）</div>"
-                "<div class='cards'>" +
-                stat("德州入座门槛", "MIN_ENTRY_CHIPS") +
-                stat("新玩家初始积分", "GAME_STARTING_CHIPS") +
-                stat("单回合思考(秒)", "TURN_TIMEOUT") +
-                stat("赛车自动开赛(秒)", "RACE_AUTO_START") +
-                stat("应急每日次数", "EMERGENCY_MAX_USES") +
-                stat("炸金花底注", "JINHUA_ANTE") +
-                "</div><div class='card' style='margin-top:18px'><h1>快捷入口</h1>" + quick + "</div>")
+                "<h1><span class='ico'>📊</span>群体总览</h1>"
+                "<div class='sub'>实时数据快照 · 改设置去左侧菜单 · 数据修改去 Telegram 群用 /命令</div>"
+                f"<div class='cards'>{cards}</div>"
+                "<div class='card' style='margin-top:18px'>"
+                "<h3>⚡ 快捷入口</h3>" + quick + "</div>")
 
         def _members_body():
             """群组管理只读页：成员档案 / 进出记录 / 入群申请 / 白名单 / 操作记录。"""
@@ -6310,6 +6891,56 @@ def start_health_server():
                             "<div class='row'><div class='lbl'>数据文件<small>.csv / .xls / .xlsx</small></div>"
                             "<input type='file' name='file' accept='.csv,.xls,.xlsx' required></div>"
                             "<button type='submit'>✅ 确认导入</button></form></div>")
+                elif gkey == "points" and sub == "lottery":
+                    # 群组抽奖页：上半活动列表 + 下半配置表单
+                    def _fmt_ts(t):
+                        try: return time.strftime("%m-%d %H:%M", time.localtime(float(t)))
+                        except Exception: return "-"
+                    def _row(lo, active):
+                        cid = lo.get("chat_id", -1)
+                        status = lo.get("status", "?")
+                        badges = {"open": "<span style='color:#6fd08c'>进行中</span>",
+                                  "drawing": "<span style='color:#f0c060'>开奖中</span>",
+                                  "finished": "<span style='color:#8a89a0'>已结束</span>",
+                                  "cancelled": "<span style='color:#f09595'>已取消</span>"}
+                        ends_in = ""
+                        if status == "open":
+                            left = int(lo["end_ts"] - time.time())
+                            ends_in = f" · 剩 {left}s" if left > 0 else " · 到点开奖中"
+                        winners = lo.get("winners") or []
+                        win_txt = f"{len(winners)} 人" if winners else "—"
+                        fee_txt = f" {int(lo.get('fee', 0))}分/人" if lo.get("fee") else " 免费"
+                        return (f"<tr><td><code>{cid}</code></td>"
+                                f"<td>{html.escape(str(lo.get('title', ''))[:24])}</td>"
+                                f"<td>{badges.get(status, status)}{ends_in}</td>"
+                                f"<td>{len(lo.get('participants', []))}</td>"
+                                f"<td>{win_txt}</td>"
+                                f"<td>{fee_txt}</td>"
+                                f"<td>{_fmt_ts(lo.get('start_ts'))}</td></tr>")
+                    # 进行中优先；其余按 start_ts 倒序
+                    items = list(lotteries.items())
+                    items.sort(key=lambda kv: (kv[1].get("status") != "open", -(kv[1].get("start_ts") or 0)))
+                    rows_html = "".join(_row(lo, lo.get("status") == "open") for _, lo in items[:20])
+                    if not rows_html:
+                        rows_html = "<tr><td colspan='7' style='text-align:center;color:#6a6982'>暂无活动</td></tr>"
+                    status_html = ("<div class='err' style='margin-bottom:12px'>⚠️ 群组抽奖当前已关闭</div>"
+                                   if not LOTTERY_ENABLED else "")
+                    body = (f"<h1>{gicon} {sname}</h1>"
+                            f"<div class='sub'>群成员发「<code>{html.escape(LOTTERY_KEYWORD)}</code>」或 <code>/开奖</code> 即可参与。"
+                            "管理员用 <code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数</code> 开局，"
+                            "<code>/开奖开奖</code> 手动开奖</div>{msg}{err}{status_html}"
+                            "<div class='card'><h3>📋 活动列表（最近 20 条，进行中置顶）</h3>"
+                            "<table class='tbl'><tr><th>群</th><th>标题</th><th>状态</th><th>参与</th><th>中奖</th><th>参与费</th><th>开局</th></tr>"
+                            f"{rows_html}</table></div>"
+                            # 配置表单（与设置页风格统一）
+                            f"<div class='card'><h3>⚙️ 配置</h3><form method='post' action='/save'>"
+                            f"<input type='hidden' name='group' value='points/lottery'>"
+                            + _field_rows("points/lottery")
+                            + "<div class='sub' style='margin-top:16px'>消息模板支持占位符："
+                              "<code>{title}</code> <code>{nick}</code> <code>{n}</code> <code>{balance}</code> "
+                              "<code>{prize_list}</code> <code>{keyword}</code> <code>{duration}</code> "
+                              "<code>{winners}</code> <code>{reason}</code></div>"
+                            "<button type='submit' style='margin-top:8px'>💾 保存全部抽奖设置</button></form></div>")
                 elif gkey == "points" and sub == "rule":
                     cap = f"每日上限 {CHAT_DAILY_CAP} 分" if CHAT_DAILY_CAP else "不设上限"
                     fee = f"（手续费 {INHERIT_FEE_PERCENT}%）" if INHERIT_FEE_PERCENT else "（免手续费）"
@@ -6484,7 +7115,27 @@ def start_health_server():
                     if time.time() < lock_until:
                         self._send(429, b"too many failed logins, try again in 10 minutes", [("Content-Type", "text/plain")]); return
                     pwd = (form.get("password", [""])[0] or "").strip()
+                    # 重新发送验证码（OTP 页上的「重新发送」按钮）
+                    resend_tok = form.get("resend", [""])[0]
+                    if resend_tok:
+                        with sess_lock:
+                            old = web_pending_otp.pop(resend_tok, None)
+                        if old and secrets.compare_digest(pwd, _web_password):
+                            tok, _code, serr = _send_otp_code(ip)
+                            if serr:
+                                self._send(200, _otp_page(tok, err=serr + "（请检查是否已私聊过机器人 /start）"))
+                            else:
+                                self._send(200, _otp_page(tok, notice="✅ 新的验证码已发送"))
+                        else:
+                            self._send(200, _login_page(err=1))
+                        return
                     if secrets.compare_digest(pwd, _web_password):
+                        # 二次验证：密码对了还不够，还要 Telegram 私聊验证码
+                        if globals().get("WEB_OTP_ENABLED", True):
+                            tok, _code, serr = _send_otp_code(ip)
+                            self._send(200, _otp_page(tok,
+                                err=(serr + "（请先在 Telegram 私聊机器人发 /start）") if serr else ""))
+                            return
                         token = secrets.token_urlsafe(32)
                         with sess_lock:
                             sessions[token] = time.time() + 7 * 86400
@@ -6495,6 +7146,52 @@ def start_health_server():
                             new_cnt = _cnt + 1
                             login_fails[ip] = [new_cnt, time.time() + 600 if new_cnt >= 5 else 0]
                         self._send(200, _login_page(err=1))
+                    return
+                if path == "/login2":
+                    """二次验证提交：校验 Telegram 验证码，通过才建会话。"""
+                    ip = self.client_address[0]
+                    with sess_lock:
+                        _c2, lock2 = otp_fails.get(ip, [0, 0])
+                    if time.time() < lock2:
+                        self._send(429, b"too many failed otp attempts", [("Content-Type", "text/plain")]); return
+                    tok = (form.get("otp_token", [""])[0] or "").strip()
+                    code = (form.get("otp", [""])[0] or "").strip()
+                    with sess_lock:
+                        rec = web_pending_otp.get(tok)
+                    if not rec or rec["exp"] < time.time() or rec["ip"] != ip:
+                        web_pending_otp.pop(tok, None)
+                        self._send(200, _login_page(err=1))  # 超时/失效 → 回密码页重来
+                        return
+                    if secrets.compare_digest(code, rec["code"]):
+                        web_pending_otp.pop(tok, None)
+                        token = secrets.token_urlsafe(32)
+                        with sess_lock:
+                            sessions[token] = time.time() + 7 * 86400
+                            login_fails.pop(ip, None)
+                            otp_fails.pop(ip, None)
+                        # 登录成功通知：发给所有管理员，让全员知道有人进了后台
+                        try:
+                            ua = (self.headers.get("User-Agent") or "")[:120]
+                            if _bot_app and _bot_loop:
+                                async def _notify():
+                                    ntxt = (f"✅ <b>后台登录成功</b>\n\n"
+                                            f"来源 IP：<code>{ip}</code>\n"
+                                            f"时间：{datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                            f"设备：<code>{html.escape(ua)}</code>")
+                                    for rid in _admin_receivers():
+                                        try:
+                                            await _bot_app.bot.send_message(chat_id=rid, text=ntxt, parse_mode="HTML")
+                                        except Exception:
+                                            pass
+                                asyncio.run_coroutine_threadsafe(_notify(), _bot_loop).result(8)
+                        except Exception:
+                            pass  # 通知失败不影响登录
+                        self._redirect("/", cookie=f"wb_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800")
+                    else:
+                        with sess_lock:
+                            new_cnt = _c2 + 1
+                            otp_fails[ip] = [new_cnt, time.time() + 600 if new_cnt >= 5 else 0]
+                        self._send(200, _otp_page(tok, err="验证码错误，请重试"))
                     return
                 # 其余全部 POST 操作（管理员/加减分/排位分/保存…）必须已登录，防止未授权调用
                 if not _check_session(self.headers.get("Cookie")):

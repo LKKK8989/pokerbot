@@ -110,8 +110,8 @@ SIDEBAR_CHILDREN = {"texas": ["season"]}  # 把某些独立组折叠进父组显
 # 侧边栏三大节（照阿福：节标题 + 节内菜单项）。不在任何节里的组保持原样渲染在最后。
 SIDEBAR_SECTIONS = [
     ("🤖 机器人设置", ["dashboard", "schedule", "commands", "general", "admin", "security"]),
-    ("👥 群组设置",   ["members", "autodel"]),
-    ("🎲 娱乐功能",   ["texas", "blackjack", "jinhua", "race", "points", "lottery"]),
+    ("👥 群组设置",   ["members", "autodel", "points", "lottery"]),
+    ("🎲 娱乐功能",   ["texas", "blackjack", "jinhua", "race"]),
 ]
 SUBPAGES = {
     "points": [
@@ -131,6 +131,12 @@ SUBPAGES = {
         ("buy",      "购买积分"),
         ("buypkg",   "积分套餐管理"),
         ("box",      "积分盲盒"),
+        ("guess",    "积分竞猜"),
+    ],
+    "members": [
+        ("mlist",   "群组成员列表"),
+        ("records", "进出与申请"),
+        ("ops",     "白名单与操作"),
     ],
     "admin": [
         ("auth",      "授权群管理"),
@@ -266,6 +272,10 @@ SETTINGS_FIELDS = [
     ("auction_enabled",         "AUCTION_ENABLED",         "积分拍卖开关",              "bool",  0,   1,       "points/auction"),
     ("auction_step",            "AUCTION_STEP",            "每次加价幅度(积分)",        "int",   10,  100000,  "points/auction"),
     ("auction_duration",        "AUCTION_DURATION",        "拍卖时长(秒)",              "int",   30,  3600,    "points/auction"),
+    ("guess_enabled",           "GUESS_ENABLED",           "积分竞猜开关",              "bool",  0,   1,       "points/guess"),
+    ("guess_min_bet",           "GUESS_MIN_BET",           "竞猜单注下限(积分)",        "int",   1,   100000,  "points/guess"),
+    ("guess_max_bet",           "GUESS_MAX_BET",           "竞猜单注上限(积分,0=不限)", "int",   0,   1000000, "points/guess"),
+    ("guess_duration",          "GUESS_DURATION",          "竞猜下注时长(分钟)",        "int",   1,   1440,    "points/guess"),
     # 群组抽奖（基础版：1 个 prize+count 形式；点数抽奖/乐透等高级类型后续按需扩展）
     ("lottery_enabled",         "LOTTERY_ENABLED",         "群组抽奖总开关",            "bool",  0,   1,       "lottery"),
     ("lottery_keyword",         "LOTTERY_KEYWORD",         "参与触发词(也支持 /开奖)",   "short", 0,   0,       "lottery"),
@@ -386,6 +396,10 @@ INHERIT_FEE_PERCENT = 0
 AUCTION_ENABLED = 1
 AUCTION_STEP = 100
 AUCTION_DURATION = 60
+GUESS_ENABLED = 1           # 积分竞猜开关
+GUESS_MIN_BET = 10          # 竞猜单注下限
+GUESS_MAX_BET = 0           # 竞猜单注上限（0=不限）
+GUESS_DURATION = 5          # 竞猜下注时长（分钟），到点封盘等管理员结算
 BUY_ENABLED = 1
 BUY_MIN = 1000
 BUY_MAX = 100000
@@ -465,7 +479,9 @@ box_pool = []                                        # 盲盒奖品池 [{"name",
 buy_packages = []                                    # 购买积分套餐 [{"name","cny","points","sort","on"}]
 rp_packets = {}                                      # pid -> {"cid","from","left_amt","left_n","grabbed":{uid:amt},"ts","msg_id"}
 auctions = {}                                        # cid -> {"item","price","top_uid","end_ts","msg_id","task"} 拍卖（托管竞得者积分）
+guesses = {}                                         # cid -> 竞猜 {"q","a","b","end_ts","locked","bets":{uid:{"A","B"}},"side_pots":{"A","B"},"msg_id","task"}
 buy_orders = {}                                      # oid -> {"cid","uid","amount","ts"} 购买积分申请（管理员人工确认）
+warn_counts = defaultdict(lambda: defaultdict(int))  # warn_counts[cid][uid] = 警告次数（网页成员列表加减）
 redeem_goods = []                                    # 积分兑换商品 [{"name","price","left","redeemed","desc","on"}] left=0 不限
 redeem_counts = {}                                   # uid -> 全期已兑换次数（每人限购用）
 
@@ -975,8 +991,14 @@ def force_save_now():
                 "mall_orders": mall_orders[-200:],
                 "auctions": {str(cid): {"item": a["item"], "price": a["price"], "top_uid": a["top_uid"],
                                         "step": a.get("step", AUCTION_STEP), "end_ts": a["end_ts"], "msg_id": a["msg_id"]} for cid, a in auctions.items()},
+                "guesses": {str(cid): {"q": g["q"], "a": g["a"], "b": g["b"], "end_ts": g["end_ts"],
+                                       "locked": bool(g.get("locked")), "msg_id": g.get("msg_id"),
+                                       "bets": {str(uid): {"A": int(v["A"]), "B": int(v["B"])} for uid, v in g["bets"].items()},
+                                       "side_pots": {"A": int(g["side_pots"]["A"]), "B": int(g["side_pots"]["B"])}}
+                            for cid, g in guesses.items()},
                 "buy_orders": {oid: dict(o) for oid, o in buy_orders.items()},
                 "redeem_counts": {str(uid): int(v) for uid, v in redeem_counts.items()},
+                "warn_counts": {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in warn_counts.items()},
                 "member_profiles": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in member_profiles.items()},
                 "whitelist": {str(cid): sorted(users) for cid, users in whitelist.items()},
                 "leave_records": {str(cid): v[-100:] for cid, v in leave_records.items()},
@@ -1156,6 +1178,19 @@ def load_data():
                                       "step": int(a.get("step", AUCTION_STEP)),
                                       "end_ts": float(a["end_ts"]), "msg_id": a.get("msg_id"), "task": None}
             except (KeyError, ValueError, TypeError): continue
+        guesses.clear()
+        for cid, g in data.get("guesses", {}).items():
+            try:
+                _bets = {int(u): {"A": int(v.get("A", 0)), "B": int(v.get("B", 0))}
+                         for u, v in (g.get("bets") or {}).items()}
+                _pots = g.get("side_pots") or {}
+                guesses[int(cid)] = {"q": str(g["q"]), "a": str(g["a"]), "b": str(g["b"]),
+                                     "end_ts": float(g["end_ts"]), "locked": bool(g.get("locked")),
+                                     "bets": _bets,
+                                     "side_pots": {"A": int(_pots.get("A", sum(v["A"] for v in _bets.values()))),
+                                                   "B": int(_pots.get("B", sum(v["B"] for v in _bets.values())))},
+                                     "msg_id": g.get("msg_id"), "task": None}
+            except (KeyError, ValueError, TypeError): continue
         buy_orders.clear()
         for oid, o in data.get("buy_orders", {}).items():
             try: buy_orders[str(oid)] = {"cid": int(o["cid"]), "uid": int(o["uid"]), "amount": int(o["amount"]), "ts": o.get("ts", "")}
@@ -1164,6 +1199,10 @@ def load_data():
         for uid, v in data.get("redeem_counts", {}).items():
             try: redeem_counts[int(uid)] = int(v)
             except (KeyError, ValueError, TypeError): continue
+        for cid, users in data.get("warn_counts", {}).items():
+            for uid, v in users.items():
+                try: warn_counts[int(cid)][int(uid)] = int(v)
+                except (KeyError, ValueError, TypeError): continue
         # 群组管理数据恢复
         for cid, users in data.get("member_profiles", {}).items():
             for uid, v in users.items():
@@ -4723,6 +4762,12 @@ async def on_button(update, context):
                 await q.answer("无效数据", show_alert=True); return
             await _auction_bid(auc_cid, uid, context, q)
             return
+        if data.startswith("guessbet_"):
+            try: _, side, amount = data.split("_"); amount = int(amount)
+            except ValueError:
+                await q.answer("无效数据", show_alert=True); return
+            await _guess_bet(cid, uid, context, side, amount, q)
+            return
         if data.startswith("buyok_") or data.startswith("buyno_"):
             if not is_bot_admin(uid):
                 await q.answer("仅 Bot 管理员可操作", show_alert=True); return
@@ -4816,11 +4861,6 @@ def _autodel_text_hit(message, text):
 def _autodel_media_hit(message):
     """自动删除规则（媒体类）：返回规则名或 None。"""
     if message is None:
-        return None
-    # 机器人进群/被移出的服务提示永不删（用户要求保留，如「XX 移除了机器人」）
-    if any(getattr(u, "is_bot", False) for u in (message.new_chat_members or [])):
-        return None
-    if message.left_chat_member is not None and getattr(message.left_chat_member, "is_bot", False):
         return None
     if (message.new_chat_members or message.left_chat_member or message.new_chat_title
             or message.new_chat_photo or message.pinned_message or message.group_chat_created
@@ -6118,6 +6158,186 @@ async def _auction_bid(cid, uid, context, q):
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🔨 加价 {a['step']}", callback_data=f"auc_bid_{cid}")]]))
 
 
+# ---------- 积分竞猜：管理开局面两方下注，封盘后按比例瓜分奖池 ----------
+def _guess_buttons(cid):
+    g = guesses[cid]
+    return InlineKeyboardMarkup([[InlineKeyboardButton(f"🔵 {g['a']} {amt}", callback_data=f"guessbet_A_{amt}"),
+                                  InlineKeyboardButton(f"🔴 {g['b']} {amt}", callback_data=f"guessbet_B_{amt}")]
+                                 for amt in FIXED_BET_AMOUNTS])
+
+
+def _guess_text(cid):
+    g = guesses[cid]
+    ta, tb = g["side_pots"]["A"], g["side_pots"]["B"]
+    pot = ta + tb
+    od_a = f"{pot / ta:.2f}" if ta else "-"
+    od_b = f"{pot / tb:.2f}" if tb else "-"
+    if g.get("locked"):
+        return (f"🎯 积分竞猜｜{g['q']}（已封盘）\n"
+                f"🔵 {g['a']}｜池 {ta}\n🔴 {g['b']}｜池 {tb}\n"
+                f"⏳ 下注已截止，等待管理员结算：群里发「竞猜结算 A/B」开出答案，「竞猜撤销」全额退款")
+    return (f"🎯 积分竞猜｜{g['q']}\n"
+            f"🔵 {g['a']}｜池 {ta}｜赔率约 {od_a}\n🔴 {g['b']}｜池 {tb}｜赔率约 {od_b}\n"
+            f"⏱ 剩余 {max(0, int(g['end_ts'] - now_bj().timestamp()))} 秒｜点按钮下注，封盘后由猜中一方按注额比例瓜分全部奖池！")
+
+
+async def _guess_bet(cid, uid, context, side, amount, q):
+    """竞猜下注：立即扣分托管进奖池，封盘后拒绝。"""
+    g = guesses.get(cid)
+    if not g:
+        await q.answer("竞猜已结束", show_alert=True); return
+    if g.get("locked") or now_bj().timestamp() > g["end_ts"]:
+        await q.answer("已封盘，等待结算", show_alert=True); return
+    if side not in ("A", "B") or amount <= 0:
+        await q.answer("无效下注", show_alert=True); return
+    if amount < GUESS_MIN_BET:
+        await q.answer(f"单注至少 {GUESS_MIN_BET} 积分", show_alert=True); return
+    if GUESS_MAX_BET and amount > GUESS_MAX_BET:
+        await q.answer(f"单注最多 {GUESS_MAX_BET} 积分", show_alert=True); return
+    async with wallet_locks[uid]:
+        if game_chips[cid][uid] < amount:
+            await q.answer(f"积分不足：需 {amount}，你当前 {game_chips[cid][uid]}", show_alert=True); return
+        game_chips[cid][uid] -= amount
+        g["bets"].setdefault(uid, {"A": 0, "B": 0})[side] += amount
+        g["side_pots"][side] += amount
+        save_data()
+    await q.answer(f"✅ 已押 {'🔵 ' + g['a'] if side == 'A' else '🔴 ' + g['b']} {amount} 分")
+    await safe_edit(context.bot, cid, g["msg_id"], _guess_text(cid), reply_markup=_guess_buttons(cid))
+
+
+async def _guess_close(cid, app):
+    """竞猜倒计时：到点封盘（不下注、不退款），等管理员结算/撤销。"""
+    g = guesses.get(cid)
+    if not g: return
+    remain = g["end_ts"] - now_bj().timestamp()
+    if remain > 0:
+        await asyncio.sleep(remain)
+        g = guesses.get(cid)
+        if not g: return
+    if g.get("locked"): return
+    g["locked"] = True
+    save_data()
+    try:
+        await safe_edit(app.bot, cid, g["msg_id"], _guess_text(cid), reply_markup=None)
+    except Exception:
+        logger.exception("竞猜封盘看板刷新异常（已吞并）")
+
+
+async def _guess_do_settle(app, cid, winner):
+    """结算：猜中方按注额比例瓜分全部奖池；无人猜中则奖池沉没。返回错误文案或 None。"""
+    g = guesses.get(cid)
+    if not g: return "本群没有进行中的竞猜"
+    winner = (winner or "").strip().upper()
+    if winner not in ("A", "B"): return "用法：竞猜结算 A 或 竞猜结算 B"
+    pots = g["side_pots"]
+    total = pots["A"] + pots["B"]
+    win_total = pots[winner]
+    paid = []
+    for uid, bets in g["bets"].items():
+        stake = bets.get(winner, 0)
+        if not stake or not win_total:
+            continue
+        amt = total * stake // win_total  # 比例瓜分（向下取整）
+        if amt <= 0:
+            continue
+        async with wallet_locks[uid]:
+            old = game_chips[cid].get(uid, 0)
+            game_chips[cid][uid] = old + amt
+        paid.append((uid, stake, amt, old))
+    guesses.pop(cid, None)
+    save_data()
+    ans_txt = g["a"] if winner == "A" else g["b"]
+    if paid:
+        lines = ""
+        for uid, stake, amt, _old in sorted(paid, key=lambda x: -x[2])[:20]:
+            lines += f"\n🎉 {await get_name(app, uid, cid=cid)} 押 {stake} → 分得 {amt}"
+        for uid, _s, _amt, old in paid:  # 等级联动（按派付后余额）
+            await _check_level_change(app, cid, uid, old, game_chips[cid].get(uid, 0))
+    else:
+        lines = "\n（无人猜中，奖池沉没）"
+    try:
+        await send_settle(app, cid, f"🎯 竞猜结算｜{g['q']}\n✅ 答案：{ans_txt}｜奖池 {total} 分（{len(paid)} 人瓜分）" + lines)
+    except Exception:
+        logger.exception("竞猜结算播报异常（已吞并）")
+    return None
+
+
+async def _guess_do_cancel(app, cid):
+    """撤销竞猜：全额退还托管注金。返回错误文案或 None。"""
+    g = guesses.get(cid)
+    if not g: return "本群没有进行中的竞猜"
+    n = 0
+    for uid, bets in g["bets"].items():
+        back = int(bets.get("A", 0)) + int(bets.get("B", 0))
+        if back <= 0:
+            continue
+        async with wallet_locks[uid]:
+            game_chips[cid][uid] = game_chips[cid].get(uid, 0) + back
+        n += 1
+    guesses.pop(cid, None)
+    save_data()
+    try:
+        await send_settle(app, cid, f"🎯 竞猜「{g['q']}」已撤销，{n} 人的托管注金已全额退回。")
+    except Exception:
+        logger.exception("竞猜撤销播报异常（已吞并）")
+    return None
+
+
+async def cmd_guess_open(update, context):
+    """管理员发起积分竞猜：/开竞猜 题目/选项A/选项B [时长分钟]，按钮下注，封盘后按比例瓜分。"""
+    if not await need_auth(update): return
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 竞猜请在群聊中使用。"); return
+    if not is_bot_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅 Bot 管理员可发起竞猜。"); return
+    if not GUESS_ENABLED:
+        await update.message.reply_text("❌ 竞猜功能未开启（网页「积分系统 → 积分竞猜」可开启）。"); return
+    cid = update.effective_chat.id
+    spec = " ".join(context.args or []).strip()
+    parts = [p.strip() for p in spec.split("/") if p.strip()]
+    if len(parts) < 3 or len(parts) > 4:
+        await update.message.reply_text("用法：/开竞猜 题目/选项A/选项B [时长分钟]"); return
+    duration = GUESS_DURATION
+    if len(parts) == 4:
+        if not parts[3].isdigit():
+            await update.message.reply_text("❌ 时长必须是分钟数字。"); return
+        duration = max(1, min(1440, int(parts[3])))
+    if cid in guesses:
+        await update.message.reply_text("⚠️ 本群已有竞猜进行中，结算或撤销后再开。"); return
+    guesses[cid] = {"q": parts[0][:50], "a": parts[1][:20], "b": parts[2][:20],
+                    "end_ts": now_bj().timestamp() + duration * 60, "locked": False,
+                    "bets": {}, "side_pots": {"A": 0, "B": 0}, "msg_id": None, "task": None}
+    msg = await safe_send(context.bot, cid, _guess_text(cid), reply_markup=_guess_buttons(cid))
+    if msg: guesses[cid]["msg_id"] = msg.message_id
+    guesses[cid]["task"] = asyncio.create_task(_guess_close(cid, context.application))
+    save_data()
+
+
+async def cmd_guess_settle(update, context):
+    """管理员开出竞猜答案：/竞猜结算 A 或 /竞猜结算 B，猜中方按比例瓜分奖池。"""
+    if not await need_auth(update): return
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 请在群聊中使用。"); return
+    if not is_bot_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅 Bot 管理员可结算竞猜。"); return
+    err = await _guess_do_settle(context.application, update.effective_chat.id,
+                                 (context.args or [""])[0] if context.args else "")
+    if err:
+        await update.message.reply_text(f"❌ {err}")
+
+
+async def cmd_guess_cancel(update, context):
+    """管理员撤销竞猜：/竞猜撤销，全额退款。"""
+    if not await need_auth(update): return
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 请在群聊中使用。"); return
+    if not is_bot_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅 Bot 管理员可撤销竞猜。"); return
+    err = await _guess_do_cancel(context.application, update.effective_chat.id)
+    if err:
+        await update.message.reply_text(f"❌ {err}")
+
+
 async def cmd_box(update, context):
     """积分盲盒：扣 BOX_PRICE 开一次，按权重随机 BOX_POOL，结果走 send_settle 自动回收。"""
     if not await need_auth(update): return
@@ -6815,6 +7035,10 @@ async def post_init(app):
         if not _a.get("task"):
             try: _a["task"] = asyncio.create_task(_auction_settle(_cid, app))
             except Exception: pass
+    for _cid, _g in list(guesses.items()):  # 竞猜：未封盘且未到点的重建封盘倒计时；已封盘的原样等待结算
+        if not _g.get("locked") and not _g.get("task") and _g["end_ts"] > now_bj().timestamp():
+            try: _g["task"] = asyncio.create_task(_guess_close(_cid, app))
+            except Exception: pass
     # 注册 Telegram 原生命令菜单（仅支持拉丁字符命令，中文命令走自定义路由）。
     # 作用：群里打 / 能看到、能点；命令以 bot_command 实体发送，不受隐私模式影响，必定送达。
     # 菜单内容在「命令管理」页可改，存 bot_settings.json 的 tg_menu。
@@ -6908,6 +7132,8 @@ CMD_ALIASES = {
     "群管理员": cmd_adminlist_tg, "admins": cmd_adminlist_tg,
     "转赠": cmd_inherit, "继承": cmd_inherit, "转让": cmd_inherit, "transfer": cmd_inherit,
     "拍卖": cmd_auction, "auction": cmd_auction,
+    "开竞猜": cmd_guess_open, "guess": cmd_guess_open,
+    "竞猜结算": cmd_guess_settle, "竞猜撤销": cmd_guess_cancel,
     "盲盒": cmd_box, "开盲盒": cmd_box, "box": cmd_box,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
 }
@@ -7278,9 +7504,9 @@ def start_health_server():
                     "<footer class='ft'>© 机器人后台</footer>"
                     "</body></html>").encode("utf-8")
 
-        def _group_options():
-            """已知群下拉选项（授权群 ∪ 有积分数据的群）。"""
-            return "".join(f"<option value='{cid}'>{html.escape(chat_name_cache.get(cid) or '')} {cid}</option>"
+        def _group_options(selected=0):
+            """已知群下拉选项（授权群 ∪ 有积分数据的群）；selected=回显选中。"""
+            return "".join(f"<option value='{cid}'{' selected' if cid == selected else ''}>{html.escape(chat_name_cache.get(cid) or '')} {cid}</option>"
                            for cid in sorted(set(AUTHORIZED_GROUPS) | set(game_chips.keys())))
 
         def _all_user_options(selected=0):
@@ -7526,8 +7752,9 @@ def start_health_server():
                 "<div class='sub' style='margin-bottom:8px'>点 ▲▼ 调整左侧菜单顺序，立即生效并保存</div>"
                 + sort_rows + "</div>")
 
-        def _members_body():
-            """群组管理只读页：成员档案 / 进出记录 / 入群申请 / 白名单 / 操作记录。"""
+        def _members_body(mode="ops"):
+            """群组管理分页：records=进出记录+入群申请；ops=白名单+操作记录。
+            （成员档案已独立成「群组成员列表」mlist 页，这里不再重复展示）"""
             def tbl(headers, rows):
                 if not rows:
                     return "<div class='sub' style='margin-top:8px'>暂无记录</div>"
@@ -7535,61 +7762,144 @@ def start_health_server():
                 body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
                 return f"<table class='tbl'><tr>{head}</tr>{body}</table>"
             parts = []
-            # 1. 已见成员档案（按群汇总，每群展示活跃前 30）
-            for cid, users in member_profiles.items():
-                if not users:
-                    continue
-                ranked = sorted(users.items(), key=lambda kv: -(kv[1].get("msgs", 0) or 0))[:30]
-                rows = [[html.escape(str(v.get("name", f"用户{u}"))), f"<code>{u}</code>",
-                         v.get("msgs", 0), v.get("first", "-"), v.get("last", "-")] for u, v in ranked]
-                parts.append(f"<div class='card'><h1>👥 已见成员 · 群 {cid}（共 {len(users)} 人，活跃前 30）</h1>"
-                             f"<div class='sub'>发过言/进过群才会建档；Telegram 不允许 bot 拉取从不说话的潜水名单</div>"
-                             + tbl(["成员", "ID", "消息数", "首次见到", "最近发言"], rows) + "</div>")
-            if not member_profiles:
-                parts.append("<div class='card'><h1>👥 已见成员</h1><div class='sub' style='margin-top:8px'>暂无档案</div></div>")
-            # 2. 退群/入群记录
-            lv_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
-                        "🟢 入群" if r.get("join") else "🔴 退群"]
-                       for cid, lst in leave_records.items() for r in reversed(lst[-30:])]
-            parts.append("<div class='card'><h1>进出记录（最近 30 条）</h1>"
-                         "<div class='sub'>bot 需为群管理员才能收到成员进出事件</div>"
-                         + tbl(["时间", "成员", "ID", "类型"], lv_rows[-30:]) + "</div>")
-            # 3. 入群申请（可直接网页批准/拒绝）
-            def _jr_btn(op, c, u, label):
-                return ("<form style='display:inline;margin:0' method='post' action='/adminops2'>"
-                        f"<input type='hidden' name='op' value='{op}'>"
-                        f"<input type='hidden' name='cid' value='{c}'>"
-                        f"<input type='hidden' name='uid' value='{u}'>"
-                        f"<button type='submit' style='padding:2px 10px;cursor:pointer'>{label}</button></form>")
-            jq_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
-                        _jr_btn("join_approve", cid, r.get("uid", ""), "✅ 批准") + " " + _jr_btn("join_decline", cid, r.get("uid", ""), "🚫 拒绝")]
-                       for cid, lst in join_requests.items() for r in reversed(lst[-30:])]
-            parts.append("<div class='card'><h1>📨 入群申请（最近 30 条）</h1>"
-                         "<div class='sub'>群需开启「申请加入」；可直接在此批准或拒绝，无需去 Telegram 客户端</div>"
-                         + tbl(["时间", "申请人", "ID", "操作"], jq_rows[-30:]) + "</div>")
-            # 4. 白名单
-            wl_rows = [[cid, html.escape(user_names.get(u, str(u))), f"<code>{u}</code>"]
-                       for cid, us in whitelist.items() for u in sorted(us)]
-            parts.append("<div class='card'><h1>🛡️ 白名单</h1>"
-                         "<div class='sub'>免疫禁言/群封；群里回复消息发「加白」「删白」管理</div>"
-                         + tbl(["群", "成员", "ID"], wl_rows) + "</div>")
-            # 5. 管理员操作记录
-            op_rows = [[r.get("ts", ""), f"群 {r.get('cid', '')}", html.escape(r.get("admin", "")),
-                        html.escape(r.get("action", "")), html.escape(r.get("target", ""))]
-                       for r in reversed(admin_logs[-30:])]
-            parts.append("<div class='card'><h1>📜 管理员操作记录（最近 30 条）</h1>"
-                         "<div class='sub'>bot 执行的每次禁言/封禁/白名单操作自动留档</div>"
-                         + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows[-30:]) + "</div>")
+            if mode == "records":
+                # 1. 退群/入群记录
+                lv_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                            "🟢 入群" if r.get("join") else "🔴 退群"]
+                           for cid, lst in leave_records.items() for r in reversed(lst[-30:])]
+                parts.append("<div class='card'><h1>进出记录（最近 30 条）</h1>"
+                             "<div class='sub'>bot 需为群管理员才能收到成员进出事件</div>"
+                             + tbl(["时间", "成员", "ID", "类型"], lv_rows[-30:]) + "</div>")
+                # 2. 入群申请（可直接网页批准/拒绝）
+                def _jr_btn(op, c, u, label):
+                    return ("<form style='display:inline;margin:0' method='post' action='/adminops2'>"
+                            f"<input type='hidden' name='op' value='{op}'>"
+                            f"<input type='hidden' name='cid' value='{c}'>"
+                            f"<input type='hidden' name='uid' value='{u}'>"
+                            f"<button type='submit' style='padding:2px 10px;cursor:pointer'>{label}</button></form>")
+                jq_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                            _jr_btn("join_approve", cid, r.get("uid", ""), "✅ 批准") + " " + _jr_btn("join_decline", cid, r.get("uid", ""), "🚫 拒绝")]
+                           for cid, lst in join_requests.items() for r in reversed(lst[-30:])]
+                parts.append("<div class='card'><h1>📨 入群申请（最近 30 条）</h1>"
+                             "<div class='sub'>群需开启「申请加入」；可直接在此批准或拒绝，无需去 Telegram 客户端</div>"
+                             + tbl(["时间", "申请人", "ID", "操作"], jq_rows[-30:]) + "</div>")
+            else:
+                # 白名单
+                wl_rows = [[cid, html.escape(user_names.get(u, str(u))), f"<code>{u}</code>"]
+                           for cid, us in whitelist.items() for u in sorted(us)]
+                parts.append("<div class='card'><h1>🛡️ 白名单</h1>"
+                             "<div class='sub'>免疫禁言/群封；群里回复消息发「加白」「删白」管理，或在成员列表页加白</div>"
+                             + tbl(["群", "成员", "ID"], wl_rows) + "</div>")
+                # 管理员操作记录
+                op_rows = [[r.get("ts", ""), f"群 {r.get('cid', '')}", html.escape(r.get("admin", "")),
+                            html.escape(r.get("action", "")), html.escape(r.get("target", ""))]
+                           for r in reversed(admin_logs[-30:])]
+                parts.append("<div class='card'><h1>📜 管理员操作记录（最近 30 条）</h1>"
+                             "<div class='sub'>bot 执行的每次禁言/封禁/白名单操作自动留档</div>"
+                             + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows[-30:]) + "</div>")
             return "".join(parts)
 
-        def _admin_page(gkey, sub=None, saved=False, bad=False, note="", err="", uid=0):
+        def _admin_page(gkey, sub=None, saved=False, bad=False, note="", err="", uid=0, flt=None):
             gname, gicon = next((n, i) for k, n, i in SETTINGS_GROUPS if k == gkey)
             msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
             msg += "<div class='err'>部分数值超出范围或非法，已跳过这些项</div>" if bad else ""
             msg += f"<div class='ok'>{html.escape(note)}</div>" if note else ""
             msg += f"<div class='err'>{html.escape(err)}</div>" if err else ""
-            if gkey == "members":
-                body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body()
+            if gkey == "members" and sub == "mlist":
+                fl = flt or {}
+                sel_cid = fl.get("cid", 0)
+                q = (fl.get("q") or "").strip()
+                per = fl.get("per", 20) if fl.get("per", 20) in (10, 20, 50, 100) else 20
+                page = max(1, fl.get("page", 1))
+                members = []
+                if sel_cid:
+                    profs = member_profiles.get(sel_cid, {})
+                    uids = set(profs) | set(game_chips.get(sel_cid, {})) | set(member_joined_at.get(sel_cid, {}))
+                    now = now_bj()
+                    for u in uids:
+                        pr = profs.get(u, {})
+                        joined = member_joined_at.get(sel_cid, {}).get(u, 0)
+                        last = str(pr.get("last", "") or "")
+                        days = None
+                        if last:
+                            try:
+                                days = (now - datetime.strptime(last, "%Y-%m-%d %H:%M").replace(tzinfo=BEIJING_TZ)).days
+                            except ValueError:
+                                pass
+                        members.append({"uid": u, "name": str(pr.get("name", f"用户{u}")),
+                                        "msgs": int(pr.get("msgs", 0) or 0), "last": last or "-",
+                                        "days": days, "joined": joined,
+                                        "joined_txt": time.strftime("%Y-%m-%d %H:%M", time.localtime(joined)) if joined else "早于机器人进群",
+                                        "chips": game_chips.get(sel_cid, {}).get(u, 0),
+                                        "warn": warn_counts.get(sel_cid, {}).get(u, 0)})
+                    if q:
+                        members = [x for x in members if q in x["name"] or q in str(x["uid"])]
+                    if fl.get("never"):
+                        members = [x for x in members if x["msgs"] == 0]
+                    if fl.get("silent"):
+                        members = [x for x in members if x["days"] is not None and x["days"] >= fl["silent"]]
+                    _d0 = _parse_dt_bj(fl.get("join_from", ""))
+                    if _d0:
+                        members = [x for x in members if x["joined"] and x["joined"] >= _d0.timestamp()]
+                    _d1 = _parse_dt_bj(fl.get("join_to", ""))
+                    if _d1:
+                        members = [x for x in members if x["joined"] and x["joined"] <= _d1.timestamp()]
+                    members.sort(key=lambda x: (-x["joined"], -x["chips"]))
+                total = len(members)
+                pages = max(1, (total + per - 1) // per)
+                page = min(page, pages)
+                def _mb(op, uid, label, color="#5b5b76"):
+                    return ("<form style='display:inline;margin:0' method='post' action='/memops'>"
+                            f"<input type='hidden' name='op' value='{op}'>"
+                            f"<input type='hidden' name='cid' value='{sel_cid}'>"
+                            f"<input type='hidden' name='uid' value='{uid}'>"
+                            f"<button type='submit' style='padding:2px 10px;cursor:pointer;background:{color};color:#fff;border:none;border-radius:6px'>{label}</button></form>")
+                rows_html = ""
+                for x in members[(page - 1) * per: page * per]:
+                    in_wl = x["uid"] in whitelist.get(sel_cid, set())
+                    rows_html += ("<tr><td>" + html.escape(x["name"]) + "</td>"
+                                  f"<td><code>{x['uid']}</code></td>"
+                                  f"<td>{x['joined_txt']}</td>"
+                                  f"<td>{x['last']}</td>"
+                                  f"<td>{x['chips']}</td>"
+                                  f"<td>{x['warn']}</td>"
+                                  "<td>" + _mb("warn_add", x["uid"], "＋", "#3d6b4f") + " " + _mb("warn_sub", x["uid"], "－") + "</td>"
+                                  "<td>" + (_mb("wl_del", x["uid"], "删白", "#8a6d3b") if in_wl else _mb("wl_add", x["uid"], "✅ 加白", "#3d6b4f")) + " "
+                                  + _mb("ban", x["uid"], "⛔ 封禁", "#8a3b3b") + " "
+                                  + _mb("kick", x["uid"], "👋 踢出", "#8a3b3b") + "</td></tr>")
+                if not rows_html:
+                    rows_html = f"<tr><td colspan='8' style='text-align:center;color:#6a6982'>{'左侧选一个群后展示成员' if not sel_cid else '该群暂无成员档案（发过言/进过群才会建档）'}</td></tr>"
+                clear_warn_btn = (f"<form style='display:inline;margin:0' method='post' action='/memops'>"
+                                  f"<input type='hidden' name='op' value='warn_clear_all'>"
+                                  f"<input type='hidden' name='cid' value='{sel_cid}'>"
+                                  f"<input type='hidden' name='uid' value='0'>"
+                                  "<button type='submit' style='padding:4px 12px;cursor:pointer;background:#8a3b3b;color:#fff;border:none;border-radius:6px'>🧹 清除全部警告</button></form>") if sel_cid else ""
+                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>数据来自成员档案+积分账本+进群事件；封禁/踢出需要 bot 是群管理员</div>{msg}"
+                        f"<div class='card'><h3>🧹 批量操作 {clear_warn_btn}</h3></div>"
+                        "<div class='card' style='margin-top:18px'>"
+                        "<form method='get' action='/page/members/mlist' style='display:flex;flex-wrap:wrap;gap:10px;align-items:end'>"
+                        f"<div><div class='sub'>群</div><select name='cid' required>{_group_options(selected=sel_cid)}</select></div>"
+                        f"<div><div class='sub'>用户名/昵称/ID</div><input type='text' name='q' value='{html.escape(q, quote=True)}'></div>"
+                        "<div><label style='font-size:12px'><input type='checkbox' name='never' value='1' "
+                        + ("checked" if fl.get("never") else "") + "> 从未发言</label></div>"
+                        f"<div><div class='sub'>超过N天未发言</div><input type='number' name='silent' value='{fl.get('silent', 0) or ''}' min='0' style='width:90px'></div>"
+                        f"<div><div class='sub'>进群时间从</div><input type='date' name='join_from' value='{html.escape(fl.get('join_from', ''), quote=True)}'></div>"
+                        f"<div><div class='sub'>至</div><input type='date' name='join_to' value='{html.escape(fl.get('join_to', ''), quote=True)}'></div>"
+                        f"<div><div class='sub'>每页</div><select name='per'>"
+                        + "".join(f"<option value='{v}'{' selected' if v == per else ''}>{v}</option>" for v in (10, 20, 50, 100))
+                        + "</select></div>"
+                        "<button type='submit'>🔍 搜索</button> "
+                        "<a href='/page/members/mlist'><button type='button'>♻️ 重置</button></a>"
+                        "</form></div>"
+                        f"<div class='card' style='margin-top:18px'><div class='sub'>共 {total} 条记录 · 第 {page}/{pages} 页</div>"
+                        "<table class='tbl'><tr><th>昵称</th><th>用户ID</th><th>进群时间</th><th>最近发言</th><th>积分</th><th>警告</th><th>警告操作</th><th>操作</th></tr>"
+                        + rows_html + "</table>"
+                        "<div style='margin-top:12px;display:flex;gap:10px'>"
+                        + (f"<a href='/page/members/mlist?cid={sel_cid}&q={quote(q)}&per={per}&page={page-1}'><button type='button'>‹ 上一页</button></a>" if page > 1 else "")
+                        + (f"<a href='/page/members/mlist?cid={sel_cid}&q={quote(q)}&per={per}&page={page+1}'><button type='button'>下一页 ›</button></a>" if page < pages else "")
+                        + "</div></div>")
+            elif gkey == "members":
+                body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body("records" if sub == "records" else "ops")
             elif gkey == "admin":
                 def _btn(action, key, val, label, color="#7c6cf0"):
                     return (f"<form style='display:inline' method='post' action='/adminops2'>"
@@ -8019,6 +8329,37 @@ def start_health_server():
                             + "<div class='sub' style='margin-top:16px'>商品行占位符：<code>{goodsName}</code> <code>{pointNum}</code> <code>{leftNum}</code>；"
                               "成功通知占位符：<code>{name}</code> <code>{goodsName}</code> <code>{pointNum}</code> <code>{balance}</code></div>"
                             "<button type='submit' style='margin-top:8px'>💾 保存兑换设置</button></form></div>")
+                elif gkey == "points" and sub == "guess":
+                    gs_rows = ""
+                    for gc, g in sorted(guesses.items()):
+                        locked = bool(g.get("locked"))
+                        st = "<span style='color:#e0b040'>已封盘</span>" if locked else "<span style='color:#6fd08c'>下注中</span>"
+                        gs_rows += (f"<tr><td>{gc} {html.escape(chat_name_cache.get(gc, ''))}</td>"
+                                    f"<td>{html.escape(g['q'])}</td>"
+                                    f"<td>🔵 {html.escape(g['a'])}｜{g['side_pots']['A']} 分</td>"
+                                    f"<td>🔴 {html.escape(g['b'])}｜{g['side_pots']['B']} 分</td>"
+                                    f"<td>{sum(v['A'] + v['B'] for v in g['bets'].values())}（{len(g['bets'])} 人）</td>"
+                                    f"<td>{st}</td>"
+                                    f"<td><form style='display:inline;margin:0' method='post' action='/guessops'>"
+                                    f"<input type='hidden' name='op' value='settle'><input type='hidden' name='cid' value='{gc}'>"
+                                    f"<button name='side' value='A' style='padding:2px 10px;cursor:pointer;background:#3b5a8a;color:#fff;border:none;border-radius:6px'>结算 A</button> "
+                                    f"<button name='side' value='B' style='padding:2px 10px;cursor:pointer;background:#8a3b3b;color:#fff;border:none;border-radius:6px'>结算 B</button></form> "
+                                    f"<form style='display:inline;margin:0' method='post' action='/guessops'>"
+                                    f"<input type='hidden' name='op' value='cancel'><input type='hidden' name='cid' value='{gc}'>"
+                                    f"<button style='padding:2px 10px;cursor:pointer'>撤销退款</button></form></td></tr>")
+                    if not gs_rows:
+                        gs_rows = ("<tr><td colspan='7' style='text-align:center;color:#6a6982'>"
+                                   "暂无进行中的竞猜；群里发「开竞猜 题目/选项A/选项B」发起</td></tr>")
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>管理员群里发「开竞猜 题目/选项A/选项B [时长分钟]」开局，成员点按钮下注托管；"
+                            "到点自动封盘，「竞猜结算 A/B」开出答案后猜中方按注额比例瓜分全部奖池，「竞猜撤销」全额退款</div>{msg}"
+                            "<div class='card'><h3>🎯 进行中的竞猜</h3>"
+                            "<table class='tbl'><tr><th>群</th><th>题目</th><th>选项A</th><th>选项B</th><th>奖池</th><th>状态</th><th>操作</th></tr>"
+                            + gs_rows + "</table>"
+                            "<div class='sub' style='margin-top:8px'>网页结算/撤销立即生效并群内播报；下注积分已托管，撤销原路退回</div></div>"
+                            "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
+                            "<input type='hidden' name='group' value='points/guess'>"
+                            + _field_rows("points/guess")
+                            + "<button type='submit' style='margin-top:8px'>💾 保存竞猜设置</button></form></div>")
                 elif gkey == "points" and sub == "mallord":
                     ord_rows = "".join(
                         f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{o.get('cid')}</td>"
@@ -8245,7 +8586,15 @@ def start_health_server():
                         self._send(200, _home_page()); return
                     try: sel_uid = int(qs.get("uid", ["0"])[0])
                     except ValueError: sel_uid = 0
-                    self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err, uid=sel_uid)); return
+                    def _qi(k, dflt):
+                        try: return int(qs.get(k, [str(dflt)])[0] or dflt)
+                        except ValueError: return dflt
+                    flt = {"cid": _qi("cid", 0), "q": (qs.get("q", [""])[0] or "")[:50],
+                           "never": 1 if qs.get("never", [""])[0] else 0, "silent": _qi("silent", 0),
+                           "join_from": (qs.get("join_from", [""])[0] or "")[:16],
+                           "join_to": (qs.get("join_to", [""])[0] or "")[:16],
+                           "page": max(1, _qi("page", 1)), "per": _qi("per", 20)}
+                    self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err, uid=sel_uid, flt=flt)); return
                 self._send(404, b"not found", [("Content-Type", "text/plain")])
 
             def do_POST(self):
@@ -8478,6 +8827,79 @@ def start_health_server():
                             self._redirect("/page/members?err=" + quote(f"操作失败：{e}（申请可能已被处理）"))
                     else:
                         _back(err="参数错误"); return
+                    return
+                if path == "/memops":
+                    # 成员列表页操作：警告加减/清零、加白删白、封禁、踢出
+                    op = form.get("op", [""])[0]
+                    try:
+                        cid_ = int(form.get("cid", ["0"])[0] or 0)
+                        uid_ = int(form.get("uid", ["0"])[0] or 0)
+                        amt = int(form.get("amount", ["1"])[0] or 1)
+                    except ValueError:
+                        self._redirect(f"/page/members/mlist?cid={cid_}&err=" + quote("参数必须是数字")); return
+                    def _mb(note="", err=""):
+                        q = ("note=" + quote(note)) if note else ("err=" + quote(err) if err else "")
+                        self._redirect(f"/page/members/mlist?cid={cid_}&per=20" + ("&" + q if q else ""))
+                    if op in ("warn_add", "warn_sub") and cid_ and uid_:
+                        delta = amt if op == "warn_add" else -amt
+                        cur = warn_counts[cid_][uid_]
+                        warn_counts[cid_][uid_] = max(0, cur + delta)
+                        if not warn_counts[cid_][uid_]: warn_counts[cid_].pop(uid_, None)
+                        save_data()
+                        _mb(note=f"✅ 用户 {uid_} 警告 {delta:+d}，当前 {warn_counts[cid_].get(uid_, 0)}")
+                    elif op == "warn_clear_all" and cid_:
+                        n = len(warn_counts.get(cid_, {}))
+                        warn_counts.pop(cid_, None)
+                        save_data()
+                        _mb(note=f"🧹 已清除群 {cid_} 全部警告（{n} 人）")
+                    elif op == "wl_add" and cid_ and uid_:
+                        whitelist.setdefault(cid_, set()).add(uid_); save_data()
+                        admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid_,
+                                           "admin": "网页后台", "action": "加白", "target": str(uid_)})
+                        _mb(note=f"✅ 已将 {uid_} 加入白名单")
+                    elif op == "wl_del" and cid_ and uid_:
+                        whitelist.get(cid_, set()).discard(uid_); save_data()
+                        _mb(note=f"✅ 已将 {uid_} 移出白名单")
+                    elif op in ("ban", "kick") and cid_ and uid_:
+                        if not (_bot_app and _bot_loop):
+                            _mb(err="bot 尚未启动完成，请稍后再试"); return
+                        async def _bk():
+                            await _bot_app.bot.ban_chat_member(cid_, uid_)
+                            if op == "kick":  # 踢出=先封再解封，人已离群且可重新加入
+                                await _bot_app.bot.unban_chat_member(cid_, uid_, only_if_banned=True)
+                        try:
+                            asyncio.run_coroutine_threadsafe(_bk(), _bot_loop).result(15)
+                            admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid_,
+                                               "admin": "网页后台", "action": "封禁" if op == "ban" else "踢出",
+                                               "target": str(uid_)})
+                            save_data()
+                            _mb(note=("⛔ 已封禁 " if op == "ban" else "👋 已踢出 ") + str(uid_))
+                        except Exception as e:
+                            _mb(err=f"操作失败：{e}（bot 需为群管理员且有封禁权限）")
+                    else:
+                        _mb(err="参数错误")
+                    return
+                if path == "/guessops":
+                    # 竞猜网页操作：结算 A/B 或撤销退款
+                    op = form.get("op", [""])[0]
+                    try: cid_ = int(form.get("cid", ["0"])[0] or 0)
+                    except ValueError: cid_ = 0
+                    def _gb(note="", err=""):
+                        q = ("note=" + quote(note)) if note else ("err=" + quote(err) if err else "")
+                        self._redirect("/page/points/guess" + ("?" + q if q else ""))
+                    if op not in ("settle", "cancel") or not cid_:
+                        _gb(err="参数错误"); return
+                    if not (_bot_app and _bot_loop):
+                        _gb(err="bot 尚未启动完成，请稍后再试"); return
+                    async def _gop():
+                        if op == "settle":
+                            return await _guess_do_settle(_bot_app, cid_, form.get("side", [""])[0])
+                        return await _guess_do_cancel(_bot_app, cid_)
+                    try:
+                        err = asyncio.run_coroutine_threadsafe(_gop(), _bot_loop).result(20)
+                        _gb(err=err) if err else _gb(note="🎯 已结算并群内播报" if op == "settle" else "✅ 已撤销并全额退款")
+                    except Exception as e:
+                        _gb(err=f"操作失败：{e}")
                     return
                 if path == "/rule_add":
                     try:

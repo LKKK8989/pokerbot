@@ -6850,6 +6850,11 @@ def start_health_server():
                 child_groups = [(ck, meta.get(ck, (ck, "•"))) for ck in SIDEBAR_CHILDREN.get(gkey, [])]
                 if subpage_subs or child_groups:
                     subs = []
+                    # 父组只有"挂子组"（如德州挂排位赛）而无自身子页时，父组菜单变折叠开关，
+                    # 原设置页会失去入口 → 子菜单第一位固定补"XX设置"链接
+                    if not subpage_subs and child_groups:
+                        pcls = "active" if sidebar_active == gkey else ""
+                        subs.append(f"<a class='{pcls}' href='/page/{gkey}'>⚙️ {name}设置</a>")
                     for skey, sname in subpage_subs:
                         cls = "active" if sidebar_active == f"{gkey}/{skey}" else ""
                         subs.append(f"<a class='{cls}' href='/page/{gkey}/{skey}'>{sname}</a>")
@@ -7894,6 +7899,8 @@ def start_health_server():
                                 ("Content-Disposition", f"attachment; filename=points_{cid}.csv")]); return
                 m = re.fullmatch(r"/page/([a-z]+)(?:/([a-z0-9_]+))?", path)
                 if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
+                    if m.group(1) == "dashboard":   # 群体总览是定制页（统计卡+排序），无通用表单，别落空壳
+                        self._send(200, _home_page()); return
                     try: sel_uid = int(qs.get("uid", ["0"])[0])
                     except ValueError: sel_uid = 0
                     self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err, uid=sel_uid)); return

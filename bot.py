@@ -106,6 +106,12 @@ SETTINGS_FIELDS = [
     ("jinhua_base",             "JINHUA_BASE",             "单注基准",                  "int",   1,   100000,  "jinhua"),
     ("race_auto_start",         "RACE_AUTO_START",         "自动开赛时间(秒)",          "int",   10,  600,     "race"),
     ("race_animation_interval", "RACE_ANIMATION_INTERVAL", "动画帧间隔(秒)",            "float", 0.5, 30,      "race"),
+    ("horse_count",             "HORSE_COUNT",             "赛马数量(匹)",              "int",   2,   8,       "race"),
+    ("horse_names",             "HORSE_NAMES",             "赛马名称(逗号分隔)",        "names", 0,   0,       "race"),
+    ("horse_emoji",             "HORSE_EMOJI",             "赛马表情(逗号分隔)",        "emoji", 0,   0,       "race"),
+    ("race_track_length",       "RACE_TRACK_LENGTH",       "赛道长度(格)",              "int",   5,   50,      "race"),
+    ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
+    ("game_starting_chips",     "GAME_STARTING_CHIPS",     "通用积分·新玩家初始值",     "int",   100, 1000000, "general"),
     ("texas_exchange_rate",     "TEXAS_EXCHANGE_RATE",     "几通用积分换1德州积分",     "int",   1,   100,     "general"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
     ("emergency_max_uses",      "EMERGENCY_MAX_USES",      "归零每日赠送次数",          "int",   0,   99,      "general"),
@@ -113,6 +119,8 @@ SETTINGS_FIELDS = [
     ("season_min_players",      "SEASON_MIN_PLAYERS",      "最少开赛人数",              "int",   2,   50,      "season"),
     ("season_min_games",        "SEASON_MIN_GAMES",        "结算最少局数",              "int",   0,   999,     "season"),
     ("season_days",             "SEASON_DAYS",             "赛季天数",                  "int",   1,   90,      "season"),
+    ("season_rebuy_count",      "SEASON_REBUY_COUNT",      "每日重买次数上限",          "int",   0,   20,      "season"),
+    ("season_rebuy_amount",     "SEASON_REBUY_AMOUNT",     "每次重买金额",              "int",   0,   1000000, "season"),
 ]
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
@@ -127,10 +135,16 @@ def _write_settings_file(cfg: dict, password: str):
         logger.exception("设置文件写盘失败")
 
 def apply_settings(cfg: dict):
-    """把设置字典套用到内存全局常量（带类型与范围校验，非法值跳过）。"""
+    """把设置字典套用到内存全局常量（带类型与范围校验，非法值跳过）。
+
+    数字字段先套用（HORSE_COUNT 先生效，名称/表情才好做数量联动校验）；
+    names/emoji 要求拆分后条数 == 当前 HORSE_COUNT，否则整条跳过；
+    bets 要求 1~6 个 1~100000 的正整数，自动去重升序。
+    """
     applied = {}
+    # 数字字段先套用；赛马三件套（count/names/emoji）抽出单独联动处理
     for key, gname, _label, ftype, lo, hi, _grp in SETTINGS_FIELDS:
-        if key not in cfg:
+        if key not in cfg or ftype not in ("int", "float") or key == "horse_count":
             continue
         try:
             v = float(cfg[key])
@@ -142,6 +156,48 @@ def apply_settings(cfg: dict):
             continue
         globals()[gname] = v
         applied[key] = v
+    # --- 赛马三件套联动：数量/名称/表情必须一致才提交，否则整体保持原状（防 5 匹马 3 个名字的崩局） ---
+    if any(k in cfg for k in ("horse_count", "horse_names", "horse_emoji")):
+        def _split(v, maxlen):
+            if isinstance(v, (list, tuple)):
+                ps = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                ps = [p.strip() for p in re.split(r"[,，]", str(v)) if p.strip()]
+            if ps and all(0 < len(p) <= maxlen and not any(ch in p for ch in "<>&") for p in ps):
+                return ps
+            return None
+        new_count = globals()["HORSE_COUNT"]
+        cnt_given = "horse_count" in cfg
+        try:
+            c = int(float(cfg.get("horse_count")))
+            if not (2 <= c <= 8): raise ValueError
+            new_count = c
+        except (ValueError, TypeError):
+            pass
+        new_names = _split(cfg["horse_names"], 8) if "horse_names" in cfg else globals()["HORSE_NAMES"]
+        new_emoji = _split(cfg["horse_emoji"], 4) if "horse_emoji" in cfg else globals()["HORSE_EMOJI"]
+        if new_names and new_emoji and len(new_names) == new_count == len(new_emoji):
+            globals()["HORSE_COUNT"], globals()["HORSE_NAMES"], globals()["HORSE_EMOJI"] = new_count, new_names, new_emoji
+            if cnt_given: applied["horse_count"] = new_count
+            if "horse_names" in cfg: applied["horse_names"] = new_names
+            if "horse_emoji" in cfg: applied["horse_emoji"] = new_emoji
+    for key, gname, _label, ftype, _lo, _hi, _grp in SETTINGS_FIELDS:
+        if key not in cfg or ftype not in ("names", "emoji", "bets") or key in ("horse_names", "horse_emoji"):
+            continue
+        raw = cfg[key]
+        if isinstance(raw, (list, tuple)):
+            parts = [str(p).strip() for p in raw if str(p).strip()]
+        else:
+            parts = [p.strip() for p in re.split(r"[,，]", str(raw)) if p.strip()]
+        if ftype == "bets":
+            try:
+                vals = sorted({int(float(p)) for p in parts})
+            except (ValueError, TypeError):
+                continue
+            if not (1 <= len(vals) <= 6 and all(1 <= v <= 100000 for v in vals)):
+                continue
+            globals()[gname] = vals
+            applied[key] = vals
     return applied
 
 def load_settings():
@@ -4480,9 +4536,14 @@ def start_health_server():
                 if grp != gkey:
                     continue
                 cur = globals().get(_g)
-                step = "0.1" if ftype == "float" else "1"
-                rows.append(f"<label>{html.escape(label)}（{lo} ~ {hi}）"
-                            f"<input type='number' name='{key}' value='{cur}' step='{step}'></label>")
+                if ftype in ("names", "emoji", "bets"):
+                    val = ",".join(str(x) for x in cur) if isinstance(cur, (list, tuple)) else str(cur)
+                    rows.append(f"<label>{html.escape(label)}"
+                                f"<input type='text' name='{key}' value='{html.escape(val, quote=True)}'></label>")
+                else:
+                    step = "0.1" if ftype == "float" else "1"
+                    rows.append(f"<label>{html.escape(label)}（{lo} ~ {hi}）"
+                                f"<input type='number' name='{key}' value='{cur}' step='{step}'></label>")
             return "".join(rows)
 
         def _home_page():

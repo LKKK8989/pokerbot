@@ -39,6 +39,7 @@ RACE_ANIMATION_INTERVAL = 5.0   # 每帧画面停留秒数（间隔越大帧数�
 
 # 游戏金额配置
 BJ_MIN_BET = 100           # 21点最低打字下注
+BJ_JOIN_BETS = [500, 1000] # 21点加入下注按钮档位（网页可改）
 FIXED_MIN_RAISE = 100      # 德州最低加注额
 BLACKJACK_DECKS = 6        # 21点使用6副牌（娱乐场标准）
 
@@ -91,6 +92,7 @@ SETTINGS_GROUPS = [
     ("season",    "排位赛",     "🏆"),
     ("points",    "积分系统",   "💰"),
     ("members",   "群组管理",   "👥"),
+    ("admin",     "管理员中心", "🛡️"),
     ("security",  "安全",       "🔒"),
 ]
 # 子页面制：有子页的分组在侧边栏折叠展开（照阿福模板）。None=未开通占位页
@@ -108,6 +110,13 @@ SUBPAGES = {
         ("mall",     "积分商城"),
         ("buy",      "购买积分"),
     ],
+    "admin": [
+        ("auth",      "授权群管理"),
+        ("blacklist", "拉黑管理"),
+        ("god",       "赌神称号"),
+        ("seasonpts", "排位分调整"),
+        ("orders",    "商城订单"),
+    ],
 }
 SETTINGS_FIELDS = [
     # (settings键, 模块全局变量名, 面板显示名, 类型, 最小, 最大, 所属分组)
@@ -116,6 +125,7 @@ SETTINGS_FIELDS = [
     ("turn_timeout",            "TURN_TIMEOUT",            "单回合思考时间(秒·德州/21点共用)", "int", 10, 600, "texas"),
     ("room_wait_timeout",       "ROOM_WAIT_TIMEOUT",       "等待房倒计时(秒)",          "int",   10,  600,     "texas"),
     ("bj_min_bet",              "BJ_MIN_BET",              "最低下注",                  "int",   1,   100000,  "blackjack"),
+    ("bj_join_bets",            "BJ_JOIN_BETS",            "加入下注按钮金额(逗号分隔)", "bets",  0,   0,       "blackjack"),
     ("blackjack_decks",         "BLACKJACK_DECKS",         "使用几副牌",                "int",   1,   8,       "blackjack"),
     ("jinhua_ante",             "JINHUA_ANTE",             "底注",                      "int",   1,   100000,  "jinhua"),
     ("jinhua_base",             "JINHUA_BASE",             "单注基准",                  "int",   1,   100000,  "jinhua"),
@@ -140,14 +150,24 @@ SETTINGS_FIELDS = [
     ("season_rebuy_count",      "SEASON_REBUY_COUNT",      "每日重买次数上限",          "int",   0,   20,      "season"),
     ("season_rebuy_amount",     "SEASON_REBUY_AMOUNT",     "每次重买金额",              "int",   0,   1000000, "season"),
     # ---------- 积分系统（子页面制：points/子页键，照阿福模板） ----------
+    ("query_cmd",               "QUERY_CMD",               "查询积分指令(不带斜杠)",    "cmd",   0,   0,       "points/set"),
+    ("rank_cmd",                "RANK_CMD",                "积分排行指令(不带斜杠)",    "cmd",   0,   0,       "points/set"),
+    ("admin_adjust",            "ADMIN_ADJUST_ENABLED",    "管理员可增减积分",          "bool",  0,   1,       "points/set"),
+    ("rank_1_emoji",            "RANK_1_EMOJI",            "积分排行第一名表情",        "short", 0,   0,       "points/set"),
+    ("rank_2_emoji",            "RANK_2_EMOJI",            "积分排行第二名表情",        "short", 0,   0,       "points/set"),
+    ("rank_3_emoji",            "RANK_3_EMOJI",            "积分排行第三名表情",        "short", 0,   0,       "points/set"),
+    ("add_msg_tpl",             "ADD_MSG_TPL",             "添加积分提示消息",          "text",  0,   0,       "points/set"),
+    ("query_msg_tpl",           "QUERY_MSG_TPL",           "查询积分消息",              "text",  0,   0,       "points/set"),
     ("chat_enabled",            "CHAT_ENABLED",            "聊天积分开关(需关机器人隐私模式)", "bool", 0, 1,    "points/set"),
     ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points/set"),
     ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points/set"),
-    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "积分查询消息自动删除(秒,0=不删)", "int", 0, 300,     "points/set"),
+    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "查询指令删除时间(秒,0=不删)", "int", 0, 300,     "points/set"),
     ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points/cap"),
+    ("sign_cmd",                "SIGN_CMD",                "签到指令(不带斜杠)",        "cmd",   0,   0,       "points/sign"),
     ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points/sign"),
     ("sign_base_reward",        "SIGN_BASE_REWARD",        "签到基础奖励",              "int",   0,   1000000, "points/sign"),
     ("sign_streak_bonus",       "SIGN_STREAK_BONUS",       "连续签到满7天额外奖励",     "int",   0,   1000000, "points/sign"),
+    ("sign_msg_tpl",            "SIGN_MSG_TPL",            "签到成功消息",              "text",  0,   0,       "points/sign"),
     ("redpacket_enabled",       "REDPACKET_ENABLED",       "积分红包开关",              "bool",  0,   1,       "points/rp"),
     ("point_levels",            "POINT_LEVELS",            "积分等级表(每行 等级名:最低积分)", "levels", 0, 0,  "points/level"),
     ("mall_items",              "MALL_ITEMS",              "商城商品表(每行 商品名:价格)", "items", 0, 0,      "points/mall"),
@@ -183,6 +203,31 @@ AUCTION_DURATION = 60
 BUY_ENABLED = 1
 BUY_MIN = 1000
 BUY_MAX = 100000
+RANK_1_EMOJI = "🥇"
+RANK_2_EMOJI = "🥈"
+RANK_3_EMOJI = "🥉"
+QUERY_CMD = "我的积分"
+RANK_CMD = "积分排行"
+SIGN_CMD = "签到"
+ADMIN_ADJUST_ENABLED = 1
+MSG_TPL_DEFAULTS = {
+    "sign_msg_tpl": "🎉 {name} 签到成功！\n📅 连续签到 {streak} 天｜💰 +{reward}{bonus}\n💰 当前积分：{balance}",
+    "query_msg_tpl": "💰 我的积分：{balance}\n{level_line}📅 今日签到：{signed}（连续 {streak} 天）\n💬 今日聊天获得：{today_chat}",
+    "add_msg_tpl": "✅ 已给 {target} {verb} {amount} 积分，当前 {balance}。",
+}
+SIGN_MSG_TPL = MSG_TPL_DEFAULTS["sign_msg_tpl"]
+QUERY_MSG_TPL = MSG_TPL_DEFAULTS["query_msg_tpl"]
+ADD_MSG_TPL = MSG_TPL_DEFAULTS["add_msg_tpl"]
+
+def _fmt_tpl(key, **kw):
+    """按网页模板渲染消息；模板非法/为空时回退默认，绝不因占位符写错而崩。"""
+    gname = next((g for k, g, *_r in SETTINGS_FIELDS if k == key), None)
+    tpl = globals().get(gname) if gname else None
+    fallback = MSG_TPL_DEFAULTS[key]
+    try:
+        return (tpl or fallback).format(**kw)
+    except Exception:
+        return fallback.format(**kw)
 
 # 积分系统持久化数据（与主数据同一套脏标记/写盘/备份机制）
 sign_data = defaultdict(lambda: defaultdict(dict))   # sign_data[cid][uid] = {"last": "YYYY-MM-DD", "streak": n}
@@ -207,6 +252,22 @@ def _write_settings_file(cfg: dict, password: str):
         os.replace(tmp, SETTINGS_FILE)
     except Exception:
         logger.exception("设置文件写盘失败")
+
+_DYN_CMD_OWNED = {}  # gname -> 上次注册的动态指令名（改名后移除旧指令）
+
+def _sync_dyn_aliases():
+    """把网页自定义的指令名（查询积分/签到/积分排行）注册进命令分发表；旧名随之失效。"""
+    aliases = globals().get("CMD_ALIASES")
+    if aliases is None:
+        return
+    for gname, fn in (("QUERY_CMD", cmd_my_points), ("SIGN_CMD", cmd_sign), ("RANK_CMD", cmd_points_rank)):
+        old = _DYN_CMD_OWNED.get(gname)
+        if old and aliases.get(old) is fn:
+            aliases.pop(old, None)
+        name = globals().get(gname)
+        if name:
+            aliases[name] = fn
+            _DYN_CMD_OWNED[gname] = name
 
 def apply_settings(cfg: dict):
     """把设置字典套用到内存全局常量（带类型与范围校验，非法值跳过）。
@@ -268,6 +329,23 @@ def apply_settings(cfg: dict):
         elif ok and not parsed and ftype == "items":
             globals()[gname] = []  # 商品表允许清空
             applied[key] = []
+    # 文本模板 / 短文本（表情）/ 自定义指令
+    for key, gname, _label, ftype, _lo, _hi, _grp in SETTINGS_FIELDS:
+        if key not in cfg or ftype not in ("text", "short", "cmd"):
+            continue
+        v = str(cfg[key]).replace("\r\n", "\n").strip()
+        if ftype == "cmd":
+            v = v.lstrip("/")
+            if not v or len(v) > 16 or re.search(r"[\s<>&@]", v):
+                continue
+        elif ftype == "short":
+            if not v or len(v) > 8:
+                continue
+        elif len(v) > 1500:
+            continue
+        globals()[gname] = v
+        applied[key] = v
+    _sync_dyn_aliases()
     # --- 赛马三件套联动：数量/名称/表情必须一致才提交，否则整体保持原状（防 5 匹马 3 个名字的崩局） ---
     if any(k in cfg for k in ("horse_count", "horse_names", "horse_emoji")):
         def _split(v, maxlen):
@@ -349,6 +427,9 @@ RANK_ICONS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣"
 
 
 def rank_marker(index):
+    if index == 1 and RANK_1_EMOJI: return RANK_1_EMOJI
+    if index == 2 and RANK_2_EMOJI: return RANK_2_EMOJI
+    if index == 3 and RANK_3_EMOJI: return RANK_3_EMOJI
     return RANK_ICONS[index - 1] if 1 <= index <= len(RANK_ICONS) else f"🔸{index}"
 
 
@@ -1967,7 +2048,7 @@ async def build_blackjack_wait_board(game, app):
     for uid in game.players:
         text += f"- {await get_name(app, uid)} (下注: {game.bets[uid]})\n"
     text += "\n⏰ 有人加入后 60 秒自动开局，无人加入自动解散。\n"
-    kb = [[InlineKeyboardButton("📥 加入 (下注500)", callback_data="bj_join_500"), InlineKeyboardButton("📥 加入 (下注1000)", callback_data="bj_join_1000")]]
+    kb = [[InlineKeyboardButton(f"📥 加入 (下注{b})", callback_data=f"bj_join_{b}") for b in BJ_JOIN_BETS]]
     if game.players: kb.append([InlineKeyboardButton("🎮 开始游戏", callback_data="bj_start")])
     kb.append([InlineKeyboardButton("❌ 终止", callback_data="bj_end")])
     return text, InlineKeyboardMarkup(kb)
@@ -2139,6 +2220,11 @@ async def cmd_21(update, context):
     mode = current_game_mode()
     game = BlackjackGame(cid, uid, mode)
     active_blackjack_games[cid] = game
+    # 发起人自动入座（按最低档加入下注；余额不足则仅建房不占座，与其他游戏对齐）
+    bet0 = BJ_JOIN_BETS[0] if BJ_JOIN_BETS else 500
+    async with wallet_locks[uid]:
+        if game_chips[cid][uid] >= bet0 and game.add_player(uid, bet0):
+            game_chips[cid][uid] -= bet0
     await update_blackjack_ui(game, context.application)  # 直接发送等待房界面，无"准备中"占位
     await start_bj_wait_timeout(game, context.application) # 启动等待超时
 
@@ -3493,6 +3579,8 @@ async def _parse_target_amount(update, context):
 async def cmd_add(update, context):
     if not is_bot_admin(update.effective_user.id):
         await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+    if not ADMIN_ADJUST_ENABLED:
+        await update.message.reply_text("❌ 管理员加减分功能已关闭（网页「积分系统 → 积分设置」可开启）。"); return
     if not await need_auth(update): return
     try:
         uid, amount = await _parse_target_amount(update, context)
@@ -3507,7 +3595,9 @@ async def cmd_add(update, context):
             await update.message.reply_text("❌ 玩家积分不足。"); return
         game_chips[cid][uid] += amount; save_data()
     verb = "添加" if amount > 0 else "扣除"
-    await update.message.reply_text(f"✅ 已给 {await get_name(context.application, uid)} {verb} {abs(amount)} 积分，当前 {game_chips[cid][uid]}。")
+    msg = _fmt_tpl("add_msg_tpl", target=await get_name(context.application, uid),
+                   verb=verb, amount=abs(amount), balance=game_chips[cid][uid])
+    await update.message.reply_text(msg)
 
 
 
@@ -4268,10 +4358,10 @@ async def cmd_sign(update, context):
         game_chips[cid][uid] += reward
         sign_data[cid][uid] = {"last": today, "streak": streak}
         save_data()
-    await update.message.reply_text(
-        f"🎉 {await get_name(context.application, uid)} 签到成功！\n"
-        f"📅 连续签到 {streak} 天｜💰 +{reward}" + ("（含连续7天额外奖励）" if streak % 7 == 0 else "") +
-        f"\n💰 当前积分：{game_chips[cid][uid]}")
+    bonus = "（含连续7天额外奖励）" if streak % 7 == 0 else ""
+    msg = _fmt_tpl("sign_msg_tpl", name=await get_name(context.application, uid),
+                   streak=streak, reward=reward, bonus=bonus, balance=game_chips[cid][uid])
+    await update.message.reply_text(msg)
 
 async def cmd_sign_rank(update, context):
     if not await need_auth(update): return
@@ -4294,10 +4384,9 @@ async def cmd_my_points(update, context):
     signed = "✅ 已签" if sign_data.get(cid, {}).get(uid, {}).get("last") == date else "❌ 未签"
     lv = _get_level(balance)
     lv_line = f"🎖 等级：{lv}\n" if lv else ""
-    await update.message.reply_text(
-        f"💰 我的积分：{balance}\n{lv_line}"
-        f"📅 今日签到：{signed}（连续 {streak} 天）\n"
-        f"💬 今日聊天获得：{today_chat}")
+    msg = _fmt_tpl("query_msg_tpl", name=await get_name(context.application, uid),
+                   balance=balance, level_line=lv_line, signed=signed, streak=streak, today_chat=today_chat)
+    await update.message.reply_text(msg)
     if POINTS_DELETE_SECONDS > 0 and is_group_chat(update):
         async def _del():
             await asyncio.sleep(POINTS_DELETE_SECONDS)
@@ -5136,6 +5225,8 @@ CMD_ALIASES = {
     "拍卖": cmd_auction, "auction": cmd_auction,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
 }
+# 动态指令接管默认名：网页改指令后，旧默认名同步失效
+_DYN_CMD_OWNED.update({"QUERY_CMD": "我的积分", "SIGN_CMD": "签到", "RANK_CMD": "积分排行"})
 
 async def _dispatch_alias(cmd, args, update, context):
     """根据命令别名（无论带不带 /）分发到对应处理函数，并填充 context.args。"""
@@ -5330,6 +5421,19 @@ def start_health_server():
                     rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
                                 f"<div class='lbl'>{html.escape(label)}<small>每行一条：名称:数值</small></div>"
                                 f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(val)}</textarea></div>")
+                elif ftype == "text":
+                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                                f"<div class='lbl' style='display:flex;align-items:center;justify-content:space-between'>"
+                                f"<span>{html.escape(label)}<small>可用占位符见默认值；支持换行</small></span>"
+                                f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
+                                f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(cur or '')}</textarea></div>")
+                elif ftype == "short":
+                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
+                                f"<input type='text' name='{key}' value='{html.escape(cur, quote=True)}' maxlength='8'></div>")
+                elif ftype == "cmd":
+                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}"
+                                f"<small>改完立即生效，无需重启；旧指令同时失效</small></div>"
+                                f"<input type='text' name='{key}' value='{html.escape(cur, quote=True)}' maxlength='16'></div>")
                 elif ftype in ("names", "emoji", "bets"):
                     val = ",".join(str(x) for x in cur) if isinstance(cur, (list, tuple)) else str(cur)
                     rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
@@ -5412,6 +5516,67 @@ def start_health_server():
             msg += f"<div class='err'>{html.escape(err)}</div>" if err else ""
             if gkey == "members":
                 body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body()
+            elif gkey == "admin":
+                def _btn(action, key, val, label, color="#7c6cf0"):
+                    return (f"<form style='display:inline' method='post' action='/adminops2'>"
+                            f"<input type='hidden' name='op' value='{action}'>"
+                            f"<input type='hidden' name='{key}' value='{val}'>"
+                            f"<button style='margin:0;padding:4px 12px;font-size:12px;background:{color};margin-top:0'>{label}</button></form>")
+                if sub == "auth":
+                    rows = "".join(f"<tr><td><code>{g}</code></td><td>{_btn('authdel', 'cid', g, '取消授权', '#e06666')}</td></tr>"
+                                   for g in sorted(AUTHORIZED_GROUPS))
+                    body = (f"<h1>{gicon} 授权群管理</h1>"
+                            "<div class='sub'>授权群里的玩家才能使用游戏；也可在群里发 /授权</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>群 ID</th><th>操作</th></tr>"
+                            + (rows or "<tr><td colspan='2'>暂无授权群</td></tr>") + "</table>"
+                            "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
+                            "<input type='hidden' name='op' value='authadd'>"
+                            "<input type='number' name='cid' placeholder='群 ID（-100 开头）' required style='flex:1'>"
+                            "<button type='submit' style='margin-top:0'>➕ 添加授权</button></form></div>")
+                elif sub == "blacklist":
+                    rows = "".join(f"<tr><td><code>{u}</code></td><td>{html.escape(user_names.get(u, ''))}</td>"
+                                   f"<td>{_btn('unblack', 'uid', u, '解黑')}</td></tr>"
+                                   for u in sorted(BLACKLISTED_USERS))
+                    body = (f"<h1>{gicon} 拉黑管理</h1>"
+                            "<div class='sub'>被拉黑的玩家无法使用机器人任何功能；也可群里 /拉黑 /解黑</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>ID</th><th>名字</th><th>操作</th></tr>"
+                            + (rows or "<tr><td colspan='3'>黑名单为空</td></tr>") + "</table>"
+                            "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
+                            "<input type='hidden' name='op' value='black'>"
+                            "<input type='number' name='uid' placeholder='用户 ID' required style='flex:1'>"
+                            "<button type='submit' style='margin-top:0;background:#e06666'>🔨 拉黑</button></form></div>")
+                elif sub == "god":
+                    god = next((u for u, ts in user_titles.items() if TITLE_GAMBLING_GOD in ts), None)
+                    cur = (f"<code>{god}</code> {html.escape(user_names.get(god, ''))}" if god else "暂无（全局唯一，封新撤旧）")
+                    body = (f"<h1>{gicon} 赌神称号</h1><div class='sub'>全局唯一：封新人自动撤销上任</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>现任赌神</th></tr>"
+                            f"<tr><td>{cur}　{_btn('godrevoke', 'uid', god or 0, '撤销', '#e06666') if god else ''}</td></tr></table>"
+                            "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
+                            "<input type='hidden' name='op' value='godgrant'>"
+                            "<input type='number' name='uid' placeholder='用户 ID' required style='flex:1'>"
+                            "<button type='submit' style='margin-top:0'>👑 封赌神</button></form></div>")
+                elif sub == "seasonpts":
+                    body = (f"<h1>{gicon} 排位分调整</h1>"
+                            "<div class='sub'>给玩家加/减排位分（正加负减）；赛季未开始时需玩家已在赛季名单</div>{msg}"
+                            "<div class='card'><form method='post' action='/adminops2'>"
+                            "<input type='hidden' name='op' value='seasonpts'>"
+                            "<div class='row'><div class='lbl'>群 ID</div><input type='number' name='cid' required></div>"
+                            "<div class='row'><div class='lbl'>用户 ID</div><input type='number' name='uid' required></div>"
+                            "<div class='row'><div class='lbl'>排位分变动<small>正数=加，负数=减</small></div>"
+                            "<input type='number' name='amount' value='100' required></div>"
+                            "<button type='submit'>💾 执行调整</button></form></div>")
+                elif sub == "orders":
+                    rows = "".join(f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{html.escape(str(o.get('name', '')))}</td>"
+                                   f"<td>{html.escape(str(o.get('item', '')))}</td><td>{o.get('price', 0)}</td>"
+                                   f"<td><code>{o.get('cid', '')}</code></td></tr>"
+                                   for o in reversed(mall_orders[-50:]))
+                    body = (f"<h1>{gicon} 商城订单（最近 50）</h1>"
+                            "<div class='sub'>玩家下单记录；发货请线下完成</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>时间</th><th>玩家</th><th>商品</th><th>价格</th><th>群</th></tr>"
+                            + (rows or "<tr><td colspan='5'>暂无订单</td></tr>") + "</table></div>")
+                else:
+                    first = SUBPAGES["admin"][0][0]
+                    return _admin_page(gkey, sub=first, saved=saved, bad=bad, note=note, err=err)
             elif gkey == "security":
                 is_default = _web_password == WEB_DEFAULT_PASSWORD
                 warn = "<div class='err'>⚠️ 当前还在用初始密码，建议立即修改（至少4位）</div>" if is_default else ""
@@ -5487,6 +5652,28 @@ def start_health_server():
                              "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
             return _page(gname, gkey, body)
 
+        def _tpl_preview(key):
+            samples = {
+                "sign_msg_tpl": dict(name="玩家A", streak=7, reward=1000, bonus="（含连续7天额外奖励）", balance=50000),
+                "query_msg_tpl": dict(name="玩家A", balance=50000, level_line="🎖 等级：黄金\n", signed="✅ 已签", streak=7, today_chat=100),
+                "add_msg_tpl": dict(target="玩家B", verb="添加", amount=1000, balance=51000),
+            }
+            kw = samples.get(key)
+            if not kw:
+                out = "该字段不支持预览"
+            else:
+                gname = next((g for k, g, *_r in SETTINGS_FIELDS if k == key), None)
+                tpl = globals().get(gname, "") if gname else ""
+                out = _fmt_tpl(key, **kw) if (tpl or "").strip() else MSG_TPL_DEFAULTS[key].format(**kw)
+            return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                    "<title>预览 - 机器人后台</title><style>"
+                    "body{background:#151621;color:#e6e5f0;font-family:system-ui,sans-serif;margin:0;"
+                    "display:flex;justify-content:center;padding-top:10vh}"
+                    "pre{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:24px;"
+                    "width:min(420px,92vw);white-space:pre-wrap;font-size:15px;line-height:1.7;font-family:inherit}"
+                    "</style></head><body><pre>" + html.escape(out) + "</pre></body></html>").encode("utf-8")
+
         class _AdminHandler(BaseHTTPRequestHandler):
             def _send(self, code, body, headers=None):
                 self.send_response(code)
@@ -5519,6 +5706,9 @@ def start_health_server():
                 err = qs.get("err", [""])[0]
                 if path == "/":
                     self._send(200, _home_page()); return
+                mm = re.fullmatch(r"/tplprev/([a-z0-9_]+)", path)
+                if mm:
+                    self._send(200, _tpl_preview(mm.group(1))); return
                 m = re.fullmatch(r"/page/([a-z]+)(?:/([a-z0-9_]+))?", path)
                 if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
                     self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err)); return
@@ -5552,6 +5742,49 @@ def start_health_server():
                     elif action == "del" and uid not in ADMIN_USER_IDS:
                         BOT_ADMINS.discard(uid); save_data()
                     self._redirect("/page/general"); return
+                if path == "/adminops2":
+                    op = form.get("op", [""])[0]
+                    sub_map = {"authadd": "auth", "authdel": "auth", "black": "blacklist",
+                               "unblack": "blacklist", "godgrant": "god", "godrevoke": "god", "seasonpts": "seasonpts"}
+                    def _back(note="", err=""):
+                        sub = sub_map.get(op, "auth")
+                        q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
+                        self._redirect(f"/page/admin/{sub}" + q)
+                    try:
+                        cid_ = int(form["cid"][0]) if form.get("cid") else None
+                        uid_ = int(form["uid"][0]) if form.get("uid") else None
+                        amt = int(form["amount"][0]) if form.get("amount") else None
+                    except ValueError:
+                        _back(err="参数必须是数字"); return
+                    if op == "authadd" and cid_:
+                        AUTHORIZED_GROUPS.add(cid_); save_data(); _back(note=f"✅ 已授权群 {cid_}")
+                    elif op == "authdel" and cid_:
+                        AUTHORIZED_GROUPS.discard(cid_); save_data(); _back(note=f"✅ 已取消授权 {cid_}")
+                    elif op == "black" and uid_:
+                        BLACKLISTED_USERS.add(uid_); save_data(); _back(note=f"🔨 已拉黑 {uid_}")
+                    elif op == "unblack" and uid_:
+                        BLACKLISTED_USERS.discard(uid_); save_data(); _back(note=f"✅ 已解黑 {uid_}")
+                    elif op == "godgrant" and uid_:
+                        for _u in list(user_titles.keys()):
+                            user_titles[_u].discard(TITLE_GAMBLING_GOD)
+                            if not user_titles[_u]: del user_titles[_u]
+                        user_titles.setdefault(uid_, set()).add(TITLE_GAMBLING_GOD)
+                        save_data(); _back(note=f"👑 已将 {uid_} 封为赌神（覆盖上任）")
+                    elif op == "godrevoke" and uid_:
+                        user_titles[uid_].discard(TITLE_GAMBLING_GOD)
+                        if title_equipped.get(uid_) == TITLE_GAMBLING_GOD: title_equipped.pop(uid_, None)
+                        if uid_ in user_titles and not user_titles[uid_]: del user_titles[uid_]
+                        save_data(); _back(note=f"🔻 已撤销 {uid_} 的赌神称号")
+                    elif op == "seasonpts" and cid_ and uid_ and amt is not None:
+                        if not season_active and uid_ not in season_points.get(cid_, {}):
+                            _back(err="该玩家不在当前赛季，且赛季未激活"); return
+                        if amt < 0 and season_points.get(cid_, {}).get(uid_, 0) < -amt:
+                            _back(err="该玩家排位分不足"); return
+                        season_points[cid_][uid_] = season_points.get(cid_, {}).get(uid_, 0) + amt
+                        save_data(); _back(note=f"✅ 用户 {uid_} 排位分 {amt:+d}，当前 {season_points[cid_][uid_]}")
+                    else:
+                        _back(err="参数错误"); return
+                    return
                 if path == "/points_adj":
                     def _back(note="", err=""):
                         q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
@@ -5579,8 +5812,9 @@ def start_health_server():
                         self._redirect("/page/security?saved=1"); return
                     valid_keys = {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
                     cfg = {k: v[0] for k, v in form.items() if k in valid_keys}
-                    for k in valid_keys:  # checkbox 未勾选时表单不含该键 → 显式补 0
-                        cfg.setdefault(k, "0")
+                    for k, _g, _l, ft, _lo, _hi, _grp in SETTINGS_FIELDS:  # checkbox 未勾选时表单不含该键 → 显式补 0（仅 bool）
+                        if k in valid_keys and ft == "bool":
+                            cfg.setdefault(k, "0")
                     applied = save_settings(cfg)
                     skipped = [k for k in cfg if k not in applied]
                     self._redirect(f"/page/{group}?saved=1" + ("&bad=1" if skipped else ""))

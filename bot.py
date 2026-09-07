@@ -91,6 +91,7 @@ SETTINGS_GROUPS = [
     ("race",      "赛车",       "🏎️"),
     ("general",   "通用与应急", "⚙️"),
     ("season",    "排位赛",     "🏆"),
+    ("points",    "积分系统",   "💰"),
     ("security",  "安全",       "🔒"),
 ]
 SETTINGS_FIELDS = [
@@ -121,9 +122,40 @@ SETTINGS_FIELDS = [
     ("season_days",             "SEASON_DAYS",             "赛季天数",                  "int",   1,   90,      "season"),
     ("season_rebuy_count",      "SEASON_REBUY_COUNT",      "每日重买次数上限",          "int",   0,   20,      "season"),
     ("season_rebuy_amount",     "SEASON_REBUY_AMOUNT",     "每次重买金额",              "int",   0,   1000000, "season"),
+    # ---------- 积分系统 ----------
+    ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points"),
+    ("sign_base_reward",        "SIGN_BASE_REWARD",        "签到基础奖励",              "int",   0,   1000000, "points"),
+    ("sign_streak_bonus",       "SIGN_STREAK_BONUS",       "连续签到满7天额外奖励",     "int",   0,   1000000, "points"),
+    ("chat_enabled",            "CHAT_ENABLED",            "聊天积分开关(需关机器人隐私模式)", "bool", 0, 1,    "points"),
+    ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points"),
+    ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points"),
+    ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points"),
+    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "积分查询消息自动删除(秒,0=不删)", "int", 0, 300,     "points"),
+    ("redpacket_enabled",       "REDPACKET_ENABLED",       "积分红包开关",              "bool",  0,   1,       "points"),
+    ("point_levels",            "POINT_LEVELS",            "积分等级表(每行 等级名:最低积分)", "levels", 0, 0,  "points"),
+    ("mall_items",              "MALL_ITEMS",              "商城商品表(每行 商品名:价格)", "items", 0, 0,      "points"),
 ]
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
+
+# ---------- 积分系统：运行时配置默认值（网页可改） ----------
+SIGN_ENABLED = 1
+SIGN_BASE_REWARD = 1000
+SIGN_STREAK_BONUS = 500
+CHAT_ENABLED = 1
+CHAT_CHARS_PER = 5
+CHAT_REWARD = 1
+CHAT_DAILY_CAP = 500
+POINTS_DELETE_SECONDS = 30
+REDPACKET_ENABLED = 1
+POINT_LEVELS = [{"name": "青铜", "value": 0}, {"name": "白银", "value": 5000}, {"name": "黄金", "value": 20000}, {"name": "铂金", "value": 50000}, {"name": "钻石", "value": 100000}]
+MALL_ITEMS = []  # [{"name": 商品名, "value": 价格}]
+
+# 积分系统持久化数据（与主数据同一套脏标记/写盘/备份机制）
+sign_data = defaultdict(lambda: defaultdict(dict))   # sign_data[cid][uid] = {"last": "YYYY-MM-DD", "streak": n}
+chat_today = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # chat_today[date][cid][uid] = 当日聊天已得积分
+mall_orders = []                                     # [{"ts","cid","uid","name","item","price"}]
+rp_packets = {}                                      # pid -> {"cid","from","left_amt","left_n","grabbed":{uid:amt},"ts","msg_id"}
 
 def _write_settings_file(cfg: dict, password: str):
     try:
@@ -156,6 +188,44 @@ def apply_settings(cfg: dict):
             continue
         globals()[gname] = v
         applied[key] = v
+    # 布尔字段
+    for key, gname, _label, ftype, _lo, _hi, _grp in SETTINGS_FIELDS:
+        if key in cfg and ftype == "bool":
+            v = 1 if str(cfg[key]).strip().lower() in ("1", "on", "true", "yes", "是") else 0
+            globals()[gname] = v
+            applied[key] = v
+    # 等级表 / 商品表：每行 "名称:数值"（支持中英文冒号），按数值升序
+    for key, gname, ftype in (("point_levels", "POINT_LEVELS", "levels"), ("mall_items", "MALL_ITEMS", "items")):
+        if key not in cfg:
+            continue
+        raw = cfg[key]
+        if isinstance(raw, (list, tuple)):
+            lines = raw
+        else:
+            lines = str(raw).replace("：", ":").splitlines()
+        parsed, ok = [], True
+        for line in lines:
+            line = str(line).strip()
+            if not line:
+                continue
+            name, _, val = line.partition(":")
+            name, val = name.strip(), val.strip()
+            if not name or len(name) > 12 or any(ch in name for ch in "<>&"):
+                ok = False; break
+            try:
+                v = int(float(val))
+            except ValueError:
+                ok = False; break
+            if not (0 <= v <= 10000000) or (ftype == "items" and v < 1):
+                ok = False; break
+            parsed.append({"name": name, "value": v})
+        if ok and parsed and len(parsed) <= 30:
+            parsed.sort(key=lambda x: x["value"])
+            globals()[gname] = parsed
+            applied[key] = parsed
+        elif ok and not parsed and ftype == "items":
+            globals()[gname] = []  # 商品表允许清空
+            applied[key] = []
     # --- 赛马三件套联动：数量/名称/表情必须一致才提交，否则整体保持原状（防 5 匹马 3 个名字的崩局） ---
     if any(k in cfg for k in ("horse_count", "horse_names", "horse_emoji")):
         def _split(v, maxlen):
@@ -460,6 +530,9 @@ def force_save_now():
                 "title_equipped": {str(uid): t for uid, t in title_equipped.items()},
                 "champions_history": champions_history,
                 "user_names": {str(uid): n for uid, n in user_names.items()},
+                "sign_data": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in sign_data.items()},
+                "chat_today": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in chats.items()} for date, chats in chat_today.items()},
+                "mall_orders": mall_orders[-200:],
             }
             os.makedirs(os.path.dirname(os.path.abspath(DATA_FILE)), exist_ok=True)
             with open(DATA_TEMP_FILE, "w", encoding="utf-8") as file:
@@ -552,6 +625,16 @@ def load_data():
         user_names.clear()
         for uid, n in data.get("user_names", {}).items():
             if n: user_names[int(uid)] = n
+        # 积分系统数据恢复
+        for cid, users in data.get("sign_data", {}).items():
+            for uid, v in users.items():
+                if isinstance(v, dict): sign_data[int(cid)][int(uid)] = {"last": str(v.get("last", "")), "streak": int(v.get("streak", 0))}
+        for date, chats in data.get("chat_today", {}).items():
+            for cid, users in chats.items():
+                for uid, v in users.items():
+                    chat_today[str(date)][int(cid)][int(uid)] = int(v)
+        mall_orders.clear()
+        mall_orders.extend(data.get("mall_orders", [])[-200:])
         AUTHORIZED_GROUPS.update(int(cid) for cid in data.get("authorized_groups", []))
         BOT_ADMINS.clear(); BOT_ADMINS.update(ADMIN_USER_IDS)
         BOT_ADMINS.update(int(x) for x in data.get("bot_admins", []))
@@ -1757,7 +1840,7 @@ async def require_group_chat(update, game_name, cmd):
 
 async def cmd_start(update, context):
     if not await need_auth(update): return
-    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（积分永久，可用 /convert 补充）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 积分商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用通用/德州积分换称号\n换德州 数量 - 通用积分兑换德州积分（4通用=1德州；也支持 /convert）"
+    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（积分永久，可用 /convert 补充）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号\n换德州 数量 - 通用积分兑换德州积分（4通用=1德州；也支持 /convert）"
     if is_bot_admin(update.effective_user.id):
         text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /加德州(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
     await update.message.reply_text(text)
@@ -3918,6 +4001,12 @@ async def on_button(update, context):
             elif game.phase == "open_pending": await show_jinhua_action(game, context.application)
             else: await start_jinhua_turn_timer(game, context.application)
             return
+        if data.startswith("rp_grab_"):
+            p = rp_packets.get(data[8:])
+            if not p:
+                await q.answer("红包已结束或过期", show_alert=True); return
+            await _rp_grab(p, data[8:], uid, context, q)
+            return
         if data.startswith("horsebet_"):
             race = active_horse_races.get(cid)
             try: _, horse, amount = data.split("_"); horse, amount = int(horse), int(amount)
@@ -3961,6 +4050,12 @@ async def on_text(update, context):
         # 与 on_button 对齐；命令分发仍在上面由各自 cmd_* 自行校验权限
         if not is_auth(cid):
             return
+
+        # 聊天积分：静默计分，不影响下方游戏文本处理
+        try:
+            _award_chat_points(cid, user.id, text)
+        except Exception:
+            logger.exception("聊天积分记账异常（已吞并）")
         
         # 统一刷新逻辑
         if text in ["棋盘", "刷新", "看棋", "board", "qp"]:
@@ -4076,6 +4171,213 @@ async def on_text(update, context):
             pass
 
 
+# ---------- 积分系统（统一钱包=通用积分） ----------
+def _get_level(balance):
+    """按积分等级表返回当前等级名，表为空返回空串。"""
+    lv = ""
+    for item in POINT_LEVELS:
+        if balance >= item["value"]:
+            lv = item["name"]
+    return lv
+
+def _award_chat_points(cid, uid, text):
+    """聊天积分：静默计分，满 N 字符记 X 分，受每日上限约束（零头不计）。"""
+    if not CHAT_ENABLED or CHAT_REWARD <= 0 or CHAT_CHARS_PER <= 0:
+        return
+    n = len(text.strip())
+    if n < CHAT_CHARS_PER:
+        return
+    gain = (n // CHAT_CHARS_PER) * CHAT_REWARD
+    if gain <= 0:
+        return
+    date = now_bj().strftime("%Y-%m-%d")
+    today = chat_today[date][cid]
+    earned = today.get(uid, 0)
+    if CHAT_DAILY_CAP > 0:
+        gain = min(gain, CHAT_DAILY_CAP - earned)
+        if gain <= 0:
+            return
+    today[uid] = earned + gain
+    game_chips[cid][uid] += gain
+
+async def cmd_sign(update, context):
+    if not await need_auth(update): return
+    if not SIGN_ENABLED:
+        await update.message.reply_text("ℹ️ 签到功能未开启。"); return
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 签到请在群聊中进行。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    today = now_bj().strftime("%Y-%m-%d")
+    yesterday = (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")
+    info = sign_data[cid][uid]
+    if info.get("last") == today:
+        await update.message.reply_text(f"✅ 今天已经签过啦（连续 {info.get('streak', 0)} 天）。"); return
+    streak = info.get("streak", 0) + 1 if info.get("last") == yesterday else 1
+    reward = SIGN_BASE_REWARD + (SIGN_STREAK_BONUS if streak % 7 == 0 else 0)
+    async with wallet_locks[uid]:
+        game_chips[cid][uid] += reward
+        sign_data[cid][uid] = {"last": today, "streak": streak}
+        save_data()
+    await update.message.reply_text(
+        f"🎉 {await get_name(context.application, uid)} 签到成功！\n"
+        f"📅 连续签到 {streak} 天｜💰 +{reward}" + ("（含连续7天额外奖励）" if streak % 7 == 0 else "") +
+        f"\n💰 当前积分：{game_chips[cid][uid]}")
+
+async def cmd_sign_rank(update, context):
+    if not await need_auth(update): return
+    cid = update.effective_chat.id
+    users = [(uid, v.get("streak", 0)) for uid, v in sign_data.get(cid, {}).items() if v.get("streak", 0) > 0]
+    if not users:
+        await update.message.reply_text("本群还没有签到记录，发「签到」抢头名！"); return
+    lines = ["📅 连续签到排行", "━" * 14]
+    for i, (uid, s) in enumerate(sorted(users, key=lambda x: (-x[1], x[0]))[:20], 1):
+        lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：连续 {s} 天")
+    await safe_send_long(context.bot, cid, "\n".join(lines))
+
+async def cmd_my_points(update, context):
+    if not await need_auth(update): return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    balance = game_chips[cid][uid]
+    date = now_bj().strftime("%Y-%m-%d")
+    today_chat = chat_today.get(date, {}).get(cid, {}).get(uid, 0)
+    streak = sign_data.get(cid, {}).get(uid, {}).get("streak", 0)
+    signed = "✅ 已签" if sign_data.get(cid, {}).get(uid, {}).get("last") == date else "❌ 未签"
+    lv = _get_level(balance)
+    lv_line = f"🎖 等级：{lv}\n" if lv else ""
+    await update.message.reply_text(
+        f"💰 我的积分：{balance}\n{lv_line}"
+        f"📅 今日签到：{signed}（连续 {streak} 天）\n"
+        f"💬 今日聊天获得：{today_chat}")
+    if POINTS_DELETE_SECONDS > 0 and is_group_chat(update):
+        async def _del():
+            await asyncio.sleep(POINTS_DELETE_SECONDS)
+            await safe_delete(context.bot, cid, update.message.message_id)
+        asyncio.create_task(_del())
+
+async def cmd_points_rank(update, context):
+    if not await need_auth(update): return
+    cid = update.effective_chat.id
+    lines = ["💰 积分排行榜", "━" * 14]
+    for i, (uid, value) in enumerate(sorted(game_chips[cid].items(), key=lambda x: x[1], reverse=True)[:20], 1):
+        lv = _get_level(value)
+        tag = f"｜{lv}" if lv else ""
+        lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value}{tag}")
+    await safe_send_long(context.bot, cid, "\n".join(lines))
+
+async def cmd_mall(update, context):
+    if not await need_auth(update): return
+    if not MALL_ITEMS:
+        await update.message.reply_text("🛒 商城暂无商品，管理员可在后台「积分系统 → 商城商品表」上架。"); return
+    lines = ["🛒 积分商城", "━" * 14]
+    for i, item in enumerate(MALL_ITEMS, 1):
+        lines.append(f"{i}. {item['name']}　—　{item['value']} 积分")
+    lines.append("")
+    lines.append("💡 发「购买 编号」（如：购买 1）即可用积分兑换，管理员会尽快发货。")
+    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines))
+
+async def cmd_mall_buy(update, context):
+    if not await need_auth(update): return
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 购买请在群聊中进行。"); return
+    if not MALL_ITEMS:
+        await update.message.reply_text("🛒 商城暂无商品。"); return
+    if not context.args:
+        await update.message.reply_text(f"用法：购买 编号（1~{len(MALL_ITEMS)}），用「积分商城」查看列表。"); return
+    arg = context.args[0].strip()
+    item = None
+    if arg.isdigit() and 1 <= int(arg) <= len(MALL_ITEMS):
+        item = MALL_ITEMS[int(arg) - 1]
+    else:
+        name = arg.lstrip("0123456789.、 ").strip()
+        item = next((x for x in MALL_ITEMS if x["name"] == name), None)
+    if not item:
+        await update.message.reply_text("❌ 没有这个商品，用「积分商城」查看列表。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    price = item["value"]
+    async with wallet_locks[uid]:
+        if game_chips[cid][uid] < price:
+            await update.message.reply_text(f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"); return
+        game_chips[cid][uid] -= price
+        mall_orders.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "uid": uid,
+                            "name": await get_name(context.application, uid), "item": item["name"], "price": price})
+        save_data()
+    await update.message.reply_text(
+        f"🛍 购买成功：{item['name']}（-{price} 积分）\n💰 余额 {game_chips[cid][uid]}\n管理员会尽快处理发货。")
+    try:
+        await context.bot.send_message(ADMIN_USER_ID,
+            f"🛒 积分商城订单\n群：{chat_name_cache.get(cid, cid)}\n"
+            f"玩家：{await get_name(context.application, uid)}（{uid}）\n商品：{item['name']}（{price} 积分）")
+    except Exception:
+        logger.exception("商城订单通知管理员失败")
+
+async def cmd_redpacket(update, context):
+    if not await need_auth(update): return
+    if not REDPACKET_ENABLED:
+        await update.message.reply_text("ℹ️ 红包功能未开启。"); return
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 红包请在群聊中发。"); return
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_text("用法：红包 总积分 份数（如：红包 1000 5）"); return
+    total, count = int(args[0]), int(args[1])
+    if not (1 <= total <= 1000000 and 1 <= count <= 100 and count <= total):
+        await update.message.reply_text("❌ 总积分 1~100 万，份数 1~100 且不超过总积分。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    async with wallet_locks[uid]:
+        if game_chips[cid][uid] < total:
+            await update.message.reply_text(f"❌ 积分不足：需要 {total}，当前 {game_chips[cid][uid]}。"); return
+        game_chips[cid][uid] -= total
+        pid = secrets.token_urlsafe(8)
+        rp_packets[pid] = {"cid": cid, "from": uid, "left_amt": total, "left_n": count,
+                           "grabbed": {}, "ts": now_bj().timestamp(), "msg_id": None}
+        save_data()
+    await action_notice(cid, context.application, uid, f"发出了 {total} 积分 / {count} 份红包")
+    msg = await safe_send(context.bot, cid,
+        f"🧧 {await get_name(context.application, uid)} 的积分红包\n💰 {total} 积分 × {count} 份\n点击下方按钮抢！",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧧 抢红包", callback_data=f"rp_grab_{pid}")]]))
+    if msg:
+        rp_packets[pid]["msg_id"] = msg.message_id
+
+async def _rp_grab(p, pid, uid, context, q):
+    """红包抢夺核心：检查过期/重复 → 随机拆分 → 入账 → 更新看板。"""
+    cid = p["cid"]
+    now = now_bj().timestamp()
+    if now - p["ts"] > 86400:  # 过期：剩余整体退回发包人
+        refund = p["left_amt"]
+        async with wallet_locks[p["from"]]:
+            game_chips[cid][p["from"]] += refund
+        rp_packets.pop(pid, None); save_data()
+        await q.answer("红包已过期，剩余已退回", show_alert=True)
+        await safe_edit(context.bot, cid, p["msg_id"], "🧧 红包已过期，未领完的积分已退回。", reply_markup=None)
+        return
+    if uid in p["grabbed"]:
+        await q.answer(f"你已经抢过 {p['grabbed'][uid]} 积分啦", show_alert=True); return
+    if p["left_n"] <= 0:
+        await q.answer("手慢了，红包已被抢完", show_alert=True); return
+    if p["left_n"] == 1:
+        amt = p["left_amt"]
+    else:
+        amt = random.randint(1, max(1, p["left_amt"] - p["left_n"] + 1))
+    async with wallet_locks[uid]:
+        p["grabbed"][uid] = amt
+        p["left_amt"] -= amt; p["left_n"] -= 1
+        game_chips[cid][uid] += amt
+        save_data()
+    await q.answer(f"🧧 抢到 {amt} 积分！")
+    total, count = sum(p["grabbed"].values()), len(p["grabbed"])
+    if p["left_n"] <= 0:
+        detail_lines = []
+        for u, a in p["grabbed"].items():
+            detail_lines.append(f"{await get_name(context.application, u, cid=cid)}：{a}")
+        detail = "\n".join(detail_lines)
+        await safe_edit(context.bot, cid, p["msg_id"],
+                        f"🧧 红包已被抢完（{count} 份 / {total} 积分）\n{detail}", reply_markup=None)
+    else:
+        await safe_edit(context.bot, cid, p["msg_id"],
+                        f"🧧 红包进行中\n💰 已领 {count}/{p['left_n'] + count} 份｜剩 {p['left_amt']} 积分",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧧 抢红包", callback_data=f"rp_grab_{pid}")]]))
+
+
 # ---------- 定时任务与启动 ----------
 async def season_settle_scheduler(app):
     """独立赛季结算调度：每 60 秒检查一次到点，精确到分钟结算（不再依赖每日 0 点循环，避免最多延迟 ~24h）。"""
@@ -4122,6 +4424,15 @@ async def daily_reset_scheduler(app):
                 save_data()
             for cid in race_daily_stats: race_daily_stats[cid] = [0] * HORSE_COUNT
             archive_old_profit_data()
+            # 积分系统：清掉前天的聊天积分（保留当天用于跨午夜），过期红包退余款
+            chat_today.pop((now_bj() - timedelta(days=2)).strftime("%Y-%m-%d"), None)
+            for pid in list(rp_packets.keys()):
+                p = rp_packets[pid]
+                if now_bj().timestamp() - p["ts"] > 86400:
+                    if p["left_amt"] > 0:
+                        game_chips[p["cid"]][p["from"]] += p["left_amt"]
+                    rp_packets.pop(pid, None)
+            save_data()
             # 清理已到期的限时商店称号
             _now_ts = int(now_bj().timestamp())
             for _u in list(title_expiry.keys()):
@@ -4308,6 +4619,9 @@ async def post_init(app):
             BotCommand("sc", "赛车"),
             BotCommand("21", "21点"),
             BotCommand("jinhua", "炸金花"),
+            BotCommand("sign", "每日签到"),
+            BotCommand("mypoints", "我的积分"),
+            BotCommand("mall", "积分商城"),
             BotCommand("end", "结束当前游戏"),
             BotCommand("add", "加/减通用积分(正加负减)"),
             BotCommand("adddz", "加/减德州积分(正加负减)"),
@@ -4377,6 +4691,10 @@ CMD_ALIASES = {
     "备份": cmd_backup,
     "恢复": cmd_restore,
     "炸金花": cmd_jinhua, "jinhua": cmd_jinhua, "zjh": cmd_jinhua, "金花": cmd_jinhua,
+    "签到": cmd_sign, "每日签到": cmd_sign, "签到排行": cmd_sign_rank,
+    "我的积分": cmd_my_points, "积分排行": cmd_points_rank,
+    "积分商城": cmd_mall, "商城": cmd_mall, "购买": cmd_mall_buy,
+    "红包": cmd_redpacket, "发红包": cmd_redpacket,
     "排位": cmd_season_play, "排位赛": cmd_season_play, "赛季": cmd_season_play, "赛季赛": cmd_season_play,
     "排位报名": cmd_season_join, "报名排位": cmd_season_join, "赛季报名": cmd_season_join,
     "排位榜": cmd_season_rank, "赛季榜": cmd_season_rank, "赛季排名": cmd_season_rank,
@@ -4401,6 +4719,8 @@ CMD_ALIASES = {
     "seasonjoin": cmd_season_join, "seasonrank": cmd_season_rank,
     "seasonstart": cmd_season_start, "seasonend": cmd_season_end,
     "god": cmd_god, "godgrant": cmd_god_grant, "godrevoke": cmd_god_revoke,
+    "sign": cmd_sign, "signrank": cmd_sign_rank, "mypoints": cmd_my_points,
+    "pointsrank": cmd_points_rank, "mall": cmd_mall, "buy": cmd_mall_buy,
 }
 
 async def _dispatch_alias(cmd, args, update, context):
@@ -4536,7 +4856,20 @@ def start_health_server():
                 if grp != gkey:
                     continue
                 cur = globals().get(_g)
-                if ftype in ("names", "emoji", "bets"):
+                if ftype == "bool":
+                    checked = " checked" if cur else ""
+                    rows.append(f"<label style='display:flex;align-items:center;gap:10px;cursor:pointer'>"
+                                f"<input type='checkbox' name='{key}'{checked} style='width:18px;height:18px;accent-color:#7c6cf0'>"
+                                f"<span>{html.escape(label)}</span></label>")
+                elif ftype in ("levels", "items"):
+                    if isinstance(cur, (list, tuple)) and cur and isinstance(cur[0], dict):
+                        val = "\n".join(f"{x['name']}:{x['value']}" for x in cur)
+                    else:
+                        val = str(cur or "")
+                    rows.append(f"<label>{html.escape(label)}（每行一条：名称:数值）"
+                                f"<textarea name='{key}' rows='5' style='width:100%;background:#151621;border:1px solid #34354a;"
+                                f"color:#e6e5f0;border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit'>{html.escape(val)}</textarea></label>")
+                elif ftype in ("names", "emoji", "bets"):
                     val = ",".join(str(x) for x in cur) if isinstance(cur, (list, tuple)) else str(cur)
                     rows.append(f"<label>{html.escape(label)}"
                                 f"<input type='text' name='{key}' value='{html.escape(val, quote=True)}'></label>")
@@ -4642,6 +4975,8 @@ def start_health_server():
                         self._redirect("/page/security?saved=1"); return
                     valid_keys = {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
                     cfg = {k: v[0] for k, v in form.items() if k in valid_keys}
+                    for k in valid_keys:  # checkbox 未勾选时表单不含该键 → 显式补 0
+                        cfg.setdefault(k, "0")
                     applied = save_settings(cfg)
                     skipped = [k for k in cfg if k not in applied]
                     self._redirect(f"/page/{group}?saved=1" + ("&bad=1" if skipped else ""))

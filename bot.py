@@ -50,6 +50,11 @@ ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", DEFAULT_ADMIN))
 ADMIN_USER_IDS = {ADMIN_USER_ID}  # 种子管理员，重启后自动恢复，无法被 /deladmin 移除
 BOT_ADMINS = set(ADMIN_USER_IDS)  # 运行时管理员集合 = 种子 ∪ 持久化新增，可经 /addadmin /deladmin 动态管理
 SMALL_BLIND, BIG_BLIND, ANTE = 0, 0, 200
+# 4 游戏总开关/仅管理员开局（后台各游戏分组可调，保存立即生效）
+TEXAS_ENABLED, TEXAS_ADMIN_ONLY = 1, 0
+BJ_ENABLED, BJ_ADMIN_ONLY = 1, 0
+JINHUA_ENABLED, JINHUA_ADMIN_ONLY = 1, 0
+RACE_ENABLED, RACE_ADMIN_ONLY = 1, 0
 STALE_TEXT_COMMAND_SECONDS = 120
 # ---------- 德州排位赛 ----------
 SEASON_START_CHIPS = 20000     # 排位赛起始分（独立账本，7天不清零）
@@ -137,8 +142,10 @@ SUBPAGES = {
         ("mlist",   "群组成员列表"),
         ("records", "进出与申请"),
         ("ops",     "白名单与操作"),
+        ("join",    "入群与观察"),
     ],
     "admin": [
+        ("admins",    "Bot 管理员"),
         ("auth",      "授权群管理"),
         ("blacklist", "拉黑管理"),
         ("god",       "赌神称号"),
@@ -156,9 +163,13 @@ SETTINGS_FIELDS = [
     ("bj_min_bet",              "BJ_MIN_BET",              "最低下注",                  "int",   1,   100000,  "blackjack"),
     ("bj_join_bets",            "BJ_JOIN_BETS",            "加入下注按钮金额(逗号分隔)", "bets",  0,   0,       "blackjack"),
     ("blackjack_decks",         "BLACKJACK_DECKS",         "使用几副牌",                "int",   1,   8,       "blackjack"),
+    ("bj_enabled",              "BJ_ENABLED",              "21点开关",                  "bool",  0,   1,       "blackjack"),
+    ("bj_admin_only",           "BJ_ADMIN_ONLY",           "21点仅管理员开局",          "bool",  0,   1,       "blackjack"),
     ("jinhua_ante",             "JINHUA_ANTE",             "底注",                      "int",   1,   100000,  "jinhua"),
     ("jinhua_base",             "JINHUA_BASE",             "单注基准",                  "int",   1,   100000,  "jinhua"),
     ("jinhua_seen_double",      "JINHUA_SEEN_DOUBLE",      "看牌者投注加倍开关",        "bool",  0,   1,       "jinhua"),
+    ("jinhua_enabled",          "JINHUA_ENABLED",          "炸金花开关",                "bool",  0,   1,       "jinhua"),
+    ("jinhua_admin_only",       "JINHUA_ADMIN_ONLY",       "炸金花仅管理员开局",        "bool",  0,   1,       "jinhua"),
     ("race_auto_start",         "RACE_AUTO_START",         "自动开赛时间(秒)",          "int",   10,  600,     "race"),
     ("race_animation_interval", "RACE_ANIMATION_INTERVAL", "动画帧间隔(秒)",            "float", 0.5, 30,      "race"),
     ("horse_count",             "HORSE_COUNT",             "赛马数量(匹)",              "int",   2,   8,       "race"),
@@ -167,12 +178,16 @@ SETTINGS_FIELDS = [
     ("race_track_length",       "RACE_TRACK_LENGTH",       "赛道长度(格)",              "int",   5,   50,      "race"),
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
+    ("race_enabled",            "RACE_ENABLED",            "赛车开关",                  "bool",  0,   1,       "race"),
+    ("race_admin_only",         "RACE_ADMIN_ONLY",         "赛车仅管理员开局",          "bool",  0,   1,       "race"),
     ("broadcast_enabled",       "BROADCAST_ENABLED",       "大奖战报自动广播开关",      "bool",  0,   1,       "general"),
     ("broadcast_min_amount",    "BROADCAST_MIN_AMOUNT",    "战报阈值(单局净赢≥此值广播)", "int",  100, 10000000,"general"),
     ("game_starting_chips",     "GAME_STARTING_CHIPS",     "新玩家初始积分(全游戏统一)", "int",  100, 1000000, "general"),
-    ("small_blind",             "SMALL_BLIND",             "德州小盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
-    ("big_blind",               "BIG_BLIND",               "德州大盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
-    ("ante",                    "ANTE",                    "德州前注(每人发牌前强制投入)", "int", 0,  100000,  "general"),
+    ("small_blind",             "SMALL_BLIND",             "德州小盲注(0=不设盲注)",    "int",   0,   100000,  "texas"),
+    ("big_blind",               "BIG_BLIND",               "德州大盲注(0=不设盲注)",    "int",   0,   100000,  "texas"),
+    ("ante",                    "ANTE",                    "德州前注(每人发牌前强制投入)", "int", 0,  100000,  "texas"),
+    ("texas_enabled",           "TEXAS_ENABLED",           "德州扑克开关",              "bool",  0,   1,       "texas"),
+    ("texas_admin_only",        "TEXAS_ADMIN_ONLY",        "德州仅管理员开局",          "bool",  0,   1,       "texas"),
     ("stale_text_command_seconds","STALE_TEXT_COMMAND_SECONDS","过期消息忽略(秒,防翻旧账命令)", "int", 5, 3600, "general"),
     # ---------- 定时任务（时间可自行设置） ----------
     ("daily_reset_time",        "DAILY_RESET_TIME",        "每日重置时间(时:分,排位分重置等)", "short", 0, 0, "schedule"),
@@ -184,8 +199,8 @@ SETTINGS_FIELDS = [
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("web_base_url",            "WEB_BASE_URL",            "后台公网地址(/后台一键登录用)",          "text", 0,   0,    "general"),
-    ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
-    ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
+    ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "members/join"),
+    ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "members/join"),
     ("antispam_enabled",        "ANTISPAM_ENABLED",        "定时刷屏识别开关(复读+定时器特征)", "bool", 0,   1,    "autodel"),
     ("antispam_repeat_n",       "ANTISPAM_REPEAT_N",       "复读命中条数(窗口内同内容)", "int",  2,   10,   "autodel"),
     ("antispam_window",         "ANTISPAM_WINDOW",         "复读检测窗口(秒)", "int",  10,  3600, "autodel"),
@@ -214,8 +229,8 @@ SETTINGS_FIELDS = [
     ("autodel_contact",       "AUTODEL_CONTACT",       "删除分享联系人", "bool", 0, 1, "autodel"),
     ("autodel_service",       "AUTODEL_SERVICE",       "删除系统消息(入退群/改群名等)", "bool", 0, 1, "autodel"),
     ("autodel_premium_emoji", "AUTODEL_PREMIUM_EMOJI", "删除会员表情(自定义表情)", "bool", 0, 1, "autodel"),
-    ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "general"),
-    ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "general"),
+    ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "members/join"),
+    ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "members/join"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
     ("emergency_max_uses",      "EMERGENCY_MAX_USES",      "归零每日赠送次数",          "int",   0,   99,      "general"),
     ("season_start_chips",      "SEASON_START_CHIPS",      "每人起始分",                "int",   100, 1000000, "season"),
@@ -484,6 +499,7 @@ buy_orders = {}                                      # oid -> {"cid","uid","amou
 warn_counts = defaultdict(lambda: defaultdict(int))  # warn_counts[cid][uid] = 警告次数（网页成员列表加减）
 redeem_goods = []                                    # 积分兑换商品 [{"name","price","left","redeemed","desc","on"}] left=0 不限
 redeem_counts = {}                                   # uid -> 全期已兑换次数（每人限购用）
+redeem_orders = []                                   # 兑换订单（防伪）：[{"no","ts","cid","uid","item","price","bal"}]，只留最近 500 条
 
 # ---------- 群组管理数据 ----------
 member_profiles = defaultdict(lambda: defaultdict(dict))  # member_profiles[cid][uid] = {"name","first","last","msgs"}
@@ -998,6 +1014,7 @@ def force_save_now():
                             for cid, g in guesses.items()},
                 "buy_orders": {oid: dict(o) for oid, o in buy_orders.items()},
                 "redeem_counts": {str(uid): int(v) for uid, v in redeem_counts.items()},
+                "redeem_orders": redeem_orders[-500:],
                 "warn_counts": {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in warn_counts.items()},
                 "member_profiles": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in member_profiles.items()},
                 "whitelist": {str(cid): sorted(users) for cid, users in whitelist.items()},
@@ -1199,6 +1216,9 @@ def load_data():
         for uid, v in data.get("redeem_counts", {}).items():
             try: redeem_counts[int(uid)] = int(v)
             except (KeyError, ValueError, TypeError): continue
+        redeem_orders.clear()
+        for o in data.get("redeem_orders", [])[-500:]:
+            if isinstance(o, dict): redeem_orders.append(dict(o))
         for cid, users in data.get("warn_counts", {}).items():
             for uid, v in users.items():
                 try: warn_counts[int(cid)][int(uid)] = int(v)
@@ -2440,8 +2460,8 @@ class HorseRace:
                 payouts_applied = True
 
                 # 大奖战报：押中独赢且净赢超阈值 → 广播其他授权群
-                best = max(settlements, key=lambda s: s[5])
-                if best[5] > 0:
+                best = max(settlements, key=lambda s: s[5]) if settlements else None
+                if best and best[5] > 0:
                     detail = f"🐴 押中 {HORSE_EMOJI[winner]}{HORSE_NAMES[winner]}（赔率 {best[6]:.1f}）"
                     await broadcast_big_win(app, self.chat_id, best[0], "🏎️ 赛车大赛", best[5], detail)
 
@@ -2763,8 +2783,26 @@ async def update_blackjack_ui(game, app):
 
 
 
+async def _game_gate(update, context, game):
+    """4 游戏总开关/仅管理员开局（后台各游戏分组设置，保存立即生效）。返回 True=放行。"""
+    label, enabled, admin_only = {
+        "texas":     ("德州扑克", TEXAS_ENABLED, TEXAS_ADMIN_ONLY),
+        "blackjack": ("21点", BJ_ENABLED, BJ_ADMIN_ONLY),
+        "jinhua":    ("炸金花", JINHUA_ENABLED, JINHUA_ADMIN_ONLY),
+        "race":      ("赛车", RACE_ENABLED, RACE_ADMIN_ONLY),
+    }[game]
+    if not enabled:
+        await send_reply(update, context, f"❌ {label}已关闭（管理员可在后台「{label}」分组重新开启）。")
+        return False
+    if admin_only and not is_bot_admin(update.effective_user.id):
+        await send_reply(update, context, f"❌ {label}仅管理员可开局。")
+        return False
+    return True
+
+
 async def cmd_21(update, context):
     if not await need_auth(update, context): return
+    if not await _game_gate(update, context, "blackjack"): return
     if not await require_group_chat(update, "21点", "21", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     if cid in active_blackjack_games:
@@ -3477,6 +3515,7 @@ async def refund_jinhua(game, app, notice):
 
 async def cmd_jinhua(update, context):
     if not await need_auth(update, context): return
+    if not await _game_gate(update, context, "jinhua"): return
     if not await require_group_chat(update, "炸金花", "jinhua", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     game = active_jinhua_games.get(cid)
@@ -3545,6 +3584,7 @@ async def start_wait_timeout(game, app):
 
 async def cmd_dz(update, context):
     if not await need_auth(update, context): return
+    if not await _game_gate(update, context, "texas"): return
     if not await require_group_chat(update, "德州扑克", "dz", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id; game = active_poker_games.get(cid)
     room_name, _ = poker_room_of(cid, uid, exclude_game=game)
@@ -4066,6 +4106,7 @@ async def cmd_season_play(update, context):
 
 async def cmd_sm(update, context):
     if not await need_auth(update, context): return
+    if not await _game_gate(update, context, "race"): return
     if not await require_group_chat(update, "赛车", "sc", context): return
     cid = update.effective_chat.id
     if cid in active_horse_races:
@@ -5325,15 +5366,28 @@ async def _redeem_execute(context, cid, uid, item):
         item["redeemed"] = int(item.get("redeemed", 0) or 0) + 1
         redeem_counts[uid] = redeem_counts.get(uid, 0) + 1
         ledger_add(cid, uid, 0, price, "兑换")  # 资金流台账：玩家→系统
+        order_no = f"DH-{secrets.token_hex(4)}"  # 防伪单号：群通知/私聊/管理员对账三处一致
+        order_ts = now_bj().strftime("%Y-%m-%d %H:%M")
+        redeem_orders.append({"no": order_no, "ts": order_ts, "cid": cid, "uid": uid,
+                              "item": item["name"], "price": price, "bal": game_chips[cid][uid]})
+        del redeem_orders[:-500]  # 只留最近 500 条，防膨胀
         save_data()
+    uname = await get_name(context.application, uid)
     await send_settle(context.application, cid, _fmt_tpl("redeem_msg_ok_group",
-        name=await get_name(context.application, uid), goodsName=item["name"], pointNum=price,
-        balance=game_chips[cid][uid]))
+        name=uname, goodsName=item["name"], pointNum=price,
+        balance=game_chips[cid][uid]) + f"\n🔎 防伪单号 {order_no}")
     await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
     try:
-        await context.bot.send_message(uid, _fmt_tpl("redeem_msg_ok_dm", goodsName=item["name"], pointNum=price))
+        await context.bot.send_message(uid, _fmt_tpl("redeem_msg_ok_dm", goodsName=item["name"], pointNum=price)
+                                       + f"\n🔎 防伪单号 {order_no}（管理员发货凭此号核对）")
     except TelegramError:
         pass  # 未私聊过 bot 的用户收不到 DM，群通知已足
+    try:
+        await context.bot.send_message(ADMIN_USER_ID,
+            f"🧾 积分兑换订单｜单号 {order_no}\n群：{chat_name_cache.get(cid, cid)}\n"
+            f"用户：{uname}（{uid}）\n商品：{item['name']}（{price} 积分）\n时间：{order_ts}")
+    except Exception:
+        logger.exception("兑换订单通知管理员失败")
     return None
 
 async def _redeem_buy_cb(q, idx, context):
@@ -6872,7 +6926,7 @@ async def hourly_race_scheduler(app):
                     and key != last_key):  # 开赛分钟/时段均网页可配；起始>结束=全天不开
                 last_key = key
                 for cid, enabled in list(hourly_race_enabled.items()):
-                    if not enabled or cid in active_horse_races: continue
+                    if not enabled or cid in active_horse_races or not RACE_ENABLED: continue
                     mode = current_game_mode()
                     jackpot = race_jackpot.get(cid, 0) if mode == "official" else 0
                     race = HorseRace(cid, ADMIN_USER_ID, jackpot, mode); active_horse_races[cid] = race
@@ -8366,6 +8420,15 @@ def start_health_server():
                     if not rd_rows:
                         rd_rows = ("<tr><td colspan='6' style='text-align:center;color:#6a6982'>"
                                    "暂无兑换商品，先新增商品</td></tr>")
+                    ro_rows = ""
+                    for o in reversed(redeem_orders[-50:]):
+                        ro_rows += (f"<tr><td>{html.escape(str(o.get('no', '')))}</td>"
+                                    f"<td>{html.escape(str(o.get('ts', '')))}</td>"
+                                    f"<td>{html.escape(str(o.get('uid', '')))}</td>"
+                                    f"<td>{html.escape(str(o.get('item', '')))}</td>"
+                                    f"<td>{int(o.get('price', 0) or 0)}</td></tr>")
+                    if not ro_rows:
+                        ro_rows = ("<tr><td colspan='5' style='text-align:center;color:#6a6982'>暂无兑换订单</td></tr>")
                     cmd_esc = html.escape(str(REDEEM_CMD))
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>群内发「{cmd_esc}」看商品列表，发「{cmd_esc} 编号」立即兑换；剩余 0=不限，限量商品兑完自动下架</div>{msg}"
                             "<div class='card'><h3>🛒 兑换商品</h3>"
@@ -8377,11 +8440,15 @@ def start_health_server():
                             "<input type='number' name='left' placeholder='剩余数量(0=不限)' min='0' style='flex:1'>"
                             "<input type='text' name='desc' placeholder='说明(可选)' style='flex:2'>"
                             "<button style='margin:0'>➕ 新增商品</button></form></div>"
+                            "<div class='card' style='margin-top:18px'><h3>🧾 最近兑换订单（防伪核对）</h3>"
+                            "<table class='tbl'><tr><th>单号</th><th>时间</th><th>用户ID</th><th>商品</th><th>积分</th></tr>"
+                            + ro_rows + "</table></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/redeem'>"
                             + _field_rows("points/redeem")
                             + "<div class='sub' style='margin-top:16px'>商品行占位符：<code>{goodsName}</code> <code>{pointNum}</code> <code>{leftNum}</code>；"
-                              "成功通知占位符：<code>{name}</code> <code>{goodsName}</code> <code>{pointNum}</code> <code>{balance}</code></div>"
+                              "成功通知占位符：<code>{name}</code> <code>{goodsName}</code> <code>{pointNum}</code> <code>{balance}</code>；"
+                              "防伪单号由系统自动附加在群通知/私聊/管理员对账消息末尾，无需模板配置</div>"
                             "<button type='submit' style='margin-top:8px'>💾 保存兑换设置</button></form></div>")
                 elif gkey == "points" and sub == "guess":
                     gs_rows = ""
@@ -8441,6 +8508,26 @@ def start_health_server():
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/buy'>"
                             + _field_rows("points/buy") + "<button type='submit'>💾 保存</button></form></div>")
+                elif gkey == "admin" and sub == "admins":
+                    admin_rows = ""
+                    for a in sorted(BOT_ADMINS):
+                        if a in ADMIN_USER_IDS:
+                            src = "种子管理员(代码写入,不可移除)"
+                        else:
+                            src = (f"<form style='display:inline' method='post' action='/adminops'>"
+                                   f"<input type='hidden' name='action' value='del'>"
+                                   f"<input type='hidden' name='uid' value='{a}'>"
+                                   f"<button style='margin:0;padding:4px 12px;font-size:12px;background:#e06666;margin-top:0'>移除</button></form>")
+                        admin_rows += f"<tr><td><code>{a}</code></td><td>{src}</td></tr>"
+                    body = ("<h1>🛡️ Bot 管理员</h1>"
+                            "<div class='sub'>种子管理员来自代码/环境变量，防锁死不可移除；新增的重启不丢。</div>"
+                            f"{msg}<div class='card'>"
+                            f"<table class='tbl'><tr><th>ID</th><th>操作</th></tr>{admin_rows}</table>"
+                            "<form method='post' action='/adminops' style='display:flex;gap:10px;margin-top:14px'>"
+                            "<input type='hidden' name='action' value='add'>"
+                            "<input type='number' name='uid' list='dl_users_admin' placeholder='用户数字ID' required style='flex:1'>"
+                            f"<datalist id='dl_users_admin'>{_all_user_options()}</datalist>"
+                            "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
                 else:
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
                             "<div class='card'><form method='post' action='/save'>"
@@ -8457,25 +8544,6 @@ def start_health_server():
                         f"<input type='hidden' name='group' value='{gkey}'>"
                         + _field_rows(gkey) +
                         "<button type='submit'>💾 保 存</button></form></div>")
-                if gkey == "general":
-                    admin_rows = ""
-                    for a in sorted(BOT_ADMINS):
-                        if a in ADMIN_USER_IDS:
-                            src = "种子管理员(代码写入,不可移除)"
-                        else:
-                            src = (f"<form style='display:inline' method='post' action='/adminops'>"
-                                   f"<input type='hidden' name='action' value='del'>"
-                                   f"<input type='hidden' name='uid' value='{a}'>"
-                                   f"<button style='margin:0;padding:4px 12px;font-size:12px;background:#e06666;margin-top:0'>移除</button></form>")
-                        admin_rows += f"<tr><td><code>{a}</code></td><td>{src}</td></tr>"
-                    body += ("<div class='card'><h1>🛡️ Bot 管理员</h1>"
-                             "<div class='sub'>种子管理员来自代码/环境变量，防锁死不可移除；新增的重启不丢。</div>"
-                             f"<table class='tbl'><tr><th>ID</th><th>操作</th></tr>{admin_rows}</table>"
-                             "<form method='post' action='/adminops' style='display:flex;gap:10px;margin-top:14px'>"
-                             "<input type='hidden' name='action' value='add'>"
-                             "<input type='number' name='uid' list='dl_users_admin' placeholder='用户数字ID' required style='flex:1'>"
-                             f"<datalist id='dl_users_admin'>{_all_user_options()}</datalist>"
-                             "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
             return _page(gname, gkey, body)
 
         def _tpl_preview(key):

@@ -104,6 +104,8 @@ SETTINGS_GROUPS = [
     ("security",  "安全",       "🔒"),
 ]
 # 子页面制：有子页的分组在侧边栏折叠展开（照阿福模板）。None=未开通占位页
+SIDEBAR_ORDER = []   # 侧边栏自定义排序（组键列表，网页「群体总览」可 ▲▼ 调整，随设置持久化）
+SIDEBAR_CHILDREN = {"texas": ["season"]}  # 把某些独立组折叠进父组显示（路由不变）：排位赛归入德州
 SUBPAGES = {
     "points": [
         ("set",      "积分设置"),
@@ -117,7 +119,10 @@ SUBPAGES = {
         ("inherit",  "积分继承"),
         ("auction",  "积分拍卖"),
         ("mall",     "积分商城"),
+        ("mallord",  "商城订单"),
         ("buy",      "购买积分"),
+        ("buypkg",   "积分套餐管理"),
+        ("box",      "积分盲盒"),
         ("lottery",  "群组抽奖"),
     ],
     "admin": [
@@ -149,7 +154,6 @@ SETTINGS_FIELDS = [
     ("race_track_length",       "RACE_TRACK_LENGTH",       "赛道长度(格)",              "int",   5,   50,      "race"),
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
-    ("race_notice_delete_seconds", "RACE_NOTICE_DELETE_SECONDS", "赛车倒计时提示自动删除(秒,0=不删)", "int", 0, 3600, "race"),
     ("broadcast_enabled",       "BROADCAST_ENABLED",       "大奖战报自动广播开关",      "bool",  0,   1,       "general"),
     ("broadcast_min_amount",    "BROADCAST_MIN_AMOUNT",    "战报阈值(单局净赢≥此值广播)", "int",  100, 10000000,"general"),
     ("game_starting_chips",     "GAME_STARTING_CHIPS",     "新玩家初始积分(全游戏统一)", "int",  100, 1000000, "general"),
@@ -165,19 +169,23 @@ SETTINGS_FIELDS = [
     ("race_hourly_end",         "RACE_HOURLY_END",         "自动开赛时段-到几点(含)",   "int",   0,   23,      "schedule"),
     ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,重启后生效)", "int", 1, 168,   "schedule"),
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
-    ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
-    ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板结束后删除(秒,0=不删)", "int", 0, 3600, "general"),
+    ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("web_base_url",            "WEB_BASE_URL",            "后台公网地址(/后台一键登录用)",          "text", 0,   0,    "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
-    ("antispam_enabled",        "ANTISPAM_ENABLED",        "定时刷屏识别开关(复读+定时器特征)", "bool", 0,   1,    "general"),
-    ("antispam_repeat_n",       "ANTISPAM_REPEAT_N",       "复读命中条数(窗口内同内容)", "int",  2,   10,   "general"),
-    ("antispam_window",         "ANTISPAM_WINDOW",         "复读检测窗口(秒)", "int",  10,  3600, "general"),
-    ("antispam_timer_n",        "ANTISPAM_TIMER_N",        "定时器特征最少累计条数", "int",  3,   20,   "general"),
-    ("antispam_timer_tol",      "ANTISPAM_TIMER_TOL",      "定时器间隔偏差容忍(%)", "int",  5,   90,   "general"),
-    ("antispam_mute_seconds",   "ANTISPAM_MUTE_SECONDS",   "命中禁言基础时长(秒,0=只删不禁)", "int",  0,   86400,"general"),
-    ("antispam_mute_escalate",  "ANTISPAM_MUTE_ESCALATE",  "累犯禁言翻倍", "bool", 0,   1,    "general"),
-    ("antispam_notice_seconds", "ANTISPAM_NOTICE_SECONDS", "命中通告自动删除(秒,0=不删)", "int",  0,   3600, "general"),
+    ("antispam_enabled",        "ANTISPAM_ENABLED",        "定时刷屏识别开关(复读+定时器特征)", "bool", 0,   1,    "autodel"),
+    ("antispam_repeat_n",       "ANTISPAM_REPEAT_N",       "复读命中条数(窗口内同内容)", "int",  2,   10,   "autodel"),
+    ("antispam_window",         "ANTISPAM_WINDOW",         "复读检测窗口(秒)", "int",  10,  3600, "autodel"),
+    ("antispam_timer_n",        "ANTISPAM_TIMER_N",        "定时器特征最少累计条数", "int",  3,   20,   "autodel"),
+    ("antispam_timer_tol",      "ANTISPAM_TIMER_TOL",      "定时器间隔偏差容忍(%)", "int",  5,   90,   "autodel"),
+    ("antispam_mute_seconds",   "ANTISPAM_MUTE_SECONDS",   "命中禁言基础时长(秒,0=只删不禁)", "int",  0,   86400,"autodel"),
+    ("antispam_mute_escalate",  "ANTISPAM_MUTE_ESCALATE",  "累犯禁言翻倍", "bool", 0,   1,    "autodel"),
+    # ===== 自动回收时长（全部集中在这个菜单，用户自己调数值） =====
+    ("points_delete_seconds",  "POINTS_DELETE_SECONDS",  "你发的命令消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("reply_delete_seconds",   "REPLY_DELETE_SECONDS",   "查询类回复删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("settle_delete_seconds",  "SETTLE_DELETE_SECONDS",  "游戏结算消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("race_notice_delete_seconds", "RACE_NOTICE_DELETE_SECONDS", "赛车倒计时提示删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("antispam_notice_seconds", "ANTISPAM_NOTICE_SECONDS", "刷屏命中通告删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     # ===== 自动删除规则中心（照阿福：按消息类型开关，命中即静默撤删，管理员豁免） =====
     ("autodel_links",         "AUTODEL_LINKS",         "链接消息(http/t.me/链接实体)", "bool", 0, 1, "autodel"),
     ("autodel_long_enabled",  "AUTODEL_LONG_ENABLED",  "超长消息", "bool", 0, 1, "autodel"),
@@ -215,8 +223,6 @@ SETTINGS_FIELDS = [
     ("chat_enabled",            "CHAT_ENABLED",            "聊天积分开关(需关机器人隐私模式)", "bool", 0, 1,    "points/set"),
     ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points/set"),
     ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points/set"),
-    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "命令消息删除时间(你发的命令,秒,0=不删)", "int", 0, 300,     "points/set"),
-    ("reply_delete_seconds",    "REPLY_DELETE_SECONDS",    "查询回复自动删除(删bot回复,秒,0=不删)", "int", 0, 3600,     "points/set"),
     ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points/cap"),
     ("sign_cmd",                "SIGN_CMD",                "签到指令(不带斜杠)",        "cmd",   0,   0,       "points/sign"),
     ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points/sign"),
@@ -249,6 +255,8 @@ SETTINGS_FIELDS = [
     ("buy_enabled",             "BUY_ENABLED",             "购买积分开关(管理员人工确认)", "bool", 0, 1,     "points/buy"),
     ("buy_min",                 "BUY_MIN",                 "单次最低购买数量",          "int",   100, 1000000, "points/buy"),
     ("buy_max",                 "BUY_MAX",                 "单次最高购买数量",          "int",   100, 10000000,"points/buy"),
+    ("box_enabled",             "BOX_ENABLED",             "积分盲盒开关",              "bool",  0,   1,       "points/box"),
+    ("box_price",               "BOX_PRICE",               "单次盲盒价格(积分)",        "int",   1,   1000000, "points/box"),
 ]
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
@@ -349,6 +357,8 @@ AUCTION_DURATION = 60
 BUY_ENABLED = 1
 BUY_MIN = 1000
 BUY_MAX = 100000
+BOX_ENABLED = 0             # 积分盲盒开关
+BOX_PRICE = 100             # 单次盲盒价格
 RANK_1_EMOJI = "🥇"
 RANK_2_EMOJI = "🥈"
 RANK_3_EMOJI = "🥉"
@@ -379,6 +389,9 @@ def _fmt_tpl(key, **kw):
 sign_data = defaultdict(lambda: defaultdict(dict))   # sign_data[cid][uid] = {"last": "YYYY-MM-DD", "streak": n}
 chat_today = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # chat_today[date][cid][uid] = 当日聊天已得积分
 mall_orders = []                                     # [{"ts","cid","uid","name","item","price"}]
+chat_rules = []                                      # 阿福式聊天积分规则 [{"match","points","on"}] 命中即停；空=走每N字符旧规则
+box_pool = []                                        # 盲盒奖品池 [{"name","weight","points"}] points=0 谢谢参与
+buy_packages = []                                    # 购买积分套餐 [{"name","cny","points","sort","on"}]
 rp_packets = {}                                      # pid -> {"cid","from","left_amt","left_n","grabbed":{uid:amt},"ts","msg_id"}
 auctions = {}                                        # cid -> {"item","price","top_uid","end_ts","msg_id","task"} 拍卖（托管竞得者积分）
 buy_orders = {}                                      # oid -> {"cid","uid","amount","ts"} 购买积分申请（管理员人工确认）
@@ -407,9 +420,13 @@ web_magic_tokens = {}                                # /后台 一键登录：to
 #                   participants:[(uid, ts, name)], status, winners, creator, chat_id}
 lotteries = {}
 
-def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=None):
+def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=None, sidebar_order=None):
+    if sidebar_order is None:
+        sidebar_order = list(SETTINGS_SNAPSHOT.get("sidebar_order") or [])
     payload = {"fields": cfg, "web_password": password,
-               "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or []}
+               "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or [],
+               "sidebar_order": sidebar_order,
+               "chat_rules": list(chat_rules), "box_pool": list(box_pool), "buy_packages": list(buy_packages)}
     try:
         tmp = f"{SETTINGS_FILE}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -596,6 +613,8 @@ def load_settings():
         logger.info("无可用设置（%s 与数据快照均无），全部使用默认配置", SETTINGS_FILE)
         return
     try:
+        if "fields" not in payload and "_settings" in payload:
+            payload = payload["_settings"]  # 误指向 bot_data.json 时拆出内嵌设置，表格化数据(chat_rules等)才读得到
         apply_settings(payload.get("fields", {}))
         pwd = str(payload.get("web_password", "")).strip()
         if pwd:
@@ -612,6 +631,14 @@ def load_settings():
                 TG_MENU.clear(); TG_MENU.extend(cleaned)
         apply_command_aliases()
         SETTINGS_SNAPSHOT.clear(); SETTINGS_SNAPSHOT.update(payload)
+        so = payload.get("sidebar_order") or []
+        if isinstance(so, list):
+            SIDEBAR_ORDER.clear(); SIDEBAR_ORDER.extend(str(x) for x in so)
+        # 表格化数据：聊天积分规则 / 盲盒奖品池 / 购买积分套餐
+        for key, gl in (("chat_rules", chat_rules), ("box_pool", box_pool), ("buy_packages", buy_packages)):
+            v = payload.get(key)
+            if isinstance(v, list):
+                gl.clear(); gl.extend(x for x in v if isinstance(x, dict))
         # 从数据还原的：立刻回写设置文件，保证网页端与后续保存读到一致内容
         if origin == "data":
             _write_settings_file(payload.get("fields", {}), _web_password,
@@ -881,7 +908,8 @@ def force_save_now():
                 "inherit_daily": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in cids.items()} for date, cids in inherit_daily.items()},
                 "user_first_seen": {str(uid): ts for uid, ts in user_first_seen.items()},
                 # 设置快照内嵌进数据：跟着备份/恢复一起走，容器重建后设置不回退
-                "_settings": dict(SETTINGS_SNAPSHOT),
+                "_settings": dict(SETTINGS_SNAPSHOT, chat_rules=list(chat_rules),
+                                  box_pool=list(box_pool), buy_packages=list(buy_packages)),
                 # 群组抽奖：每群活动（含已结束的，方便历史展示）
                 "_lotteries": {str(cid): {k: v for k, v in lo.items() if k != "msg_id"}
                                for cid, lo in lotteries.items()},
@@ -1304,6 +1332,43 @@ def schedule_delete(app, cid, msgs, seconds):
     if not isinstance(msgs, (list, tuple)): msgs = [msgs]
     ids = [m.message_id for m in msgs if m is not None and getattr(m, "message_id", None)]
     schedule_delete_ids(app, cid, ids, seconds)
+
+
+async def send_settle(app, cid, text, kb=None, parse_mode="HTML", delete_after=None):
+    """【新游戏必用】游戏结算/收尾消息统一出口：发送 + 自动按 SETTLE_DELETE_SECONDS 回收。
+
+    以后写任何新游戏，结算消息一律走这个函数，别直接 reply_text/safe_send——
+    结算自动删除在这里是默认行为，不用（也不会忘）另写 schedule_delete。
+    回收时长由网页「通用与应急 → 游戏结算消息自动删除(秒)」控制，设 0 = 永久保留。
+    """
+    secs = int(SETTLE_DELETE_SECONDS if delete_after is None else delete_after)
+    kwargs = {"parse_mode": parse_mode}
+    if kb is not None:
+        kwargs["reply_markup"] = kb
+    msgs = await safe_send_long(app.bot, cid, text, **kwargs)
+    if msgs and secs > 0:
+        schedule_delete(app, cid, msgs, secs)
+    return msgs
+
+
+async def send_reply(update, context, text, kb=None, parse_mode=None, delete_after=None):
+    """【查询类命令必用】查询回复统一出口：发送 + 自动按 REPLY_DELETE_SECONDS 回收。
+
+    以后写任何查询类命令（积分/战绩/排行/商城等），回复一律走这里——
+    回复自动删除是默认行为，不用（也不会忘）另写 schedule_delete。
+    时长由网页「积分系统 → 积分设置 → 查询回复自动删除(秒)」控制，0 = 永久保留。
+    注意：用户发的命令本身按 POINTS_DELETE_SECONDS 在 _dispatch_alias 全局统一删，无需关心。
+    """
+    secs = int(REPLY_DELETE_SECONDS if delete_after is None else delete_after)
+    kwargs = {}
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+    if kb is not None:
+        kwargs["reply_markup"] = kb
+    reply = await update.message.reply_text(text, **kwargs)
+    if reply and secs > 0:
+        schedule_delete(context.application, update.effective_chat.id, reply, secs)
+    return reply
 
 
 def card_str(card):
@@ -4925,13 +4990,35 @@ def _get_level(balance):
     return lv
 
 def _award_chat_points(cid, uid, text):
-    """聊天积分：静默计分，满 N 字符记 X 分，受每日上限约束（零头不计）。"""
-    if not CHAT_ENABLED or CHAT_REWARD <= 0 or CHAT_CHARS_PER <= 0:
+    """聊天积分：优先走网页配置的规则表（阿福式：文字/长度条件 → 分值，命中即停）；
+    规则表为空或全停时回退旧逻辑（每 N 字符记 X 分）。均受每日上限约束。"""
+    if not CHAT_ENABLED:
         return
-    n = len(text.strip())
-    if n < CHAT_CHARS_PER:
-        return
-    gain = (n // CHAT_CHARS_PER) * CHAT_REWARD
+    t = text.strip()
+    enabled = [r for r in chat_rules if r.get("on")]
+    if enabled:
+        gain = 0
+        for r in enabled:
+            m = str(r.get("match", "")).strip()
+            if not m or m in t:                      # 空 match=任意消息兜底；其余=包含即命中
+                gain = int(r.get("points", 0) or 0)
+                break
+            if m.startswith("len>="):
+                try:
+                    if len(t) >= int(m[5:]):
+                        gain = int(r.get("points", 0) or 0)
+                        break
+                except ValueError:
+                    pass
+        else:
+            return                                   # 有启用规则但一条都没命中 → 不加分
+    else:
+        if CHAT_REWARD <= 0 or CHAT_CHARS_PER <= 0:
+            return
+        n = len(t)
+        if n < CHAT_CHARS_PER:
+            return
+        gain = (n // CHAT_CHARS_PER) * CHAT_REWARD
     if gain <= 0:
         return
     date = now_bj().strftime("%Y-%m-%d")
@@ -5791,6 +5878,32 @@ async def _auction_bid(cid, uid, context, q):
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🔨 加价 {a['step']}", callback_data=f"auc_bid_{cid}")]]))
 
 
+async def cmd_box(update, context):
+    """积分盲盒：扣 BOX_PRICE 开一次，按权重随机 BOX_POOL，结果走 send_settle 自动回收。"""
+    if not await need_auth(update): return
+    if not BOX_ENABLED:
+        await update.message.reply_text("❌ 盲盒未开启（网页「积分系统 → 积分盲盒」可开启）。"); return
+    if not box_pool:
+        await update.message.reply_text("🎁 奖品池还是空的，管理员在后台「积分盲盒」里配置。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    async with wallet_locks[uid]:
+        if game_chips[cid][uid] < BOX_PRICE:
+            await update.message.reply_text(f"❌ 积分不足：开一次需要 {BOX_PRICE}，你当前 {game_chips[cid][uid]}。"); return
+        game_chips[cid][uid] -= BOX_PRICE
+        weights = [max(1, int(p.get("weight", 1) or 1)) for p in box_pool]
+        pick = random.choices(box_pool, weights=weights, k=1)[0]
+        pts = int(pick.get("points", 0) or 0)
+        game_chips[cid][uid] += pts
+        save_data()
+    name = user_names.get(uid) or str(uid)
+    if pts > 0:
+        text = (f"🎁━━━━━━━━━━━━━━━━━\n🎉 <b>{html.escape(name)}</b> 开出了 <b>{html.escape(str(pick.get('name', '?')))}</b>！\n"
+                f"💰 奖励 <b>{pts}</b> 积分（花费 {BOX_PRICE}）\n🎁━━━━━━━━━━━━━━━━━")
+    else:
+        text = (f"🎁━━━━━━━━━━━━━━━━━\n🎉 <b>{html.escape(name)}</b> 开出了 <b>{html.escape(str(pick.get('name', '?')))}</b>……\n"
+                f"🙏 下次一定（花费 {BOX_PRICE}）\n🎁━━━━━━━━━━━━━━━━━")
+    await send_settle(context.application, cid, text)   # 结算统一出口：自动回收
+
 async def cmd_buy_points(update, context):
     """购买积分（人工确认制，无需支付通道）：玩家申请 → 私聊通知管理员 → 管理员一键确认到账。"""
     if not await need_auth(update): return
@@ -5799,10 +5912,26 @@ async def cmd_buy_points(update, context):
     if not BUY_ENABLED:
         await update.message.reply_text("❌ 购买积分功能未开启（网页「积分系统 → 购买积分」可开启）。"); return
     args = context.args or []
-    if not args or not args[0].isdigit():
+    if not args:
+        on = sorted([p for p in buy_packages if p.get("on")], key=lambda x: x.get("sort", 0))
+        if on:
+            lines = ["💳 积分套餐", "━" * 14]
+            for i, p in enumerate(on, 1):
+                lines.append(f"{i}. {p.get('name', '?')}　¥{p.get('cny', 0)} = {p.get('points', 0)} 积分")
+            lines.append("")
+            lines.append("💡 发「充值 套餐名」或「充值 数量」提交申请，管理员确认后到账。")
+            await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines)); return
         await update.message.reply_text(f"用法：充值 数量（{BUY_MIN} ~ {BUY_MAX}）\n提交申请后联系管理员转账，管理员确认后积分自动到账。"); return
-    amount = int(args[0])
-    if not (BUY_MIN <= amount <= BUY_MAX):
+    pkg_arg = args[0].strip()
+    amount = int(pkg_arg) if pkg_arg.isdigit() else None
+    if amount is None:
+        p = next((x for x in buy_packages if x.get("on") and x.get("name") == pkg_arg), None)
+        if p:
+            amount = int(p.get("points", 0) or 0)
+    if not amount:
+        await update.message.reply_text("❌ 没有这个套餐；按数量充值用法：充值 数量。"); return
+    from_pkg = amount is not None and not pkg_arg.isdigit()
+    if not from_pkg and not (BUY_MIN <= amount <= BUY_MAX):
         await update.message.reply_text(f"❌ 单次购买需在 {BUY_MIN} ~ {BUY_MAX} 之间。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     oid = secrets.token_hex(4)
@@ -6539,6 +6668,7 @@ CMD_ALIASES = {
     "群管理员": cmd_adminlist_tg, "admins": cmd_adminlist_tg,
     "转赠": cmd_inherit, "继承": cmd_inherit, "转让": cmd_inherit, "transfer": cmd_inherit,
     "拍卖": cmd_auction, "auction": cmd_auction,
+    "盲盒": cmd_box, "开盲盒": cmd_box, "box": cmd_box,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
 }
 # 动态指令接管默认名：网页改指令后，旧默认名同步失效
@@ -6709,13 +6839,23 @@ def start_health_server():
             """阿福风格布局：左侧深色菜单栏（分组可折叠子页面）+ 右侧内容区，窄屏折叠为顶部横排。"""
             sidebar_active = sidebar_active or ""
             items = []
-            for gkey, name, icon in SETTINGS_GROUPS:
+            child_of = {ck: pk for pk, cks in SIDEBAR_CHILDREN.items() for ck in cks}
+            meta = {g[0]: (g[1], g[2]) for g in SETTINGS_GROUPS}
+            top = [g for g in SETTINGS_GROUPS if g[0] not in child_of]
+            head, rest = top[0], top[1:]  # 群体总览固定第一
+            rest_sorted = sorted(rest, key=lambda g: SIDEBAR_ORDER.index(g[0]) if g[0] in SIDEBAR_ORDER else 999)
+            for gkey, name, icon in [head] + rest_sorted:
                 active_now = sidebar_active == gkey or sidebar_active.startswith(gkey + "/")
-                if gkey in SUBPAGES:
+                subpage_subs = SUBPAGES.get(gkey) or []
+                child_groups = [(ck, meta.get(ck, (ck, "•"))) for ck in SIDEBAR_CHILDREN.get(gkey, [])]
+                if subpage_subs or child_groups:
                     subs = []
-                    for skey, sname in SUBPAGES[gkey]:
+                    for skey, sname in subpage_subs:
                         cls = "active" if sidebar_active == f"{gkey}/{skey}" else ""
                         subs.append(f"<a class='{cls}' href='/page/{gkey}/{skey}'>{sname}</a>")
+                    for ck, (cname, cicon) in child_groups:
+                        ccls = "active" if sidebar_active == ck or sidebar_active.startswith(ck + "/") else ""
+                        subs.append(f"<a class='{ccls}' href='/page/{ck}'>{cname}</a>")
                     items.append(
                         f"<details{' open' if active_now else ''}>"
                         f"<summary class='{'active' if active_now else ''}'>{icon}<span>{name}</span></summary>"
@@ -7097,12 +7237,31 @@ def start_health_server():
                 stat("🏆 赛季", season_txt, f"ID {season_id}" if season_id else "")
             )
             quick = "".join(f"<a class='q' href='/page/{g}'>{i} {n}</a>" for g, n, i in SETTINGS_GROUPS if g != "dashboard")
+            # 菜单排序：▲▼ 调整侧边栏顺序（群体总览固定第一），保存进设置
+            nav = [g for g in SETTINGS_GROUPS if g[0] != "dashboard"]
+            keys_now = [g[0] for g in nav]
+            meta = {g[0]: (g[1], g[2]) for g in SETTINGS_GROUPS}
+            ordered_keys = [k for k in SIDEBAR_ORDER if k in keys_now] + [k for k in keys_now if k not in SIDEBAR_ORDER]
+            sort_rows = ""
+            for k in ordered_keys:
+                n, i = meta.get(k, (k, "•"))
+                sort_rows += ("<div style='display:flex;align-items:center;gap:12px;padding:7px 2px;"
+                              "border-bottom:1px solid #26273a'>"
+                              f"<span style='flex:1'>{i} {n}</span>"
+                              f"<a href='/menu_move/{k}/-1' style='padding:2px 10px;background:#26273a;"
+                              "border-radius:6px;font-size:12px'>▲ 上移</a>"
+                              f"<a href='/menu_move/{k}/1' style='padding:2px 10px;background:#26273a;"
+                              "border-radius:6px;font-size:12px'>▼ 下移</a></div>")
             return _page("群体总览", "dashboard",
                 "<h1><span class='ico'>📊</span>群体总览</h1>"
                 "<div class='sub'>实时数据快照 · 改设置去左侧菜单 · 数据修改去 Telegram 群用 /命令</div>"
                 f"<div class='cards'>{cards}</div>"
                 "<div class='card' style='margin-top:18px'>"
-                "<h3>⚡ 快捷入口</h3>" + quick + "</div>")
+                "<h3>⚡ 快捷入口</h3>" + quick + "</div>"
+                "<div class='card' style='margin-top:18px'>"
+                "<h3>🧭 侧边栏菜单排序</h3>"
+                "<div class='sub' style='margin-bottom:8px'>点 ▲▼ 调整左侧菜单顺序，立即生效并保存</div>"
+                + sort_rows + "</div>")
 
         def _members_body():
             """群组管理只读页：成员档案 / 进出记录 / 入群申请 / 白名单 / 操作记录。"""
@@ -7448,6 +7607,101 @@ def start_health_server():
                             "<tr><th>等级</th><td>"
                             + " ≥ ".join(f"{x['name']} {x['value']}分" for x in POINT_LEVELS) + "</td></tr>"
                             "</table></div>")
+                    # 阿福式聊天积分规则表：逐条「条件→积分」，命中即停；空表回退「每N字符」旧规则
+                    def _m_desc(m):
+                        m = (m or "").strip()
+                        if not m: return "任意消息（兜底）"
+                        if m.startswith("len>="): return f"消息 ≥ {m[5:]} 字"
+                        return f"包含「{m}」"
+                    rule_rows = ""
+                    for i, r in enumerate(chat_rules):
+                        on = bool(r.get("on"))
+                        st = "<span style='color:#6fd08c'>启用</span>" if on else "<span style='color:#8a89a0'>停用</span>"
+                        rule_rows += (f"<tr><td>{_m_desc(r.get('match'))}</td>"
+                                      f"<td>{int(r.get('points', 0) or 0)}</td><td>{st}</td>"
+                                      f"<td><a href='/rule_toggle/{i}'>{'停用' if on else '启用'}</a> · "
+                                      f"<a href='/rule_del/{i}' style='color:#f09595'>删除</a></td></tr>")
+                    if not rule_rows:
+                        rule_rows = ("<tr><td colspan='4' style='text-align:center;color:#6a6982'>"
+                                     "暂无自定义规则（聊天按「每N字符」旧规则计分）</td></tr>")
+                    body += ("<div class='card' style='margin-top:18px'><h3>📋 聊天积分规则表（命中即停）</h3>"
+                             "<div class='sub'>文字=消息包含即命中；<code>len>=5</code>=消息满5字；留空=任意消息兜底。"
+                             "规则表有启用的规则时按表计分（都不命中不计分），旧的「每N字符」规则失效</div>"
+                             "<table class='tbl'><tr><th>条件</th><th>积分</th><th>状态</th><th>操作</th></tr>"
+                             + rule_rows + "</table>"
+                             "<form method='post' action='/rule_add' style='display:flex;gap:10px;margin-top:12px'>"
+                             "<input type='text' name='match' placeholder='文字或 len>=5（留空=任意消息）' style='flex:2'>"
+                             "<input type='number' name='points' placeholder='积分' required style='flex:1'>"
+                             "<button style='margin:0'>➕ 新增规则</button></form></div>")
+                elif gkey == "points" and sub == "box":
+                    pool_rows = "".join(
+                        f"<tr><td>{html.escape(str(p.get('name', '?')))}</td>"
+                        f"<td>{int(p.get('weight', 1) or 1)}</td><td>{int(p.get('points', 0) or 0)}</td>"
+                        f"<td><a href='/box_del/{i}' style='color:#f09595'>删除</a></td></tr>"
+                        for i, p in enumerate(box_pool))
+                    if not pool_rows:
+                        pool_rows = ("<tr><td colspan='4' style='text-align:center;color:#6a6982'>"
+                                     "奖品池是空的，先加几个奖品</td></tr>")
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>玩家发「盲盒」扣 {BOX_PRICE} 积分开一次，按权重随机，结果自动回收。保存立即生效</div>{msg}"
+                            "<div class='card'><form method='post' action='/save'>"
+                            f"<input type='hidden' name='group' value='points/box'>"
+                            + _field_rows("points/box") + "<button type='submit'>💾 保存</button></form></div>"
+                            "<div class='card' style='margin-top:18px'><h3>🎁 奖品池（权重越大越容易开到；积分 0 = 谢谢参与）</h3>"
+                            "<table class='tbl'><tr><th>奖品</th><th>权重</th><th>奖励积分</th><th>操作</th></tr>"
+                            + pool_rows + "</table>"
+                            "<form method='post' action='/box_add' style='display:flex;gap:10px;margin-top:12px'>"
+                            "<input type='text' name='name' placeholder='奖品名称' required style='flex:2'>"
+                            "<input type='number' name='weight' value='1' min='1' placeholder='权重' style='flex:1'>"
+                            "<input type='number' name='points' value='0' min='0' placeholder='奖励积分' style='flex:1'>"
+                            "<button style='margin:0'>➕ 添加奖品</button></form></div>")
+                elif gkey == "points" and sub == "buypkg":
+                    pkg_rows = ""
+                    for i, p in enumerate(buy_packages):
+                        on = bool(p.get("on"))
+                        st = "<span style='color:#6fd08c'>启用</span>" if on else "<span style='color:#8a89a0'>停用</span>"
+                        pkg_rows += (f"<tr><td>{html.escape(str(p.get('name', '?')))}</td>"
+                                     f"<td>¥{p.get('cny', 0)}</td><td>{p.get('points', 0)}</td>"
+                                     f"<td>{p.get('sort', 0)}</td><td>{st}</td>"
+                                     f"<td><a href='/pkg_toggle/{i}'>{'停用' if on else '启用'}</a> · "
+                                     f"<a href='/pkg_del/{i}' style='color:#f09595'>删除</a></td></tr>")
+                    if not pkg_rows:
+                        pkg_rows = "<tr><td colspan='6' style='text-align:center;color:#6a6982'>暂无套餐</td></tr>"
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>玩家发「充值」看套餐列表，发「充值 套餐名」提交申请（管理员确认到账）。排序小的排前面</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>名称</th><th>金额(CNY)</th><th>积分</th><th>排序</th><th>状态</th><th>操作</th></tr>"
+                            + pkg_rows + "</table>"
+                            "<form method='post' action='/pkg_add' style='display:flex;gap:10px;margin-top:12px'>"
+                            "<input type='text' name='name' placeholder='套餐名称' required style='flex:2'>"
+                            "<input type='number' name='cny' placeholder='金额 ¥' required min='0' style='flex:1'>"
+                            "<input type='number' name='points' placeholder='积分' required min='1' style='flex:1'>"
+                            "<input type='number' name='sort' value='0' placeholder='排序' style='flex:1'>"
+                            "<button style='margin:0'>➕ 新增套餐</button></form></div>")
+                elif gkey == "points" and sub == "mallord":
+                    ord_rows = "".join(
+                        f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{o.get('cid')}</td>"
+                        f"<td>{o.get('uid')} {html.escape(user_names.get(o.get('uid'), ''))}</td>"
+                        f"<td>{html.escape(str(o.get('item', '')))}</td><td>{o.get('price')}</td></tr>"
+                        for o in reversed(mall_orders[-50:]))
+                    if not ord_rows:
+                        ord_rows = "<tr><td colspan='5' style='text-align:center;color:#6a6982'>还没有兑换订单</td></tr>"
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>商城兑换订单（最近 50 条）</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>时间</th><th>群</th><th>用户</th><th>商品</th><th>价格</th></tr>"
+                            + ord_rows + "</table></div>")
+                elif gkey == "points" and sub == "buy":
+                    pend_rows = "".join(
+                        f"<tr><td><code>{oid}</code></td><td>{o.get('cid')}</td>"
+                        f"<td>{o.get('uid')} {html.escape(user_names.get(o.get('uid'), ''))}</td>"
+                        f"<td>{o.get('amount')}</td><td>{html.escape(str(o.get('ts', '')))}</td></tr>"
+                        for oid, o in buy_orders.items())
+                    if not pend_rows:
+                        pend_rows = ("<tr><td colspan='5' style='text-align:center;color:#6a6982'>"
+                                     "没有待处理的购买申请（群里点按钮处理）</td></tr>")
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>保存立即生效 · 套餐在「积分套餐管理」页配置</div>{msg}"
+                            "<div class='card'><h3>🧾 待处理购买申请</h3>"
+                            "<table class='tbl'><tr><th>单号</th><th>群</th><th>用户</th><th>数量</th><th>时间</th></tr>"
+                            + pend_rows + "</table></div>"
+                            "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
+                            f"<input type='hidden' name='group' value='points/buy'>"
+                            + _field_rows("points/buy") + "<button type='submit'>💾 保存</button></form></div>")
                 else:
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
                             "<div class='card'><form method='post' action='/save'>"
@@ -7596,6 +7850,31 @@ def start_health_server():
                         except Exception: pass
                     _lc_back(note=f"✅ 已取消「{lo['title'][:20]}」" + (f"，退还 {fee} 分/人" if fee > 0 else ""))
                     return
+                mm = re.fullmatch(r"/(rule|box|pkg)_(del|toggle)/(\d+)", path)
+                if mm:
+                    kind, act, idx = mm.group(1), mm.group(2), int(mm.group(3))
+                    lst = {"rule": chat_rules, "box": box_pool, "pkg": buy_packages}[kind]
+                    back = {"rule": "/page/points/rule", "box": "/page/points/box", "pkg": "/page/points/buypkg"}[kind]
+                    if 0 <= idx < len(lst):
+                        if act == "del":
+                            lst.pop(idx)
+                        else:
+                            lst[idx]["on"] = not lst[idx].get("on", True)
+                        save_settings({})
+                    self._redirect(back); return
+                mm = re.fullmatch(r"/menu_move/([a-z0-9_]+)/(-?1)", path)
+                if mm:
+                    g, d = mm.group(1), int(mm.group(2))
+                    keys_now = [gk for gk, _n, _i in SETTINGS_GROUPS if gk != "dashboard"]
+                    order = [k for k in SIDEBAR_ORDER if k in keys_now] + [k for k in keys_now if k not in SIDEBAR_ORDER]
+                    if g in order:
+                        i = order.index(g)
+                        j = max(0, min(len(order) - 1, i + d))
+                        order[i], order[j] = order[j], order[i]
+                        SIDEBAR_ORDER.clear(); SIDEBAR_ORDER.extend(order)
+                        SETTINGS_SNAPSHOT["sidebar_order"] = list(SIDEBAR_ORDER)  # 供 _write_settings_file 带出
+                        save_settings({})  # 走统一保存通道：套用+合并写盘+快照同步
+                    self._redirect("/page/dashboard"); return
                 mm = re.fullmatch(r"/tplprev/([a-z0-9_]+)", path)
                 if mm:
                     self._send(200, _tpl_preview(mm.group(1))); return
@@ -7851,6 +8130,35 @@ def start_health_server():
                     else:
                         _back(err="参数错误"); return
                     return
+                if path == "/rule_add":
+                    try:
+                        pts = int(form.get("points", ["0"])[0] or 0)
+                    except ValueError:
+                        pts = 0
+                    match = (form.get("match", [""])[0] or "").strip()[:100]
+                    chat_rules.append({"match": match, "points": pts, "on": True})
+                    save_settings({})
+                    self._redirect("/page/points/rule"); return
+                if path == "/box_add":
+                    def _ibox(k, dflt):
+                        try: return max(0, int(form.get(k, [str(dflt)])[0] or dflt))
+                        except ValueError: return dflt
+                    name = (form.get("name", [""])[0] or "").strip()[:30]
+                    if name:
+                        box_pool.append({"name": name, "weight": max(1, _ibox("weight", 1)), "points": _ibox("points", 0)})
+                        save_settings({})
+                    self._redirect("/page/points/box"); return
+                if path == "/pkg_add":
+                    def _ipkg(k, dflt):
+                        try: return int(form.get(k, [str(dflt)])[0] or dflt)
+                        except ValueError: return dflt
+                    name = (form.get("name", [""])[0] or "").strip()[:30]
+                    if name:
+                        buy_packages.append({"name": name, "cny": max(0, _ipkg("cny", 0)),
+                                             "points": max(1, _ipkg("points", 1)),
+                                             "sort": _ipkg("sort", 0), "on": True})
+                        save_settings({})
+                    self._redirect("/page/points/buypkg"); return
                 if path == "/lottery_create":
                     """网页创建抽奖（阿福格式）：解析 → 落库 + bot 发公告到群。"""
                     def _lc_back(note="", err=""):

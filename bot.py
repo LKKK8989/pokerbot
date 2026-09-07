@@ -100,6 +100,7 @@ SUBPAGES = {
     "points": [
         ("set",      "积分设置"),
         ("adjust",   "积分管理"),
+        ("impexp",   "积分导入导出"),
         ("cap",      "积分每日上限"),
         ("sign",     "每日签到"),
         ("rule",     "积分规则"),
@@ -129,6 +130,7 @@ SETTINGS_FIELDS = [
     ("blackjack_decks",         "BLACKJACK_DECKS",         "使用几副牌",                "int",   1,   8,       "blackjack"),
     ("jinhua_ante",             "JINHUA_ANTE",             "底注",                      "int",   1,   100000,  "jinhua"),
     ("jinhua_base",             "JINHUA_BASE",             "单注基准",                  "int",   1,   100000,  "jinhua"),
+    ("jinhua_seen_double",      "JINHUA_SEEN_DOUBLE",      "看牌者投注加倍开关",        "bool",  0,   1,       "jinhua"),
     ("race_auto_start",         "RACE_AUTO_START",         "自动开赛时间(秒)",          "int",   10,  600,     "race"),
     ("race_animation_interval", "RACE_ANIMATION_INTERVAL", "动画帧间隔(秒)",            "float", 0.5, 30,      "race"),
     ("horse_count",             "HORSE_COUNT",             "赛马数量(匹)",              "int",   2,   8,       "race"),
@@ -136,11 +138,17 @@ SETTINGS_FIELDS = [
     ("horse_emoji",             "HORSE_EMOJI",             "赛马表情(逗号分隔)",        "emoji", 0,   0,       "race"),
     ("race_track_length",       "RACE_TRACK_LENGTH",       "赛道长度(格)",              "int",   5,   50,      "race"),
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
+    ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
     ("game_starting_chips",     "GAME_STARTING_CHIPS",     "新玩家初始积分(全游戏统一)", "int",  100, 1000000, "general"),
     ("small_blind",             "SMALL_BLIND",             "德州小盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
     ("big_blind",               "BIG_BLIND",               "德州大盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
     ("ante",                    "ANTE",                    "德州前注(每人发牌前强制投入)", "int", 0,  100000,  "general"),
     ("stale_text_command_seconds","STALE_TEXT_COMMAND_SECONDS","过期消息忽略(秒,防翻旧账命令)", "int", 5, 3600, "general"),
+    ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
+    ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
+    ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
+    ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "general"),
+    ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "general"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
     ("emergency_max_uses",      "EMERGENCY_MAX_USES",      "归零每日赠送次数",          "int",   0,   99,      "general"),
     ("season_start_chips",      "SEASON_START_CHIPS",      "每人起始分",                "int",   100, 1000000, "season"),
@@ -161,7 +169,8 @@ SETTINGS_FIELDS = [
     ("chat_enabled",            "CHAT_ENABLED",            "聊天积分开关(需关机器人隐私模式)", "bool", 0, 1,    "points/set"),
     ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points/set"),
     ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points/set"),
-    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "查询指令删除时间(秒,0=不删)", "int", 0, 300,     "points/set"),
+    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "查询指令删除时间(删你的命令消息,秒,0=不删)", "int", 0, 300,     "points/set"),
+    ("reply_delete_seconds",    "REPLY_DELETE_SECONDS",    "查询回复自动删除(删bot回复,秒,0=不删)", "int", 0, 3600,     "points/set"),
     ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points/cap"),
     ("sign_cmd",                "SIGN_CMD",                "签到指令(不带斜杠)",        "cmd",   0,   0,       "points/sign"),
     ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points/sign"),
@@ -192,6 +201,12 @@ CHAT_CHARS_PER = 5
 CHAT_REWARD = 1
 CHAT_DAILY_CAP = 500
 POINTS_DELETE_SECONDS = 30
+REPLY_DELETE_SECONDS = 30   # 查询类命令的 bot 回复自动删除（0=不删）
+SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
+OBSERVE_ENABLED = 0         # 新成员观察期开关（1=开启：入群未满时长的成员发言即删并禁言到期满）
+OBSERVE_SECONDS = 300       # 观察期时长（秒）
+WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
+WELCOME_TPL = "🎉 欢迎 {name} 加入本群！\n积分游戏请在群内发送 /start 查看玩法。"
 REDPACKET_ENABLED = 1
 POINT_LEVELS = [{"name": "青铜", "value": 0}, {"name": "白银", "value": 5000}, {"name": "黄金", "value": 20000}, {"name": "铂金", "value": 50000}, {"name": "钻石", "value": 100000}]
 MALL_ITEMS = []  # [{"name": 商品名, "value": 价格}]
@@ -242,6 +257,9 @@ member_profiles = defaultdict(lambda: defaultdict(dict))  # member_profiles[cid]
 whitelist = defaultdict(set)                         # whitelist[cid] = {uid} 白名单（免疫禁言等）
 leave_records = defaultdict(list)                    # leave_records[cid] = [{"ts","uid","name"}] 退群记录(每群留100)
 join_requests = defaultdict(list)                    # join_requests[cid] = [{"ts","uid","name"}] 入群申请(每群留100)
+member_joined_at = defaultdict(lambda: defaultdict(float))  # member_joined_at[cid][uid] = 入群时间戳（新成员观察期用，运行时态）
+_bot_app = None   # 运行中的 Application（网页后台跨线程调 bot API 用，post_init 里赋值）
+_bot_loop = None  # bot 主事件循环
 admin_logs = []                                      # [{"ts","cid","admin","action","target"}] 管理员操作记录(留300)
 
 def _write_settings_file(cfg: dict, password: str):
@@ -965,15 +983,16 @@ def split_telegram_text(text, max_bytes=4000):
 
 
 async def safe_send_long(bot, cid, text, **kwargs):
-    last = None
+    sent = []
     for index, part in enumerate(split_telegram_text(text)):
         part_kwargs = dict(kwargs)
         if index > 0: part_kwargs.pop("reply_markup", None)  # 只有第一段带键盘，后续段保留 parse_mode
-        last = await safe_send(bot, cid, part, **part_kwargs)
-        if last is None:
+        msg = await safe_send(bot, cid, part, **part_kwargs)
+        if msg is None:
             logger.error("长消息发送失败，群 %s，第 %s 段未送达", cid, index + 1)
-            return None
-    return last
+            return sent or None  # 返回已送达段（供自动删除回收）；全失败仍为 None
+        sent.append(msg)
+    return sent
 
 
 async def safe_edit(bot, cid, msg_id, text, **kwargs):
@@ -1003,6 +1022,20 @@ async def safe_delete(bot, cid, msg_id):
     if msg_id:
         try: await bot.delete_message(chat_id=cid, message_id=msg_id)
         except TelegramError: pass
+
+
+def schedule_delete(app, cid, msgs, seconds):
+    """seconds 秒后自动删除 bot 发出的消息（0=不删）。msgs 可为单条 Message 或 Message 列表。
+    用于：查询类回复（REPLY_DELETE_SECONDS）、游戏结算消息（SETTLE_DELETE_SECONDS）。"""
+    if seconds <= 0 or not msgs: return
+    if not isinstance(msgs, (list, tuple)): msgs = [msgs]
+    ids = [m.message_id for m in msgs if m is not None and getattr(m, "message_id", None)]
+    if not ids: return
+    async def _del_later():
+        await asyncio.sleep(seconds)
+        for mid in ids: await safe_delete(app.bot, cid, mid)
+    try: asyncio.create_task(_del_later())
+    except RuntimeError: pass
 
 
 def card_str(card):
@@ -1565,6 +1598,8 @@ async def settle_poker(game, app):
             lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
             
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
+        if SETTLE_DELETE_SECONDS > 0:
+            schedule_delete(app, game.chat_id, delivered, SETTLE_DELETE_SECONDS)
         # 单赢场景（只剩一人未弃牌）：提供可选亮牌按钮，尊重德州 muck 规则，不强制亮牌
         if len(game.showdown_order) <= 1:
             winner = game.showdown_order[0] if game.showdown_order else None
@@ -1663,6 +1698,9 @@ class HorseRace:
             else:
                 factor = 1.0
             raw.append(base * factor)
+        # 赔率上限（经济保护）：默认 10 倍，0=无上限（旧行为）。封顶在单调约束前统一应用
+        if RACE_ODDS_CAP > 0:
+            raw = [min(value, RACE_ODDS_CAP) for value in raw]
         # 单调约束：按胜率升序，确保低胜率马的赔率不低于高胜率马
         order = sorted(range(HORSE_COUNT), key=lambda i: self.rates[i])
         for a, b in zip(order, order[1:]):
@@ -1934,6 +1972,8 @@ class HorseRace:
                 # 清除退款记录
                 for uid in self.bets: pending_game_bets[self.chat_id].get(uid, {}).pop("horse", None)
                 delivered = await safe_send_long(app.bot, self.chat_id, "\n".join(lines), parse_mode="HTML")
+                if SETTLE_DELETE_SECONDS > 0:
+                    schedule_delete(app, self.chat_id, delivered, SETTLE_DELETE_SECONDS)
 
                 if delivered is None:
                     await safe_send(app.bot, self.chat_id, "⚠️ 赛车已完成结算，但详细结果消息发送失败。积分与当日盈亏已保存，可使用 /cx 查看排行榜。")
@@ -2183,7 +2223,9 @@ async def update_blackjack_ui(game, app):
                 text += "\n".join(rank_lines)
                 
             await safe_delete(app.bot, game.chat_id, game.game_msg_id)
-            await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
+            settled_msgs = await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
+            if SETTLE_DELETE_SECONDS > 0:
+                schedule_delete(app, game.chat_id, settled_msgs, SETTLE_DELETE_SECONDS)
         except Exception:
             logger.exception("21点结算显示失败")
             if not payments_applied:
@@ -2304,6 +2346,8 @@ async def cmd_21(update, context):
 # ==================== 炸金花（三张牌，闷牌偷鸡） ====================
 JINHUA_ANTE = 200        # 炸金花底注
 JINHUA_BASE = 100        # 闷牌单位（看牌者跟注/加注金额为其 2 倍）
+RACE_ODDS_CAP = 10.0     # 赔率上限（倍）。0=无上限。防低胜率马一把押中爆出几万分冲垮经济
+JINHUA_SEEN_DOUBLE = 0   # 炸金花看牌者投注加倍开关（1=经典规则看牌×2；0=看牌闷牌同价，群反馈中途看牌被加倍劝退）
 JINHUA_HAND_NAMES = {5: "豹子", 4: "同花顺", 3: "金花", 2: "顺子", 1: "对子", 0: "散牌"}
 
 
@@ -2413,8 +2457,10 @@ class JinhuaGame:
         return True
 
     def _target(self, uid):
-        """该玩家本轮应投入的实际金额 = 闷牌单位 × (看牌 2 倍 / 闷牌 1 倍)。"""
-        return self.current_bet * (2 if uid in self.seen else 1)
+        """该玩家本轮应投入的实际金额 = 闷牌单位 × (看牌 2 倍 / 闷牌 1 倍)。
+        加倍开关关闭时看牌与闷牌同价。"""
+        mult = 2 if (uid in self.seen and JINHUA_SEEN_DOUBLE) else 1
+        return self.current_bet * mult
 
     def current(self):
         if self.actor_idx >= len(self.players): return None
@@ -2440,7 +2486,7 @@ class JinhuaGame:
         if extra < JINHUA_BASE: return False, f"最低加注为 {JINHUA_BASE}"
         if uid in self.raise_locked: return False, "短全下后已行动玩家只能跟注或弃牌"
         # 先按校验后的值计算目标投入，余额不足直接拒绝，绝不先改 current_bet
-        mult = 2 if uid in self.seen else 1
+        mult = 2 if (uid in self.seen and JINHUA_SEEN_DOUBLE) else 1
         new_current_bet = self.current_bet + extra
         new_target = new_current_bet * mult
         paid = new_target - self.round_bets[uid]
@@ -2457,7 +2503,7 @@ class JinhuaGame:
         """炸金花全下：不足跟注或部分高出(不足一个单位加注)按 call 处理；超出足够则全下并加注、重开下注。"""
         if self.chips[uid] <= 0:
             return False, "你没有可下的筹码"
-        mult = 2 if uid in self.seen else 1
+        mult = 2 if (uid in self.seen and JINHUA_SEEN_DOUBLE) else 1
         to_call = max(0, self._target(uid) - self.round_bets[uid])
         paid = self.chips[uid]
         if paid <= to_call or (paid - to_call) < mult:
@@ -2540,7 +2586,15 @@ class JinhuaGame:
                 self.phase = "showdown"
                 return True, "开牌"
             if kind == "raise":
-                return self._do_raise(uid, extra)
+                ok, desc = self._do_raise(uid, extra)
+                if not ok: return False, desc
+                # 关键：open_pending 里加注后必须重新推进回合，否则 actor_idx 停在
+                # 已行动的玩家上 → current() 恒为 None → 无按钮无计时器，整局冻死
+                alive2 = [p for p in self.players if p not in self.folded]
+                if len(alive2) <= 1: self.phase = "showdown"
+                elif self._round_done(): self.phase = "open_pending"
+                else: self._next()
+                return True, desc
             return False, "当前只能开牌或继续加注"
         if uid != self.current(): return False, "还没轮到你"
         if kind == "fold":
@@ -2652,30 +2706,19 @@ async def update_jinhua_waiting(game, app):
 async def jinhua_table_text(game, app):
     lines = [
         f"🌸 炸金花",
-        "",
-        "━━━━━━━━━━━━━━━━━",
-        f"💰 奖池：{game.pot}｜单注：{game.current_bet}（看牌者×2）",
+        f"💰 奖池：{game.pot}｜单注：{game.current_bet}" + ("（看牌者×2）" if JINHUA_SEEN_DOUBLE else ""),
     ]
     if game.last_action:
         lines.append(f"🔔 上一手：{game.last_action}")
-    lines.extend([
-        "━━━━━━━━━━━━━━━━━",
-        "",
-        "👥 玩家状态",
-        "",
-    ])
+    lines.append("━━━━━━━━━━━━━━━━━")
     current = game.current() if game.phase == "betting" else None
     if current:
         lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需补：{max(0, game._target(current) - game.round_bets[current])}")
-        lines.append("")
+    # 紧凑排版：每人 1 行（原每人 3 行，人多时牌桌消息过长）
     for index, uid in enumerate(game.players, 1):
-        status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
-        seen_mark = "👁 已看牌" if uid in game.seen else "🎴 闷牌"
-        lines.extend([
-            f"{index}. {await get_name(app, uid)}",
-            f"   {seen_mark}｜{status}｜投入 {game.total_bet[uid]}｜余筹 {game.chips[uid]}",
-            "",
-        ])
+        status = "❌弃" if uid in game.folded else "🔥全下" if uid in game.all_in else "🟢"
+        seen_mark = "👁" if uid in game.seen else "🎴"
+        lines.append(f"{index}. {await get_name(app, uid)}｜{seen_mark}{status}｜投 {game.total_bet[uid]}｜余 {game.chips[uid]}")
     return "\n".join(lines)
 
 
@@ -2707,17 +2750,16 @@ async def _sync_jinhua_msg(game, app, text, kb):
     """
     async with game._render_lock:
         old_id = game.game_msg_id
+        # 群反馈：每次删旧发新牌桌乱跳难操作 → 优先原地编辑（按钮位置稳定），失败才重发兜底
+        if old_id:
+            edited = await safe_edit(app.bot, game.chat_id, old_id, text, reply_markup=kb, parse_mode="HTML")
+            if edited is not None:
+                return
         msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
         if msg:
             game.game_msg_id = msg.message_id
             if old_id and old_id != game.game_msg_id:
                 await safe_delete(app.bot, game.chat_id, old_id)
-            return
-        # 发送失败兜底：原地编辑旧的（若还在），让牌桌不消失
-        if old_id:
-            edited = await safe_edit(app.bot, game.chat_id, old_id, text, reply_markup=kb, parse_mode="HTML")
-            if edited is not None:
-                return
 
 
 async def update_jinhua_table(game, app):
@@ -2754,6 +2796,14 @@ async def show_jinhua_action(game, app):
     uid = game.current()
     if uid is None:
         if game.phase == "showdown": await settle_jinhua(game, app)
+        elif game.phase == "betting":
+            # 自愈兜底：行动指针悬空时自动推进，任何路径都不允许牌局无声冻死
+            if game._round_done():
+                game.phase = "open_pending"
+                await show_jinhua_action(game, app)
+            else:
+                nxt = game._next()
+                if nxt: await start_jinhua_turn_timer(game, app)
         return
     text = f"{await jinhua_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {TURN_TIMEOUT} 秒内行动。"
     await _sync_jinhua_msg(game, app, text, jinhua_buttons(game, uid))
@@ -2828,6 +2878,8 @@ async def settle_jinhua(game, app):
             lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
         await safe_delete(app.bot, game.chat_id, game.game_msg_id)
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
+        if SETTLE_DELETE_SECONDS > 0:
+            schedule_delete(app, game.chat_id, delivered, SETTLE_DELETE_SECONDS)
         if delivered is None:
             await safe_send(app.bot, game.chat_id, "⚠️ 炸金花已完成结算，但详细结算消息发送失败。")
     except Exception:
@@ -3611,7 +3663,10 @@ async def cmd_cx(update, context):
         for uid, v in total_profit_by_game(g, cid).items():
             combined[uid] = combined.get(uid, 0) + v
     if not texas and not combined:
-        await update.message.reply_text("当前业务日暂无盈亏记录。"); return
+        reply = await update.message.reply_text("当前业务日暂无盈亏记录。")
+        if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
+            schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
+        return
     lines = ["🃏 德州当日盈亏", "━"*14]
     if texas:
         for i, (uid, value) in enumerate(sorted(texas.items(), key=lambda x:x[1], reverse=True)[:50], 1):
@@ -3624,7 +3679,9 @@ async def cmd_cx(update, context):
             lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value:+d}")
     else:
         lines.append("暂无记录")
-    await safe_send_long(context.bot, cid, "\n".join(lines))
+    msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
+    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, msgs, REPLY_DELETE_SECONDS)
 
 async def cmd_ph(update, context):
     if not await need_auth(update): return
@@ -3641,7 +3698,9 @@ async def cmd_ph(update, context):
         lines.extend(["", "🏆 累计盈利榜（总数）", "━"*14])
         for i, (u, v) in enumerate(sorted(combined.items(), key=lambda x:x[1], reverse=True)[:50], 1):
             lines.append(f"{rank_marker(i)} {await get_name(context.application, u, cid=cid)}：{v:+d}")
-    await safe_send_long(context.bot, cid, "\n".join(lines))
+    msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
+    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, msgs, REPLY_DELETE_SECONDS)
 
 async def cmd_sq(update, context):
     if not is_bot_admin(update.effective_user.id):
@@ -4171,6 +4230,19 @@ async def on_text(update, context):
         if update.effective_user.id in BLACKLISTED_USERS and not is_bot_admin(update.effective_user.id):
             await message.reply_text("🚫 你已被禁止使用本机器人，如有疑问请联系管理员。"); return
 
+        # 新成员观察期：入群未满观察时长的成员发言即删，并禁言至观察期结束（管理员豁免）
+        if OBSERVE_ENABLED and OBSERVE_SECONDS > 0 and is_group_chat(update) and not is_bot_admin(user.id):
+            _jt = member_joined_at.get(cid, {}).get(user.id, 0)
+            _elapsed = time.time() - _jt if _jt else 1e9
+            if _elapsed < OBSERVE_SECONDS:
+                try:
+                    await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
+                    await context.bot.restrict_chat_member(
+                        cid, user.id, permissions=ChatPermissions(can_send_messages=False),
+                        until_date=datetime.now(timezone.utc) + timedelta(seconds=OBSERVE_SECONDS - _elapsed + 1))
+                except TelegramError: pass
+                return
+
         # 不带 / 的命令直达：若首词是已知命令别名，按命令处理（全部命令均可不带 / 触发）
         _words = text.split()
         if _words and _words[0] in CMD_ALIASES:
@@ -4386,12 +4458,14 @@ async def cmd_my_points(update, context):
     lv_line = f"🎖 等级：{lv}\n" if lv else ""
     msg = _fmt_tpl("query_msg_tpl", name=await get_name(context.application, uid),
                    balance=balance, level_line=lv_line, signed=signed, streak=streak, today_chat=today_chat)
-    await update.message.reply_text(msg)
+    reply = await update.message.reply_text(msg)
     if POINTS_DELETE_SECONDS > 0 and is_group_chat(update):
         async def _del():
             await asyncio.sleep(POINTS_DELETE_SECONDS)
             await safe_delete(context.bot, cid, update.message.message_id)
         asyncio.create_task(_del())
+    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
 
 async def cmd_points_rank(update, context):
     if not await need_auth(update): return
@@ -4401,7 +4475,9 @@ async def cmd_points_rank(update, context):
         lv = _get_level(value)
         tag = f"｜{lv}" if lv else ""
         lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value}{tag}")
-    await safe_send_long(context.bot, cid, "\n".join(lines))
+    msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
+    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, msgs, REPLY_DELETE_SECONDS)
 
 async def cmd_mall(update, context):
     if not await need_auth(update): return
@@ -4856,6 +4932,12 @@ async def on_member_event(update, context):
         elif new.status in ("member", "administrator") and old.status in ("left", "kicked"):
             leave_records[cid].append({"ts": ts, "uid": uid, "name": name, "join": True})
             leave_records[cid] = leave_records[cid][-100:]
+            member_joined_at[cid][uid] = time.time()  # 观察期起点
+            if WELCOME_ENABLED:
+                try:
+                    text = WELCOME_TPL.replace("{name}", name).replace("{group}", getattr(cmu.chat, "title", "") or "").replace("{id}", str(uid))
+                    await context.bot.send_message(chat_id=cid, text=text)
+                except TelegramError: pass
         _remember_name(update)
         save_data()
     except Exception:
@@ -5099,6 +5181,8 @@ async def cmd_restore(update, context):
 
 
 async def post_init(app):
+    global _bot_app, _bot_loop
+    _bot_app, _bot_loop = app, asyncio.get_running_loop()  # 供网页后台跨线程调用 bot API（入群批准/拒绝等）
     background_tasks.update({
         asyncio.create_task(daily_reset_scheduler(app)), 
         asyncio.create_task(leaderboard_scheduler(app)), 
@@ -5256,6 +5340,74 @@ async def route_command(update, context):
 
 
 # ---------- 云平台保活 + 云端持久化（Render / Zeabur 等无持久磁盘的平台用）----------
+def _parse_multipart(raw, content_type):
+    """极简 multipart/form-data 解析（积分导入文件上传用）。
+    返回 {字段名: 字符串值 或 (文件名, bytes)}。"""
+    m = re.search(r'boundary="?([^";]+)"?', content_type or "")
+    if not m: return {}
+    boundary = ("--" + m.group(1)).encode()
+    fields = {}
+    for part in raw.split(boundary):
+        part = part.strip(b"\r\n")
+        if not part or part in (b"--", b"--\r\n"): continue
+        if b"\r\n\r\n" not in part: continue
+        head, _, value = part.partition(b"\r\n\r\n")
+        headers = head.decode("utf-8", "replace")
+        name = re.search(r'name="([^"]*)"', headers)
+        fname = re.search(r'filename="([^"]*)"', headers)
+        key = name.group(1) if name else ""
+        if not key: continue
+        if fname and fname.group(1):
+            fields[key] = (fname.group(1), value[:-2] if value.endswith(b"\r\n") else value)
+        else:
+            fields[key] = value.decode("utf-8", "replace")
+    return fields
+
+
+def _parse_points_rows(data, filename):
+    """把上传文件解析为 [(uid, points, nickname)]。支持 CSV(utf-8/gbk) 与 xlsx(需 openpyxl)。
+    返回 (rows, err)；err 非 None 表示失败。表头行自动识别，列按表头定位（缺省 用户ID=0列,积分=2列）。"""
+    rows_raw = None
+    if filename.lower().endswith((".xlsx", ".xls")):
+        try:
+            import io as _io
+            from openpyxl import load_workbook
+        except ImportError:
+            return None, "服务器未安装 openpyxl，无法读 Excel：请把表格另存为 CSV(逗号分隔) 再导入"
+        try:
+            wb = load_workbook(_io.BytesIO(data), read_only=True, data_only=True)
+            rows_raw = [[("" if cell is None else str(cell.value)) for cell in row] for row in wb.active.iter_rows()]
+        except Exception as exc:
+            return None, f"Excel 解析失败：{exc}"
+    else:
+        text = None
+        for enc in ("utf-8-sig", "utf-8", "gbk"):
+            try: text = data.decode(enc); break
+            except (UnicodeDecodeError, LookupError): continue
+        if text is None: return None, "无法识别文件编码（请用 UTF-8 或 GBK 编码的 CSV）"
+        rows_raw = [line.split(",") for line in text.splitlines() if line.strip()]
+    if not rows_raw: return None, "文件内容为空"
+    idx_uid, idx_pts, idx_name = 0, 2, 1
+    start = 0
+    header = [h.strip().strip('"').lower() for h in rows_raw[0]]
+    if any("用户id" in h for h in header):
+        start = 1
+        for i, h in enumerate(header):
+            if "用户id" in h: idx_uid = i
+            elif h == "积分": idx_pts = i
+            elif "昵称" in h or "用户名" in h: idx_name = i
+    rows, skipped = [], 0
+    for row in rows_raw[start:]:
+        cells = [c.strip().strip('"') for c in row] + ["", "", ""]
+        try:
+            uid, pts = int(cells[idx_uid]), int(float(cells[idx_pts]))
+        except (ValueError, IndexError):
+            skipped += 1; continue
+        if pts < 0: skipped += 1; continue
+        rows.append((uid, pts, cells[idx_name] if idx_name < len(cells) else ""))
+    return (rows, skipped), None
+
+
 def start_health_server():
     """网页后台：密码登录 + 在线调设置。
 
@@ -5487,12 +5639,19 @@ def start_health_server():
             parts.append("<div class='card'><h1>进出记录（最近 30 条）</h1>"
                          "<div class='sub'>bot 需为群管理员才能收到成员进出事件</div>"
                          + tbl(["时间", "成员", "ID", "类型"], lv_rows[-30:]) + "</div>")
-            # 3. 入群申请
-            jq_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>"]
+            # 3. 入群申请（可直接网页批准/拒绝）
+            def _jr_btn(op, c, u, label):
+                return ("<form style='display:inline;margin:0' method='post' action='/adminops2'>"
+                        f"<input type='hidden' name='op' value='{op}'>"
+                        f"<input type='hidden' name='cid' value='{c}'>"
+                        f"<input type='hidden' name='uid' value='{u}'>"
+                        f"<button type='submit' style='padding:2px 10px;cursor:pointer'>{label}</button></form>")
+            jq_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                        _jr_btn("join_approve", cid, r.get("uid", ""), "✅ 批准") + " " + _jr_btn("join_decline", cid, r.get("uid", ""), "🚫 拒绝")]
                        for cid, lst in join_requests.items() for r in reversed(lst[-30:])]
             parts.append("<div class='card'><h1>📨 入群申请（最近 30 条）</h1>"
-                         "<div class='sub'>群需开启「申请加入」；批准/拒绝在 Telegram 客户端原生操作</div>"
-                         + tbl(["时间", "申请人", "ID"], jq_rows[-30:]) + "</div>")
+                         "<div class='sub'>群需开启「申请加入」；可直接在此批准或拒绝，无需去 Telegram 客户端</div>"
+                         + tbl(["时间", "申请人", "ID", "操作"], jq_rows[-30:]) + "</div>")
             # 4. 白名单
             wl_rows = [[cid, html.escape(user_names.get(u, str(u))), f"<code>{u}</code>"]
                        for cid, us in whitelist.items() for u in sorted(us)]
@@ -5600,6 +5759,23 @@ def start_health_server():
                             "<div class='row'><div class='lbl'>积分变动<small>正数=加分，负数=扣分，0 无效</small></div>"
                             "<input type='number' name='amount' value='1000' required></div>"
                             "<button type='submit'>💾 执行加减分</button></form></div>")
+                elif gkey == "points" and sub == "impexp":
+                    opts = "".join(f"<option value='{cid}'>{chat_name_cache.get(cid) or ''} {cid}</option>"
+                                   for cid in sorted(set(AUTHORIZED_GROUPS) | set(game_chips.keys())))
+                    body = (f"<h1>{gicon} {sname}</h1>"
+                            "<div class='sub'>按群导出/导入积分。导入会<b>覆盖</b>该群已有积分，务必先用模板核对格式</div>{msg}{err}"
+                            "<div class='card'><h3>📥 导出</h3>"
+                            "<form method='get' action='/points_export'>"
+                            f"<div class='row'><div class='lbl'>选择群</div><select name='cid'>{opts}</select></div>"
+                            "<button type='submit'>⬇ 导出 CSV（Excel 可直接打开）</button></form></div>"
+                            "<div class='card'><h3>📤 导入</h3>"
+                            "<div class='sub'>表头必须包含：用户ID 和 积分（昵称列可选）。同群已有积分将被覆盖</div>"
+                            "<p><a href='/points_template'>⬇ 下载模板</a>　请先下载模板，按格式填写</p>"
+                            "<form method='post' action='/points_import' enctype='multipart/form-data'>"
+                            f"<div class='row'><div class='lbl'>导入到群</div><select name='cid'>{opts}</select></div>"
+                            "<div class='row'><div class='lbl'>数据文件<small>.csv / .xls / .xlsx</small></div>"
+                            "<input type='file' name='file' accept='.csv,.xls,.xlsx' required></div>"
+                            "<button type='submit'>✅ 确认导入</button></form></div>")
                 elif gkey == "points" and sub == "rule":
                     cap = f"每日上限 {CHAT_DAILY_CAP} 分" if CHAT_DAILY_CAP else "不设上限"
                     fee = f"（手续费 {INHERIT_FEE_PERCENT}%）" if INHERIT_FEE_PERCENT else "（免手续费）"
@@ -5709,6 +5885,20 @@ def start_health_server():
                 mm = re.fullmatch(r"/tplprev/([a-z0-9_]+)", path)
                 if mm:
                     self._send(200, _tpl_preview(mm.group(1))); return
+                if path == "/points_template":
+                    self._send(200, "用户ID,昵称,积分\n123456789,示例玩家,1000\n".encode("utf-8-sig"),
+                               [("Content-Type", "text/csv; charset=utf-8"),
+                                ("Content-Disposition", "attachment; filename=points_template.csv")]); return
+                if path == "/points_export":
+                    try: cid = int(qs.get("cid", ["0"])[0])
+                    except ValueError: cid = 0
+                    if not cid: self._send(400, b"bad cid", [("Content-Type", "text/plain")]); return
+                    lines = ["用户ID,昵称,积分"]
+                    for uid, value in sorted(game_chips.get(cid, {}).items()):
+                        lines.append(f"{uid},{user_names.get(uid, '')},{value}")
+                    self._send(200, "\n".join(lines).encode("utf-8-sig"),
+                               [("Content-Type", "text/csv; charset=utf-8"),
+                                ("Content-Disposition", f"attachment; filename=points_{cid}.csv")]); return
                 m = re.fullmatch(r"/page/([a-z]+)(?:/([a-z0-9_]+))?", path)
                 if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
                     self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err)); return
@@ -5717,10 +5907,39 @@ def start_health_server():
             def do_POST(self):
                 try:
                     length = int(self.headers.get("Content-Length", 0))
-                    form = parse_qs(self.rfile.read(length).decode("utf-8"))
+                    raw = self.rfile.read(length) if length else b""
+                except Exception:
+                    raw = b""
+                path = urlparse(self.path).path
+                if path == "/points_import":
+                    if not _check_session(self.headers.get("Cookie")):
+                        self._redirect("/"); return
+                    def _imp_back(note="", err=""):
+                        q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
+                        self._redirect("/page/points/impexp" + q)
+                    fields = _parse_multipart(raw, self.headers.get("Content-Type", ""))
+                    try: cid = int(fields.get("cid", 0))
+                    except (TypeError, ValueError): cid = 0
+                    if not cid: _imp_back(err="群 ID 无效"); return
+                    file_field = fields.get("file")
+                    if not isinstance(file_field, tuple) or not file_field[1]:
+                        _imp_back(err="未收到文件"); return
+                    fname, data = file_field
+                    parsed, perr = _parse_points_rows(data, fname)
+                    if perr: _imp_back(err=perr); return
+                    rows, skipped = parsed
+                    if not rows:
+                        _imp_back(err="没有可导入的有效行（需 用户ID 和 积分 两列数字）"); return
+                    for uid, pts, nick in rows:
+                        game_chips[cid][uid] = pts          # 阿福语义：覆盖该群已有积分
+                        if nick: user_names[uid] = nick
+                    force_save_now()
+                    _imp_back(note=f"✅ 导入完成：成功 {len(rows)} 条，跳过 {skipped} 条（群 {cid}，已覆盖式写入并落盘）")
+                    return
+                try:
+                    form = parse_qs(raw.decode("utf-8"))
                 except Exception:
                     form = {}
-                path = urlparse(self.path).path
                 if path == "/login":
                     pwd = (form.get("password", [""])[0] or "").strip()
                     if secrets.compare_digest(pwd, _web_password):
@@ -5782,6 +6001,22 @@ def start_health_server():
                             _back(err="该玩家排位分不足"); return
                         season_points[cid_][uid_] = season_points.get(cid_, {}).get(uid_, 0) + amt
                         save_data(); _back(note=f"✅ 用户 {uid_} 排位分 {amt:+d}，当前 {season_points[cid_][uid_]}")
+                    elif op in ("join_approve", "join_decline") and cid_ and uid_:
+                        if not (_bot_app and _bot_loop):
+                            _back(err="bot 尚未启动完成，请稍后再试"); return
+                        async def _jr():
+                            if op == "join_approve":
+                                await _bot_app.bot.approve_chat_join_request(cid_, uid_)
+                            else:
+                                await _bot_app.bot.decline_chat_join_request(cid_, uid_)
+                        try:
+                            asyncio.run_coroutine_threadsafe(_jr(), _bot_loop).result(15)
+                            join_requests[cid_] = [r for r in join_requests.get(cid_, []) if r.get("uid") != uid_]
+                            save_data()
+                            self._redirect("/page/members?" + ("note=" if op == "join_approve" else "err=")
+                                           + quote(("✅ 已批准入群 " if op == "join_approve" else "🚫 已拒绝入群 ") + str(uid_)))
+                        except Exception as e:
+                            self._redirect("/page/members?err=" + quote(f"操作失败：{e}（申请可能已被处理）"))
                     else:
                         _back(err="参数错误"); return
                     return

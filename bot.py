@@ -167,8 +167,17 @@ SETTINGS_FIELDS = [
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板结束后删除(秒,0=不删)", "int", 0, 3600, "general"),
     ("web_otp_enabled",         "WEB_OTP_ENABLED",         "后台登录二次验证(Telegram验证码)",      "bool", 0,   1,    "general"),
+    ("web_base_url",            "WEB_BASE_URL",            "后台公网地址(/后台一键登录用)",          "text", 0,   0,    "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
+    ("antispam_enabled",        "ANTISPAM_ENABLED",        "定时刷屏识别开关(复读+定时器特征)", "bool", 0,   1,    "general"),
+    ("antispam_repeat_n",       "ANTISPAM_REPEAT_N",       "复读命中条数(窗口内同内容)", "int",  2,   10,   "general"),
+    ("antispam_window",         "ANTISPAM_WINDOW",         "复读检测窗口(秒)", "int",  10,  3600, "general"),
+    ("antispam_timer_n",        "ANTISPAM_TIMER_N",        "定时器特征最少累计条数", "int",  3,   20,   "general"),
+    ("antispam_timer_tol",      "ANTISPAM_TIMER_TOL",      "定时器间隔偏差容忍(%)", "int",  5,   90,   "general"),
+    ("antispam_mute_seconds",   "ANTISPAM_MUTE_SECONDS",   "命中禁言基础时长(秒,0=只删不禁)", "int",  0,   86400,"general"),
+    ("antispam_mute_escalate",  "ANTISPAM_MUTE_ESCALATE",  "累犯禁言翻倍", "bool", 0,   1,    "general"),
+    ("antispam_notice_seconds", "ANTISPAM_NOTICE_SECONDS", "命中通告自动删除(秒,0=不删)", "int",  0,   3600, "general"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "general"),
     ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "general"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
@@ -243,6 +252,7 @@ SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
 PANEL_DELETE_SECONDS = 300 # 游戏卡片/下注面板：本局结束后自动删除（0=不删）
 RACE_NOTICE_DELETE_SECONDS = 60  # 赛车倒计时提示自动删除（0=不删）
 WEB_OTP_ENABLED = True  # 网页后台二次验证：密码通过后还需 Telegram 私聊验证码（关掉则仅密码）
+WEB_BASE_URL = ""  # 后台公网地址（如 https://xxx.northflank.app），/后台 一键登录链接用；不配则该功能不可用
 # ---------- 群组抽奖 ----------
 LOTTERY_ENABLED = True             # 总开关（网页 general→points/lottery 可关）
 LOTTERY_KEYWORD = "抽奖"            # 玩家参与的触发词（也支持 /开奖 命令）
@@ -267,20 +277,32 @@ LOTTERY_MSG_RESULT = (
 )
 OBSERVE_ENABLED = 0         # 新成员观察期开关（1=开启：入群未满时长的成员发言即删并禁言到期满）
 OBSERVE_SECONDS = 300       # 观察期时长（秒）
+# ===== 定时刷屏识别（TG 定时消息发出后无标记，只能按行为特征抓：复读机 + 定时器节奏） =====
+ANTISPAM_ENABLED = 1        # 1=开启
+ANTISPAM_REPEAT_N = 3       # 复读命中：窗口内同内容第 N 条
+ANTISPAM_WINDOW = 120       # 复读检测窗口（秒）
+ANTISPAM_TIMER_N = 4        # 定时器特征：同内容累计至少 N 条才开始判定
+ANTISPAM_TIMER_TOL = 30     # 定时器间隔偏差容忍（百分比，间隔需落在均值 ±30% 内）
+ANTISPAM_MUTE_SECONDS = 3600  # 命中禁言基础时长（秒，0=只删不禁）
+ANTISPAM_MUTE_ESCALATE = 1  # 累犯禁言翻倍（1h→2h→4h…）
+ANTISPAM_NOTICE_SECONDS = 60  # 命中通告自动删除（秒，0=不删）
+ANTISPAM_MIN_LEN = 5        # 参与统计的最短内容长度（防误伤"哈哈哈"类闲聊）
+antispam_hist = {}          # (cid, uid, 内容归一化) -> [ts,...] 最多保留 12 条
+antispam_offense = {}       # (cid, uid) -> [命中 ts,...] 用于累犯加重
 WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
 WELCOME_TPL = "🎉 欢迎 {name} 加入本群！\n积分游戏请在群内发送 /start 查看玩法。"
 REDPACKET_ENABLED = 1
 POINT_LEVELS = [
     {"name": "练气期", "value": 0},
-    {"name": "筑基期", "value": 15000},
-    {"name": "金丹期", "value": 40000},
-    {"name": "元婴期", "value": 100000},
-    {"name": "化神期", "value": 250000},
-    {"name": "炼虚期", "value": 500000},
-    {"name": "合体期", "value": 1000000},
-    {"name": "大乘期", "value": 2000000},
-    {"name": "渡劫期", "value": 5000000},
-    {"name": "真仙", "value": 10000000},
+    {"name": "筑基期", "value": 2000},
+    {"name": "金丹期", "value": 5000},
+    {"name": "元婴期", "value": 12000},
+    {"name": "化神期", "value": 30000},
+    {"name": "炼虚期", "value": 80000},
+    {"name": "合体期", "value": 200000},
+    {"name": "大乘期", "value": 500000},
+    {"name": "渡劫期", "value": 1200000},
+    {"name": "真仙", "value": 3000000},
 ]
 MALL_ITEMS = []  # [{"name": 商品名, "value": 价格}]
 INHERIT_ENABLED = 1
@@ -343,6 +365,7 @@ user_first_seen = {}                                 # uid -> 首次与 bot 互�
 backup_msg_ids = []                                  # 自动备份文件消息ID（管理员私聊，轮换只留7份）
 settings_backup_msg_ids = []                         # 设置备份文件消息ID（单独轮换只留7份）
 web_pending_otp = {}                                 # 后台二次验证待确认：otp_token -> {"code","exp","ip"}
+web_magic_tokens = {}                                # /后台 一键登录：token -> {"uid","exp"}（2分钟、一次性）
 # 群组抽奖：每群同时最多一个进行中活动
 # lotteries[cid] = {title, prizes, fee, keyword, start_ts, end_ts, msg_id,
 #                   participants:[(uid, ts, name)], status, winners, creator, chat_id}
@@ -826,6 +849,9 @@ def force_save_now():
                 # 群组抽奖：每群活动（含已结束的，方便历史展示）
                 "_lotteries": {str(cid): {k: v for k, v in lo.items() if k != "msg_id"}
                                for cid, lo in lotteries.items()},
+                # 进行中的红包（lock 不序列化）：不持久化的话重启后未领完的积分凭空消失
+                "rp_packets": {pid: {k: v for k, v in p.items() if k != "lock"}
+                               for pid, p in rp_packets.items()},
             }
             os.makedirs(os.path.dirname(os.path.abspath(DATA_FILE)), exist_ok=True)
             with open(DATA_TEMP_FILE, "w", encoding="utf-8") as file:
@@ -906,6 +932,27 @@ def load_data():
                     except (ValueError, TypeError): continue
             except (ValueError, TypeError): continue
         for date, chats in data.get("poker_profit_by_date", {}).items(): restore_nested(poker_profit_by_date[date], chats)
+        # 红包恢复：必须放在 game_chips 恢复/合并之后，否则退款会被 restore_nested 覆盖。
+        # 未过期红包继续可抢；已过期的把剩余金额退回发包人（重启不再丢钱）。
+        try:
+            rp_packets.clear()
+            _now = now_bj().timestamp()
+            for pid, p in (data.get("rp_packets") or {}).items():
+                if not isinstance(p, dict) or "cid" not in p or "from" not in p:
+                    continue
+                p["lock"] = asyncio.Lock()
+                try:
+                    _cid, _from = int(p["cid"]), int(p["from"])
+                except (ValueError, TypeError):
+                    continue
+                _refund = p.get("left_amt", 0) or 0
+                if _now - p.get("ts", 0) > 86400 or p.get("left_n", 0) <= 0:
+                    if _refund > 0:
+                        game_chips[_cid][_from] += _refund
+                    continue  # 已过期/已抢完：退款后不入内存
+                rp_packets[pid] = p
+        except Exception:
+            logger.exception("红包数据恢复失败")
         for date, chats in data.get("race_profit_by_date", {}).items(): restore_nested(race_profit_by_date[date], chats)
         for date, chats in data.get("blackjack_profit_by_date", {}).items(): restore_nested(blackjack_profit_by_date[date], chats)
         for date, chats in data.get("jinhua_profit_by_date", {}).items(): restore_nested(jinhua_profit_by_date[date], chats)
@@ -2844,6 +2891,13 @@ class JinhuaGame:
             if kind == "open":
                 self.phase = "showdown"
                 return True, "开牌"
+            if kind == "fold":
+                # 跟平后也必须允许弃牌止损（此前只开放开牌/加注，玩家被锁死）
+                self.folded.add(uid)
+                self.acted.add(uid)
+                if len([p for p in self.players if p not in self.folded]) <= 1:
+                    self.phase = "showdown"
+                return True, "弃牌"
             if kind == "raise":
                 ok, desc = self._do_raise(uid, extra)
                 if not ok: return False, desc
@@ -2982,22 +3036,32 @@ async def jinhua_table_text(game, app):
 
 
 def jinhua_buttons(game, uid):
-    rows = []
+    """紧凑布局：非行动玩家仅「看牌」；行动玩家 3 行搞定（看牌/弃牌/跟注 → 加注/全下 → 比牌/刷新）。"""
     if uid not in game.folded:
         label = "🃏 查看手牌" if uid in game.seen else "👁 看牌"
-        rows.append([InlineKeyboardButton(label, callback_data="jh_see")])
-    if uid != game.current() or uid in game.folded:
-        return InlineKeyboardMarkup(rows)
+        if uid != game.current():
+            return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="jh_see")]])
+    else:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新界面", callback_data="jh_refresh")]])
     to_call = max(0, game._target(uid) - game.round_bets[uid])
-    rows.append([InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold"), InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}", callback_data="jh_call")])
+    # 行1：看牌 | 弃牌 | 跟注
+    rows = [[InlineKeyboardButton(label, callback_data="jh_see"),
+             InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold"),
+             InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}",
+                                  callback_data="jh_call")]]
+    # 行2：加注 | 全下（各自筹码不足时隐藏）
+    row2 = []
     if uid not in game.raise_locked and game.chips[uid] >= to_call + JINHUA_BASE:
-        rows.append([InlineKeyboardButton(f"🔼 加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}")])
+        row2.append(InlineKeyboardButton(f"🔼 加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}"))
     if game.chips[uid] > 0:
-        rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="jh_allin")])
-    alive_cnt = sum(1 for p in game.players if p not in game.folded)
-    if alive_cnt >= 2:
-        rows.append([InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu")])
-    rows.append([InlineKeyboardButton("🔄 刷新界面", callback_data="jh_refresh")])
+        row2.append(InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="jh_allin"))
+    if row2: rows.append(row2)
+    # 行3：比牌 | 刷新
+    row3 = []
+    if sum(1 for p in game.players if p not in game.folded) >= 2:
+        row3.append(InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"))
+    row3.append(InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh"))
+    rows.append(row3)
     return InlineKeyboardMarkup(rows)
 
 
@@ -3044,11 +3108,13 @@ async def show_jinhua_action(game, app):
         await _sync_jinhua_msg(game, app, text, InlineKeyboardMarkup(rows))
         return
     if game.phase == "open_pending":
-        text = f"{await jinhua_table_text(game, app)}\n\n💡 已跟平，可 <b>开牌</b> 比大小，或 <b>继续加注</b> 偷鸡。"
+        text = f"{await jinhua_table_text(game, app)}\n\n💡 已跟平：可 <b>弃牌</b> 止损、<b>比牌/开牌</b> 定胜负，或 <b>继续加注</b> 偷鸡。"
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"), InlineKeyboardButton("🃏 开牌比大小", callback_data="jh_open")],
-            [InlineKeyboardButton(f"🔼 继续加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}")],
-            [InlineKeyboardButton("🔄 刷新界面", callback_data="jh_refresh")],
+            [InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold"),
+             InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"),
+             InlineKeyboardButton("🃏 开牌比大小", callback_data="jh_open")],
+            [InlineKeyboardButton(f"🔼 继续加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}"),
+             InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh")],
         ])
         await _sync_jinhua_msg(game, app, text, kb)
         return
@@ -4436,7 +4502,17 @@ async def on_button(update, context):
                 else:
                     await q.answer("未知操作", show_alert=True)
                 return
-            # 下注阶段：当前玩家操作
+            # 下注阶段：当前玩家操作；跟平阶段（open_pending）允许任意存活玩家弃牌止损
+            if data == "jh_fold" and game.phase == "open_pending":
+                if uid in game.folded:
+                    await q.answer("你已弃牌", show_alert=True); return
+                ok, desc = game.action(uid, "fold")
+                if not ok: await q.answer(desc, show_alert=True); return
+                await q.answer(desc)
+                game.last_action = f"{await get_name(context.application, uid)} 弃牌"
+                if game.phase == "showdown": await settle_jinhua(game, context.application)
+                else: await show_jinhua_action(game, context.application)
+                return
             if uid != game.current(): await q.answer("还没轮到你", show_alert=True); return
             action = {"jh_fold": "fold", "jh_call": "call", "jh_allin": "allin"}.get(data); extra = 0
             if data.startswith("jh_raise_"):
@@ -4483,6 +4559,65 @@ async def on_button(update, context):
         logger.exception("按钮处理异常")
 
 
+def _antispam_norm(text):
+    """内容归一化：去空白 + 小写，同文异构（加空格/大小写变化）视为同一内容。"""
+    return re.sub(r"\s+", "", (text or "")).lower()
+
+def _antispam_check(cid, uid, text):
+    """记录并判定刷屏特征。返回 'repeat' / 'timer' / None。
+
+    - repeat：复读机——窗口内同人同内容达到 ANTISPAM_REPEAT_N 条
+    - timer：定时器——同内容累计 ANTISPAM_TIMER_N 条，且相邻间隔近似相等
+      （TG 定时消息发出后与普通消息无差别，固定节奏是其唯一可抓特征）
+    """
+    now = time.time()
+    key = (cid, uid, _antispam_norm(text))
+    hist = antispam_hist.setdefault(key, [])
+    hist.append(now)
+    if len(hist) > 12: del hist[:-12]
+    recent = [t for t in hist if now - t <= ANTISPAM_WINDOW]
+    if len(recent) >= ANTISPAM_REPEAT_N:
+        return "repeat"
+    if len(hist) >= ANTISPAM_TIMER_N:
+        ivs = [b - a for a, b in zip(hist, hist[1:])][-(ANTISPAM_TIMER_N - 1):]
+        mean = sum(ivs) / len(ivs)
+        if mean >= 30 and all(abs(iv - mean) <= mean * ANTISPAM_TIMER_TOL / 100 for iv in ivs):
+            return "timer"
+    return None
+
+async def _antispam_hit(update, context, cid, uid, reason):
+    """命中处理：撤删本条 → 清该用户统计防连环触发 → 禁言（累犯翻倍）→ 群内通告。"""
+    message = update.effective_message
+    try: await message.delete()
+    except TelegramError: pass
+    for k in [k for k in antispam_hist if k[0] == cid and k[1] == uid]:
+        antispam_hist.pop(k, None)
+    offs = antispam_offense.setdefault((cid, uid), [])
+    offs.append(time.time())
+    n = len(offs)
+    mute = ANTISPAM_MUTE_SECONDS * (2 ** (n - 1)) if ANTISPAM_MUTE_ESCALATE else ANTISPAM_MUTE_SECONDS
+    muted = False
+    if mute > 0:
+        try:
+            await context.bot.restrict_chat_member(
+                cid, uid, permissions=ChatPermissions(can_send_messages=False),
+                until_date=datetime.now(timezone.utc) + timedelta(seconds=mute))
+            muted = True
+        except TelegramError: pass
+    name = user_names.get(uid) or str(uid)
+    why = "复读刷屏" if reason == "repeat" else "定时器式连发"
+    tip = f"🔨 检测到{why}：{name} 的消息已自动撤删"
+    if muted:
+        mins = max(1, mute // 60)
+        tip += f"，禁言 {mins} 分钟" + ("（累犯加倍）" if n > 1 and ANTISPAM_MUTE_ESCALATE else "")
+    elif ANTISPAM_MUTE_SECONDS > 0:
+        tip += "（我需要管理员禁言权限才能禁言）"
+    try:
+        m = await context.bot.send_message(cid, tip)
+        if ANTISPAM_NOTICE_SECONDS > 0:
+            schedule_delete(context.application, cid, m, ANTISPAM_NOTICE_SECONDS)
+    except TelegramError: pass
+
 async def on_text(update, context):
     # 外层 try 包命令分发；开头校验单独内层 try（消息结构异常属噪音，静默忽略）
     try:
@@ -4513,6 +4648,17 @@ async def on_text(update, context):
                         until_date=datetime.now(timezone.utc) + timedelta(seconds=OBSERVE_SECONDS - _elapsed + 1))
                 except TelegramError: pass
                 return
+
+        # 定时刷屏识别：复读机 + 定时器特征（管理员豁免；内容太短不参与统计防误伤闲聊）
+        if (ANTISPAM_ENABLED and is_group_chat(update) and not is_bot_admin(user.id)
+                and len(re.sub(r"\s+", "", text)) >= ANTISPAM_MIN_LEN):
+            try:
+                _reason = _antispam_check(cid, user.id, text)
+                if _reason:
+                    await _antispam_hit(update, context, cid, user.id, _reason)
+                    return
+            except Exception:
+                logger.exception("定时刷屏识别异常（已吞并）")
 
         # 不带 / 的命令直达：若首词是已知命令别名，按命令处理（全部命令均可不带 / 触发）
         _words = text.split()
@@ -5121,6 +5267,45 @@ async def lottery_scheduler(app):
             logger.exception("lottery_scheduler 本轮异常（已吞并继续）")
         await asyncio.sleep(5)
 
+async def cmd_weblogin(update, context):
+    """后台一键登录（管理员）：校验身份后私聊发一次性登录链接，点开即进后台，免密码免验证码。
+
+    链接 2 分钟有效、单次使用；新链接会作废旧链接。需先在网页「通用与应急」
+    配置「后台公网地址」（WEB_BASE_URL），否则 bot 不知道该拼什么域名。
+    """
+    uid = update.effective_user.id
+    if not is_bot_admin(uid):
+        await update.message.reply_text("⛔ 仅机器人管理员可用")
+        return
+    base = (WEB_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        await update.message.reply_text(
+            "⚠️ 还没配置后台地址，一键登录不可用。\n\n"
+            "请先用密码登录网页后台 → 「通用与应急」→「后台公网地址」\n"
+            "填你的后台访问地址（如 https://xxx.northflank.app），保存后再来。")
+        return
+    # 同一管理员旧 token 一律作废
+    now = time.time()
+    for k in [k for k, v in web_magic_tokens.items() if v["uid"] == uid or v["exp"] < now]:
+        web_magic_tokens.pop(k, None)
+    token = secrets.token_urlsafe(32)
+    web_magic_tokens[token] = {"uid": uid, "exp": now + 120}
+    url = f"{base}/magic?token={token}"
+    try:
+        await context.bot.send_message(chat_id=uid, text=(
+            "🔐 <b>后台一键登录</b>\n\n"
+            f"<a href='{url}'>👉 点这里直接登录</a>\n\n"
+            "· 2 分钟内有效，仅可使用一次\n"
+            "· 点开即进后台，无需密码\n"
+            "· 不是你本人操作请忽略"),
+            parse_mode="HTML", disable_web_page_preview=True)
+        if update.effective_chat.id != uid:
+            await update.message.reply_text("✅ 登录链接已发到你的私聊（2 分钟内有效）")
+    except Exception:
+        await update.message.reply_text(
+            "⚠️ 链接发送失败（你可能从未私聊过本机器人）。\n"
+            "请先私聊我发 /start，然后再发 /后台。")
+
 async def cmd_status(update, context):
     """机器人自检（管理员）：运行时长/各游戏活跃局/台账/数据文件/调度任务。"""
     if not is_bot_admin(update.effective_user.id):
@@ -5176,7 +5361,8 @@ async def cmd_redpacket(update, context):
         game_chips[cid][uid] -= total
         pid = secrets.token_urlsafe(8)
         rp_packets[pid] = {"cid": cid, "from": uid, "left_amt": total, "left_n": count,
-                           "grabbed": {}, "ts": now_bj().timestamp(), "msg_id": None, "target": target}
+                           "grabbed": {}, "ts": now_bj().timestamp(), "msg_id": None, "target": target,
+                           "lock": asyncio.Lock()}  # 包级锁：检查+扣减必须原子，防并发双付
         save_data()
     await action_notice(cid, context.application, uid, f"发出了 {total} 积分 / {count} 份红包")
     who = f"\n🎯 仅 {await get_name(context.application, target, cid=cid)} 可抢" if target else ""
@@ -5187,34 +5373,39 @@ async def cmd_redpacket(update, context):
         rp_packets[pid]["msg_id"] = msg.message_id
 
 async def _rp_grab(p, pid, uid, context, q):
-    """红包抢夺核心：检查过期/重复 → 随机拆分 → 入账 → 更新看板。"""
+    """红包抢夺核心：检查过期/重复 → 随机拆分 → 入账 → 更新看板。
+
+    全程持包级锁：剩余份数/金额的检查与扣减必须原子，否则两个不同用户
+    并发抢同一包时，各自持有的是不同的 wallet_locks[uid]，互不排斥 → 超额派发。
+    """
     cid = p["cid"]
-    now = now_bj().timestamp()
-    if now - p["ts"] > 86400:  # 过期：剩余整体退回发包人
-        refund = p["left_amt"]
-        async with wallet_locks[p["from"]]:
-            game_chips[cid][p["from"]] += refund
-        rp_packets.pop(pid, None); save_data()
-        await q.answer("红包已过期，剩余已退回", show_alert=True)
-        await safe_edit(context.bot, cid, p["msg_id"], "🧧 红包已过期，未领完的积分已退回。", reply_markup=None)
-        return
-    if uid in p["grabbed"]:
-        await q.answer(f"你已经抢过 {p['grabbed'][uid]} 积分啦", show_alert=True); return
-    tgt = p.get("target") or 0  # 旧数据无 target 键按普通红包处理
-    if tgt and uid != tgt:
-        await q.answer(f"这是专属红包，只有 {await get_name(context.application, tgt, cid=cid)} 能抢", show_alert=True); return
-    if p["left_n"] <= 0:
-        await q.answer("手慢了，红包已被抢完", show_alert=True); return
-    if p["left_n"] == 1:
-        amt = p["left_amt"]
-    else:
-        amt = random.randint(1, max(1, p["left_amt"] - p["left_n"] + 1))
-    async with wallet_locks[uid]:
-        p["grabbed"][uid] = amt
-        p["left_amt"] -= amt; p["left_n"] -= 1
-        game_chips[cid][uid] += amt
-        ledger_add(cid, p["from"], uid, amt, "红包")  # 资金流台账：发包人→领取人
-        save_data()
+    async with p["lock"]:
+        now = now_bj().timestamp()
+        if now - p["ts"] > 86400:  # 过期：剩余整体退回发包人
+            refund = p["left_amt"]
+            async with wallet_locks[p["from"]]:
+                game_chips[cid][p["from"]] += refund
+            rp_packets.pop(pid, None); save_data()
+            await q.answer("红包已过期，剩余已退回", show_alert=True)
+            await safe_edit(context.bot, cid, p["msg_id"], "🧧 红包已过期，未领完的积分已退回。", reply_markup=None)
+            return
+        if uid in p["grabbed"]:
+            await q.answer(f"你已经抢过 {p['grabbed'][uid]} 积分啦", show_alert=True); return
+        tgt = p.get("target") or 0  # 旧数据无 target 键按普通红包处理
+        if tgt and uid != tgt:
+            await q.answer(f"这是专属红包，只有 {await get_name(context.application, tgt, cid=cid)} 能抢", show_alert=True); return
+        if p["left_n"] <= 0:
+            await q.answer("手慢了，红包已被抢完", show_alert=True); return
+        if p["left_n"] == 1:
+            amt = p["left_amt"]
+        else:
+            amt = random.randint(1, max(1, p["left_amt"] - p["left_n"] + 1))
+        async with wallet_locks[uid]:
+            p["grabbed"][uid] = amt
+            p["left_amt"] -= amt; p["left_n"] -= 1
+            game_chips[cid][uid] += amt
+            ledger_add(cid, p["from"], uid, amt, "红包")  # 资金流台账：发包人→领取人
+            save_data()
     await q.answer(f"🧧 抢到 {amt} 积分！")
     total, count = sum(p["grabbed"].values()), len(p["grabbed"])
     if p["left_n"] <= 0:
@@ -6068,6 +6259,7 @@ CMD_ALIASES = {
     "自检": cmd_status, "运行状态": cmd_status, "status": cmd_status,
     "网页码": cmd_webcode, "验证码": cmd_webcode, "登录码": cmd_webcode, "webcode": cmd_webcode,
     "开奖": cmd_lottery, "抽奖": cmd_lottery, "lottery": cmd_lottery,
+    "后台": cmd_weblogin, "登录后台": cmd_weblogin, "后台登录": cmd_weblogin, "weblogin": cmd_weblogin,
     "排位": cmd_season_play, "排位赛": cmd_season_play, "赛季": cmd_season_play, "赛季赛": cmd_season_play,
     "排位报名": cmd_season_join, "报名排位": cmd_season_join, "赛季报名": cmd_season_join,
     "排位榜": cmd_season_rank, "赛季榜": cmd_season_rank, "赛季排名": cmd_season_rank,
@@ -6583,7 +6775,7 @@ def start_health_server():
                     "<form method='post' action='/login'>"
                     "<label>管理密码</label><input type='password' name='password' autofocus required>"
                     "<button type='submit'>登 录</button></form>"
-                    "<div class='ft'>© 2026 阿福积分机器人</div>"
+                    "<div class='ft'>💡 管理员可在 Telegram 发 <b>/后台</b> 获取一键登录链接<br>© 2026 阿福积分机器人</div>"
                     "</div></body></html>").encode("utf-8")
 
         def _field_rows(gkey):
@@ -6892,54 +7084,71 @@ def start_health_server():
                             "<input type='file' name='file' accept='.csv,.xls,.xlsx' required></div>"
                             "<button type='submit'>✅ 确认导入</button></form></div>")
                 elif gkey == "points" and sub == "lottery":
-                    # 群组抽奖页：上半活动列表 + 下半配置表单
+                    # 群组抽奖页：新增抽奖表单 + 活动列表（可取消）+ 配置表单
                     def _fmt_ts(t):
                         try: return time.strftime("%m-%d %H:%M", time.localtime(float(t)))
                         except Exception: return "-"
-                    def _row(lo, active):
+                    def _row(lo):
                         cid = lo.get("chat_id", -1)
                         status = lo.get("status", "?")
+                        active = status == "open"
                         badges = {"open": "<span style='color:#6fd08c'>进行中</span>",
                                   "drawing": "<span style='color:#f0c060'>开奖中</span>",
                                   "finished": "<span style='color:#8a89a0'>已结束</span>",
                                   "cancelled": "<span style='color:#f09595'>已取消</span>"}
                         ends_in = ""
-                        if status == "open":
+                        if active:
                             left = int(lo["end_ts"] - time.time())
                             ends_in = f" · 剩 {left}s" if left > 0 else " · 到点开奖中"
                         winners = lo.get("winners") or []
                         win_txt = f"{len(winners)} 人" if winners else "—"
                         fee_txt = f" {int(lo.get('fee', 0))}分/人" if lo.get("fee") else " 免费"
+                        cancel_btn = (f"<a class='q' href='/lottery_cancel?cid={cid}' "
+                                      f"onclick=\"return confirm('取消该抽奖并退还参与费？')\">🛑 取消</a>" if active else "")
                         return (f"<tr><td><code>{cid}</code></td>"
                                 f"<td>{html.escape(str(lo.get('title', ''))[:24])}</td>"
                                 f"<td>{badges.get(status, status)}{ends_in}</td>"
                                 f"<td>{len(lo.get('participants', []))}</td>"
                                 f"<td>{win_txt}</td>"
                                 f"<td>{fee_txt}</td>"
-                                f"<td>{_fmt_ts(lo.get('start_ts'))}</td></tr>")
+                                f"<td>{_fmt_ts(lo.get('start_ts'))}</td>"
+                                f"<td>{cancel_btn}</td></tr>")
                     # 进行中优先；其余按 start_ts 倒序
                     items = list(lotteries.items())
                     items.sort(key=lambda kv: (kv[1].get("status") != "open", -(kv[1].get("start_ts") or 0)))
-                    rows_html = "".join(_row(lo, lo.get("status") == "open") for _, lo in items[:20])
+                    rows_html = "".join(_row(lo) for _, lo in items[:20])
                     if not rows_html:
-                        rows_html = "<tr><td colspan='7' style='text-align:center;color:#6a6982'>暂无活动</td></tr>"
-                    status_html = ("<div class='err' style='margin-bottom:12px'>⚠️ 群组抽奖当前已关闭</div>"
+                        rows_html = "<tr><td colspan='8' style='text-align:center;color:#6a6982'>暂无活动，用上方表单创建第一个</td></tr>"
+                    status_html = ("<div class='err'>⚠️ 群组抽奖当前已关闭，先打开下方「群组抽奖总开关」</div>"
                                    if not LOTTERY_ENABLED else "")
                     body = (f"<h1>{gicon} {sname}</h1>"
-                            f"<div class='sub'>群成员发「<code>{html.escape(LOTTERY_KEYWORD)}</code>」或 <code>/开奖</code> 即可参与。"
-                            "管理员用 <code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数</code> 开局，"
-                            "<code>/开奖开奖</code> 手动开奖</div>{msg}{err}{status_html}"
+                            f"<div class='sub'>在这里创建抽奖 → 机器人自动发到群里 → 群成员发「{html.escape(LOTTERY_KEYWORD)}」参与 → 到点自动开奖</div>"
+                            f"{msg}{err}{status_html}"
+                            # 新增抽奖表单
+                            "<div class='card'><h3>➕ 新增抽奖</h3>"
+                            "<form method='post' action='/lottery_create'>"
+                            "<div class='row'><div class='lbl'>发到哪个群</div>"
+                            f"<select name='cid' required>{_group_options()}</select></div>"
+                            "<div class='row'><div class='lbl'>活动标题</div>"
+                            "<input type='text' name='title' maxlength='50' required placeholder='例：群友福利'></div>"
+                            "<div style='padding:12px 0;border-bottom:1px solid #26273a'>"
+                            "<div class='lbl'>奖品<small>每行一条「名称:数量」，如：100积分:1</small></div>"
+                            "<textarea name='prizes' rows='3' required placeholder='100积分:1&#10;小星星:5'></textarea></div>"
+                            "<div class='row'><div class='lbl'>持续秒数<small>到点自动开奖（10 ~ 3600）</small></div>"
+                            f"<input type='number' name='duration' value='{max(10, int(LOTTERY_DEFAULT_DURATION))}' min='10' max='3600'></div>"
+                            "<button type='submit'>🎉 创建并发布到群</button></form></div>"
+                            # 活动列表
                             "<div class='card'><h3>📋 活动列表（最近 20 条，进行中置顶）</h3>"
-                            "<table class='tbl'><tr><th>群</th><th>标题</th><th>状态</th><th>参与</th><th>中奖</th><th>参与费</th><th>开局</th></tr>"
+                            "<table class='tbl'><tr><th>群</th><th>标题</th><th>状态</th><th>参与</th><th>中奖</th><th>参与费</th><th>开局</th><th>操作</th></tr>"
                             f"{rows_html}</table></div>"
-                            # 配置表单（与设置页风格统一）
+                            # 配置表单
                             f"<div class='card'><h3>⚙️ 配置</h3><form method='post' action='/save'>"
                             f"<input type='hidden' name='group' value='points/lottery'>"
                             + _field_rows("points/lottery")
                             + "<div class='sub' style='margin-top:16px'>消息模板支持占位符："
-                              "<code>{title}</code> <code>{nick}</code> <code>{n}</code> <code>{balance}</code> "
-                              "<code>{prize_list}</code> <code>{keyword}</code> <code>{duration}</code> "
-                              "<code>{winners}</code> <code>{reason}</code></div>"
+                              f"<code>{'{title}'}</code> <code>{'{nick}'}</code> <code>{'{n}'}</code> <code>{'{balance}'}</code> "
+                              f"<code>{'{prize_list}'}</code> <code>{'{keyword}'}</code> <code>{'{duration}'}</code> "
+                              f"<code>{'{winners}'}</code> <code>{'{reason}'}</code></div>"
                             "<button type='submit' style='margin-top:8px'>💾 保存全部抽奖设置</button></form></div>")
                 elif gkey == "points" and sub == "rule":
                     cap = f"每日上限 {CHAT_DAILY_CAP} 分" if CHAT_DAILY_CAP else "不设上限"
@@ -7040,6 +7249,37 @@ def start_health_server():
                 path = urlparse(self.path).path
                 if path == "/health":
                     self._send(200, b"ok", [("Content-Type", "text/plain")]); return
+                if path == "/magic":
+                    """Telegram 一键登录：校验一次性 token → 直接建会话 → 302 进后台。"""
+                    qs_m = parse_qs(urlparse(self.path).query)
+                    tok = (qs_m.get("token", [""])[0] or "").strip()
+                    with sess_lock:
+                        rec = web_magic_tokens.pop(tok, None)  # pop 即一次性
+                    if not rec or rec["exp"] < time.time():
+                        self._send(200, _login_page(err=1)); return
+                    session = secrets.token_urlsafe(32)
+                    with sess_lock:
+                        sessions[session] = time.time() + 7 * 86400
+                    # 通知所有管理员：有人通过一键链接进入后台
+                    try:
+                        ip = self.client_address[0]
+                        ua = (self.headers.get("User-Agent") or "")[:120]
+                        if _bot_app and _bot_loop:
+                            async def _notify():
+                                ntxt = (f"✅ <b>后台登录成功（一键链接）</b>\n\n"
+                                        f"来源 IP：<code>{ip}</code>\n"
+                                        f"时间：{datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                        f"设备：<code>{html.escape(ua)}</code>")
+                                for rid in _admin_receivers():
+                                    try:
+                                        await _bot_app.bot.send_message(chat_id=rid, text=ntxt, parse_mode="HTML")
+                                    except Exception:
+                                        pass
+                            asyncio.run_coroutine_threadsafe(_notify(), _bot_loop).result(8)
+                    except Exception:
+                        pass
+                    self._redirect("/", cookie=f"wb_session={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800")
+                    return
                 if not _check_session(self.headers.get("Cookie")):
                     self._send(200, _login_page()); return
                 qs = parse_qs(urlparse(self.path).query)
@@ -7048,6 +7288,32 @@ def start_health_server():
                 err = qs.get("err", [""])[0]
                 if path == "/":
                     self._send(200, _home_page()); return
+                if path == "/lottery_cancel":
+                    """网页取消抽奖：退参与费、标记取消、群里通知。"""
+                    def _lc_back(note="", err=""):
+                        q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
+                        self._redirect("/page/points/lottery" + q)
+                    try: cid = int(qs.get("cid", ["0"])[0] or 0)
+                    except ValueError: cid = 0
+                    lo = _lottery_active(cid)
+                    if not lo:
+                        _lc_back(err="该群没有进行中的抽奖"); return
+                    fee = int(lo.get("fee", 0))
+                    if fee > 0:
+                        for u, _ts, _n in lo["participants"]:
+                            game_chips[cid][u] = game_chips[cid].get(u, 0) + fee
+                    lo["status"] = "cancelled"
+                    save_data()
+                    if _bot_app and _bot_loop:
+                        async def _notify():
+                            tail = f"，已退还 {fee} 积分/人" if fee > 0 else ""
+                            await safe_send(_bot_app.bot, cid,
+                                f"🛑 抽奖活动「<b>{html.escape(lo['title'])}</b>」已被管理员取消{tail}",
+                                parse_mode="HTML")
+                        try: asyncio.run_coroutine_threadsafe(_notify(), _bot_loop).result(8)
+                        except Exception: pass
+                    _lc_back(note=f"✅ 已取消「{lo['title'][:20]}」" + (f"，退还 {fee} 分/人" if fee > 0 else ""))
+                    return
                 mm = re.fullmatch(r"/tplprev/([a-z0-9_]+)", path)
                 if mm:
                     self._send(200, _tpl_preview(mm.group(1))); return
@@ -7302,6 +7568,48 @@ def start_health_server():
                             self._redirect("/page/members?err=" + quote(f"操作失败：{e}（申请可能已被处理）"))
                     else:
                         _back(err="参数错误"); return
+                    return
+                if path == "/lottery_create":
+                    """网页创建抽奖：选群/标题/奖品/时长 → 落库 + bot 发公告到群。"""
+                    def _lc_back(note="", err=""):
+                        q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
+                        self._redirect("/page/points/lottery" + q)
+                    try: cid = int(form.get("cid", ["0"])[0] or 0)
+                    except ValueError: cid = 0
+                    title = (form.get("title", [""])[0] or "").strip()
+                    prizes_raw = (form.get("prizes", [""])[0] or "").strip()
+                    try: duration = int(form.get("duration", ["0"])[0] or 0)
+                    except ValueError: duration = 0
+                    if not cid or cid not in (set(AUTHORIZED_GROUPS) | set(game_chips.keys())):
+                        _lc_back(err="请选择有效的群"); return
+                    if not title:
+                        _lc_back(err="标题不能为空"); return
+                    if _lottery_active(cid):
+                        _lc_back(err="该群已有进行中的抽奖，请先取消或等开奖"); return
+                    # textarea 每行一条 → 换行转逗号交给统一解析器
+                    prizes, perr = _lottery_parse_prizes(prizes_raw.replace("\r", "").replace("\n", ","))
+                    if perr:
+                        _lc_back(err=perr); return
+                    duration = max(10, min(3600, duration or LOTTERY_DEFAULT_DURATION))
+                    lotteries[cid] = {
+                        "title": title, "prizes": prizes, "fee": int(LOTTERY_FEE),
+                        "keyword": LOTTERY_KEYWORD, "start_ts": time.time(),
+                        "end_ts": time.time() + duration, "msg_id": None,
+                        "participants": [], "status": "open", "winners": [],
+                        "creator": 0, "chat_id": cid,
+                    }
+                    save_data()
+                    # 跨线程让 bot 把公告发到群（网页线程 → bot 主事件循环）
+                    pub_err = ""
+                    if _bot_app and _bot_loop:
+                        async def _pub():
+                            await _lottery_publish(_bot_app, cid, lotteries[cid])
+                        try:
+                            asyncio.run_coroutine_threadsafe(_pub(), _bot_loop).result(10)
+                        except Exception as exc:
+                            logger.exception("网页创建抽奖：公告发送失败")
+                            pub_err = f"（公告发送失败：{type(exc).__name__}，活动已创建，可在群内发 /开奖 触发参与）"
+                    _lc_back(note=f"✅ 抽奖「{title[:20]}」已创建并发到群 {cid}{pub_err}")
                     return
                 if path == "/points_adj":
                     def _back(note="", err=""):

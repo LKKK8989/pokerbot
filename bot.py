@@ -6,13 +6,15 @@ import math
 import os
 import random
 import re
+import secrets
 import shutil
 import threading
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.error import BadRequest, RetryAfter, TelegramError
@@ -36,15 +38,9 @@ TURN_TIMEOUT = 60          # 德州/21点单回合思考时间
 ROOM_WAIT_TIMEOUT = 60     # 各游戏等待房统一倒计时（60秒）
 RACE_AUTO_START = 120      # 赛车自动开赛时间
 RACE_ANIMATION_INTERVAL = 5.0   # 每帧画面停留秒数（间隔越大帧数越少，需与赛程总时长一起权衡）
-SLOT_COOLDOWN = 5          # 老虎机冷却
-SLOT_SPIN_SEM = asyncio.Semaphore(2)  # 老虎机全局并发上限（防限流雪崩）
-lhj_cmd_spam = defaultdict(float)  # 老虎机命令防刷：与抽奖冷却同步（统一 5 秒窗口）
-robot_bank = defaultdict(int)  # 牛牛机器人庄家系统奖池：封顶单局亏损，杜绝凭空发分
 
 # 游戏金额配置
-SLOT_BET = 500             # 老虎机单次金额
 BJ_MIN_BET = 100           # 21点最低打字下注
-BACCARAT_FIXED_BET = 500   # 百家乐按钮单次下注
 FIXED_MIN_RAISE = 100      # 德州最低加注额
 BLACKJACK_DECKS = 6        # 21点使用6副牌（娱乐场标准）
 
@@ -81,6 +77,87 @@ HORSE_EMOJI = ["🚗", "🚕", "🚙", "🛻"]
 FIXED_BET_AMOUNTS = [100, 200, 500, 1000]
 RACE_TRACK_LENGTH = 14
 DATA_BACKUP_FILE, DATA_TEMP_FILE = f"{DATA_FILE}.bak", f"{DATA_FILE}.tmp"
+
+# ---------- 网页后台：可在线调整的设置 ----------
+# 设置存在独立文件 bot_settings.json，网页保存后立即覆盖内存中的全局常量，无需重启。
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(DATA_FILE)), "bot_settings.json")
+WEB_DEFAULT_PASSWORD = "admin888"  # 首次登录用，登录后请在面板里立即修改
+SETTINGS_FIELDS = [
+    # (settings键, 模块全局变量名, 面板显示名, 类型, 最小, 最大)
+    ("starting_chips",          "STARTING_CHIPS",           "德州·新玩家初始积分",        "int",   100, 1000000),
+    ("min_entry_chips",         "MIN_ENTRY_CHIPS",          "德州·入座最低积分",          "int",   0,   100000),
+    ("fixed_min_raise",         "FIXED_MIN_RAISE",          "德州·最低加注额",            "int",   10,  10000),
+    ("texas_exchange_rate",     "TEXAS_EXCHANGE_RATE",      "兑换·几通用积分换1德州积分", "int",   1,   100),
+    ("emergency_chips",         "EMERGENCY_CHIPS",          "应急·归零赠送积分",          "int",   0,   100000),
+    ("emergency_max_uses",      "EMERGENCY_MAX_USES",       "应急·每日赠送次数",          "int",   0,   99),
+    ("turn_timeout",            "TURN_TIMEOUT",             "德州/21点·单回合思考(秒)",   "int",   10,  600),
+    ("room_wait_timeout",       "ROOM_WAIT_TIMEOUT",        "等待房·倒计时(秒)",          "int",   10,  600),
+    ("race_auto_start",         "RACE_AUTO_START",          "赛车·自动开赛(秒)",          "int",   10,  600),
+    ("race_animation_interval", "RACE_ANIMATION_INTERVAL",  "赛车·动画帧间隔(秒)",        "float", 0.5, 30),
+    ("bj_min_bet",              "BJ_MIN_BET",               "21点·最低下注",              "int",   1,   100000),
+    ("blackjack_decks",         "BLACKJACK_DECKS",          "21点·使用几副牌",            "int",   1,   8),
+    ("jinhua_ante",             "JINHUA_ANTE",              "炸金花·底注",                "int",   1,   100000),
+    ("jinhua_base",             "JINHUA_BASE",              "炸金花·单注基准",            "int",   1,   100000),
+    ("season_start_chips",      "SEASON_START_CHIPS",       "排位赛·每人起始分",          "int",   100, 1000000),
+    ("season_min_players",      "SEASON_MIN_PLAYERS",       "排位赛·最少开赛人数",        "int",   2,   50),
+    ("season_min_games",        "SEASON_MIN_GAMES",         "排位赛·结算最少局数",        "int",   0,   999),
+    ("season_days",             "SEASON_DAYS",              "排位赛·赛季天数",            "int",   1,   90),
+]
+_settings_lock = threading.Lock()
+_web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
+
+def _write_settings_file(cfg: dict, password: str):
+    try:
+        tmp = f"{SETTINGS_FILE}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"fields": cfg, "web_password": password}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SETTINGS_FILE)
+    except Exception:
+        logger.exception("设置文件写盘失败")
+
+def apply_settings(cfg: dict):
+    """把设置字典套用到内存全局常量（带类型与范围校验，非法值跳过）。"""
+    applied = {}
+    for key, gname, _label, ftype, lo, hi in SETTINGS_FIELDS:
+        if key not in cfg:
+            continue
+        try:
+            v = float(cfg[key])
+            if ftype == "int":
+                if v != int(v): raise ValueError
+                v = int(v)
+            if not (lo <= v <= hi): raise ValueError
+        except (ValueError, TypeError):
+            continue
+        globals()[gname] = v
+        applied[key] = v
+    return applied
+
+def load_settings():
+    """启动时读取 bot_settings.json 并套用；无文件则用代码内默认值。"""
+    global _web_password
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        apply_settings(data.get("fields", {}))
+        pwd = str(data.get("web_password", "")).strip()
+        if pwd:
+            _web_password = pwd
+        logger.info("设置已从 %s 加载", SETTINGS_FILE)
+    except FileNotFoundError:
+        logger.info("无设置文件（%s），全部使用默认配置", SETTINGS_FILE)
+    except Exception:
+        logger.exception("设置文件读取失败，使用默认配置")
+
+def save_settings(cfg: dict, new_password: str = ""):
+    """网页保存入口：套用内存 + 写盘 + 可选改密码。返回实际生效的配置。"""
+    global _web_password
+    with _settings_lock:
+        applied = apply_settings(cfg)
+        if new_password and len(new_password.strip()) >= 4:
+            _web_password = new_password.strip()
+        _write_settings_file(applied, _web_password)
+    return applied
 BEIJING_TZ = timezone(timedelta(hours=8))
 HAND_NAME_CN = {"High Card":"高牌", "Pair":"一对", "One Pair":"一对", "Two Pair":"两对", "Three of a Kind":"三条", "Straight":"顺子", "Flush":"同花", "Full House":"葫芦", "Four of a Kind":"四条", "Straight Flush":"同花顺", "Royal Flush":"皇家同花顺"}
 RANK_ICONS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
@@ -105,38 +182,22 @@ game_chips = defaultdict(lambda: defaultdict(lambda: GAME_STARTING_CHIPS))  # �
 AUTHORIZED_GROUPS = set()
 BLACKLISTED_USERS = set()  # 被拉黑、禁止使用该机器人的用户（管理员可解封）
 race_history = defaultdict(list)
-baccarat_history = defaultdict(list)
 blackjack_history = defaultdict(list) # 新增 21点历史
 race_daily_stats = defaultdict(lambda: [0] * HORSE_COUNT)
-baccarat_daily_stats = defaultdict(lambda: {"player": 0, "banker": 0, "tie": 0})
 poker_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 race_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 blackjack_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-baccarat_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-slot_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-sicbo_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-niuniu_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-football_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-basketball_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-darts_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-bowling_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-stud_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 jinhua_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-sicbo_history = defaultdict(list)  # 骰子路书：大🔴 小🔵 单🟡 双🟢 豹子⚫
-sicbo_daily_stats = defaultdict(lambda: {"big": 0, "small": 0, "triple": 0})
 race_jackpot = defaultdict(int)
 hourly_race_enabled = defaultdict(lambda: False)
 daily_emergency_used = defaultdict(lambda: defaultdict(bool))
 # 已实扣的游戏下注，用于全系游戏在重启时自动退款。
 # 按游戏类型分条存储，避免多游戏并发时记录互相覆盖：
-# pending_game_bets[群ID][用户ID]["21"/"baccarat"/"horse"] = {"amount": 100, "mode": "official"}
+# pending_game_bets[群ID][用户ID]["21"/"horse"] = {"amount": 100, "mode": "official"}
 pending_game_bets = defaultdict(lambda: defaultdict(dict))
 last_business_date = ""
 active_poker_games, active_horse_races = {}, {}
-active_blackjack_games, active_baccarat_games = {}, {}
-active_sicbo_games, active_niuniu_games = {}, {}
-active_football_games = {}
-active_stud_games = {}
+active_blackjack_games = {}
 active_jinhua_games = {}
 recent_poker_reveals = defaultdict(list)  # 德州单赢结算后临时保存赢家牌（每群一个队列，供可选亮牌按钮使用，新单赢不再覆盖旧的）
 # ---------- 德州排位赛状态（独立账本，每日重置不触碰） ----------
@@ -235,7 +296,6 @@ def title_icon(title):
 user_names = {}                # user_names[uid] = "真名"（原始串，输出时再 html.escape）
 chat_name_cache = {}           # chat_name_cache[cid] = 群名（入站消息自动缓存，授权列表等无需再调 get_chat）
 # 用于老虎机等功能的冷却时间限制。
-user_cooldowns = defaultdict(float)
 # 高性能保存逻辑变量
 data_dirty = False
 save_event = None # 延迟初始化
@@ -300,34 +360,18 @@ def force_save_now():
                 "poker_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in poker_profit_by_date.items()},
                 "race_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in race_profit_by_date.items()},
                 "blackjack_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in blackjack_profit_by_date.items()},
-                "baccarat_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in baccarat_profit_by_date.items()},
-                "slot_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in slot_profit_by_date.items()},
-                "sicbo_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in sicbo_profit_by_date.items()},
-                "niuniu_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in niuniu_profit_by_date.items()},
-                "football_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in football_profit_by_date.items()},
-                "basketball_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in basketball_profit_by_date.items()},
-                "darts_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in darts_profit_by_date.items()},
-                "bowling_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in bowling_profit_by_date.items()},
-                "stud_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in stud_profit_by_date.items()},
                 "jinhua_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in jinhua_profit_by_date.items()},
-                "sicbo_history": {str(cid): value[-12:] for cid, value in sicbo_history.items()},
-                "sicbo_daily_stats": {str(cid): dict(value) for cid, value in sicbo_daily_stats.items()},
                 "authorized_groups": list(AUTHORIZED_GROUPS),
                 "bot_admins": list(BOT_ADMINS),
                 "blacklist": list(BLACKLISTED_USERS),
                 "race_jackpot": {str(cid): value for cid, value in race_jackpot.items()},
                 "hourly_race_enabled": {str(cid): value for cid, value in hourly_race_enabled.items()},
                 "race_history": {str(cid): value[-10:] for cid, value in race_history.items()},
-                "baccarat_history": {str(cid): value[-12:] for cid, value in baccarat_history.items()},
                 "blackjack_history": {str(cid): value[-10:] for cid, value in blackjack_history.items()},
                 "race_daily_stats": {str(cid): value for cid, value in race_daily_stats.items()},
-                "baccarat_daily_stats": {str(cid): dict(value) for cid, value in baccarat_daily_stats.items()},
                 "daily_emergency_used": {str(cid): {str(uid): used for uid, used in users.items()} for cid, users in daily_emergency_used.items()},
                 "last_business_date": last_business_date,
                 "pending_game_bets": {str(cid): {str(uid): val for uid, val in users.items()} for cid, users in pending_game_bets.items()},
-                "user_cooldowns": {str(uid): ts for uid, ts in user_cooldowns.items()},
-                "lhj_cmd_spam": {str(uid): ts for uid, ts in lhj_cmd_spam.items()},
-                "robot_bank": {str(cid): value for cid, value in robot_bank.items()},
                 "season_active": season_active,
                 "season_id": season_id,
                 "season_name": season_name,
@@ -396,15 +440,6 @@ def load_data():
         for date, chats in data.get("poker_profit_by_date", {}).items(): restore_nested(poker_profit_by_date[date], chats)
         for date, chats in data.get("race_profit_by_date", {}).items(): restore_nested(race_profit_by_date[date], chats)
         for date, chats in data.get("blackjack_profit_by_date", {}).items(): restore_nested(blackjack_profit_by_date[date], chats)
-        for date, chats in data.get("baccarat_profit_by_date", {}).items(): restore_nested(baccarat_profit_by_date[date], chats)
-        for date, chats in data.get("slot_profit_by_date", {}).items(): restore_nested(slot_profit_by_date[date], chats)
-        for date, chats in data.get("sicbo_profit_by_date", {}).items(): restore_nested(sicbo_profit_by_date[date], chats)
-        for date, chats in data.get("niuniu_profit_by_date", {}).items(): restore_nested(niuniu_profit_by_date[date], chats)
-        for date, chats in data.get("football_profit_by_date", {}).items(): restore_nested(football_profit_by_date[date], chats)
-        for date, chats in data.get("basketball_profit_by_date", {}).items(): restore_nested(basketball_profit_by_date[date], chats)
-        for date, chats in data.get("darts_profit_by_date", {}).items(): restore_nested(darts_profit_by_date[date], chats)
-        for date, chats in data.get("bowling_profit_by_date", {}).items(): restore_nested(bowling_profit_by_date[date], chats)
-        for date, chats in data.get("stud_profit_by_date", {}).items(): restore_nested(stud_profit_by_date[date], chats)
         for date, chats in data.get("jinhua_profit_by_date", {}).items(): restore_nested(jinhua_profit_by_date[date], chats)
         # 德州排位赛状态恢复
         season_active = data.get("season_active", False)
@@ -444,9 +479,6 @@ def load_data():
         user_names.clear()
         for uid, n in data.get("user_names", {}).items():
             if n: user_names[int(uid)] = n
-        for cid, value in data.get("sicbo_history", {}).items(): sicbo_history[int(cid)] = list(value)[-12:]
-        for cid, value in data.get("sicbo_daily_stats", {}).items():
-            sicbo_daily_stats[int(cid)] = {"big": int(value.get("big", 0)), "small": int(value.get("small", 0)), "triple": int(value.get("triple", 0))}
         AUTHORIZED_GROUPS.update(int(cid) for cid in data.get("authorized_groups", []))
         BOT_ADMINS.clear(); BOT_ADMINS.update(ADMIN_USER_IDS)
         BOT_ADMINS.update(int(x) for x in data.get("bot_admins", []))
@@ -454,11 +486,8 @@ def load_data():
         for cid, value in data.get("race_jackpot", {}).items(): race_jackpot[int(cid)] = int(value)
         for cid, value in data.get("hourly_race_enabled", {}).items(): hourly_race_enabled[int(cid)] = bool(value)
         for cid, value in data.get("race_history", {}).items(): race_history[int(cid)] = list(value)[-10:]
-        for cid, value in data.get("baccarat_history", {}).items(): baccarat_history[int(cid)] = list(value)[-12:]
         for cid, value in data.get("blackjack_history", {}).items(): blackjack_history[int(cid)] = list(value)[-10:]
         for cid, value in data.get("race_daily_stats", {}).items(): race_daily_stats[int(cid)] = list(value)[:HORSE_COUNT]
-        for cid, value in data.get("baccarat_daily_stats", {}).items():
-            baccarat_daily_stats[int(cid)] = {"player": int(value.get("player", 0)), "banker": int(value.get("banker", 0)), "tie": int(value.get("tie", 0))}
         for cid, users in data.get("daily_emergency_used", {}).items():
             for uid, used in users.items(): daily_emergency_used[int(cid)][int(uid)] = min(int(used), EMERGENCY_MAX_USES)
         last_business_date = data.get("last_business_date", "")
@@ -471,12 +500,6 @@ def load_data():
                     wallet = game_chips
                     wallet[int(cid)][int(uid)] += int(ginfo.get("amount", 0))
         pending_game_bets.clear()
-        # 老虎机冷却恢复
-        for uid, ts in data.get("user_cooldowns", {}).items(): user_cooldowns[int(uid)] = float(ts)
-        # 老虎机命令防刷窗口恢复
-        for uid, ts in data.get("lhj_cmd_spam", {}).items(): lhj_cmd_spam[int(uid)] = float(ts)
-        # 牛牛机器人庄家奖池恢复
-        for cid, value in data.get("robot_bank", {}).items(): robot_bank[int(cid)] = int(value)
         force_save_now()
     except Exception:
         logger.exception("恢复数据失败")
@@ -486,10 +509,7 @@ def archive_old_profit_data(keep_days=90):
     """将超过 keep_days 天的盈亏明细归档合并到 _archive，保留累计榜数字不变。"""
     cutoff = (now_bj() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
     for profit_dict in (race_profit_by_date, blackjack_profit_by_date,
-                        baccarat_profit_by_date, slot_profit_by_date,
-                        sicbo_profit_by_date, niuniu_profit_by_date, football_profit_by_date,
-                        basketball_profit_by_date, darts_profit_by_date, bowling_profit_by_date,
-                        stud_profit_by_date, jinhua_profit_by_date, season_profit_by_date):
+                        jinhua_profit_by_date, season_profit_by_date):
         old_dates = [d for d in list(profit_dict.keys()) if d != "_archive" and d < cutoff]
         if not old_dates:
             continue
@@ -805,82 +825,6 @@ class BlackjackGame:
         return " ".join(res)
 
 
-class BaccaratGame:
-    def __init__(self, cid, owner, mode="official"):
-        self.chat_id, self.owner_id, self.mode = cid, owner, mode
-        self.phase = "betting" # betting, finished
-        self.bets = defaultdict(lambda: {"player": 0, "banker": 0, "tie": 0})
-        self.game_msg_id = None
-        self.create_time = time.time()
-        self.timer_task = None
-        self.settled = False
-
-    def cancel_timer(self):
-        if self.timer_task and not self.timer_task.done():
-            self.timer_task.cancel()
-
-    def place_bet(self, uid, side, amount):
-        if self.phase != "betting": return False
-        self.bets[uid][side] += amount
-        
-        # 记录退款保护 (累加)
-        curr = pending_game_bets[self.chat_id][uid].get("baccarat", {}).get("amount", 0)
-        pending_game_bets[self.chat_id][uid]["baccarat"] = {"amount": curr + amount, "mode": self.mode}
-        return True
-
-    def draw_card(self, deck):
-        c = deck.pop()
-        val = 0
-        if c[0] in "TJQK": val = 0
-        elif c[0] == "A": val = 1
-        else: val = int(c[0])
-        return c, val
-
-    def play(self):
-        deck = [r + s for r in "23456789TJQKA" for s in "shdc"]
-        random.shuffle(deck)
-        
-        p_cards, b_cards = [], []
-        p_val, b_val = 0, 0
-        
-        # 初始两张
-        for _ in range(2):
-            c, v = self.draw_card(deck); p_cards.append(c); p_val = (p_val + v) % 10
-            c, v = self.draw_card(deck); b_cards.append(c); b_val = (b_val + v) % 10
-            
-        # 补牌规则 (Natural)
-        if p_val < 8 and b_val < 8:
-            # 闲家补牌
-            p_third_val = -1
-            if p_val <= 5:
-                c, v = self.draw_card(deck); p_cards.append(c); p_val = (p_val + v) % 10
-                p_third_val = v
-            
-            # 庄家补牌
-            draw_b = False
-            if p_third_val == -1: # 闲家没补
-                if b_val <= 5: draw_b = True
-            else: # 闲家补了第三张
-                if b_val <= 2: draw_b = True
-                elif b_val == 3 and p_third_val != 8: draw_b = True
-                elif b_val == 4 and p_third_val in [2,3,4,5,6,7]: draw_b = True
-                elif b_val == 5 and p_third_val in [4,5,6,7]: draw_b = True
-                elif b_val == 6 and p_third_val in [6,7]: draw_b = True
-            
-            if draw_b:
-                c, v = self.draw_card(deck); b_cards.append(c); b_val = (b_val + v) % 10
-        
-        self.phase = "finished"
-        result = "tie" if p_val == b_val else ("player" if p_val > b_val else "banker")
-        return p_cards, b_cards, p_val, b_val, result
-
-    def card_to_str(self, cards):
-        res = []
-        for c in cards:
-            raw = c.replace("T", "10")
-            suit = {"s":"♠️", "h":"♥️", "d":"♦️", "c":"♣️"}.get(raw[-1], raw[-1])
-            res.append(f"{suit}{raw[:-1]}")
-        return " ".join(res)
 
 
 # ==================== 德州扑克 ====================
@@ -1740,12 +1684,12 @@ async def require_group_chat(update, game_name, cmd):
 
 async def cmd_start(update, context):
     if not await need_auth(update): return
-    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（积分永久，可用 /convert 补充）\n/赛车 - 发起赛车\n/老虎机 - 老虎机抽奖\n/21点 - 发起21点\n/百家乐 - 发起百家乐\n/骰子 - 发起骰子\n/牛牛 - 发起牛牛\n/梭哈 - 发起梭哈（赌神同款）\n/炸金花 - 发起炸金花（闷牌偷鸡）\n/足球 - 足球射门（官方动画）\n/篮球 - 篮球投篮（官方动画）\n/飞镖 - 飞镖投掷（官方动画）\n/保龄球 - 保龄球（官方动画）\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 积分商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用通用/德州积分换称号\n换德州 数量 - 通用积分兑换德州积分（4通用=1德州；也支持 /convert）"
+    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（积分永久，可用 /convert 补充）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 积分商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用通用/德州积分换称号\n换德州 数量 - 通用积分兑换德州积分（4通用=1德州；也支持 /convert）"
     if is_bot_admin(update.effective_user.id):
         text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /加德州(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
     await update.message.reply_text(text)
 
-# ---------- 21点 / 百家乐 界面与逻辑 ----------
+# ---------- 21点 界面与逻辑 ----------
 async def start_bj_turn_timer(game, app):
     game.cancel_timer()
     curr_uid = game.players[game.current_player_idx]
@@ -1775,34 +1719,6 @@ async def start_bj_wait_timeout(game, app):
             await safe_edit(app.bot, game.chat_id, game.game_msg_id, "⌛ 21点等待 60 秒无人加入，房间已自动解散。", reply_markup=None)
     game.wait_task = asyncio.create_task(expire())
 
-async def start_baccarat_timer(game, app):
-    """百家乐下注倒计时：60 秒无人下注自动解散，有人下注自动开牌。"""
-    game.cancel_timer()
-    async def countdown():
-        # 设置总共 60 秒
-        total_wait = ROOM_WAIT_TIMEOUT
-        interval = 10 # 每 10 秒刷新一次界面，防止刷屏过猛
-        
-        start_ts = time.time()
-        while True:
-            await asyncio.sleep(1)
-            elapsed = time.time() - start_ts
-            if elapsed >= total_wait: break
-            
-            # 每 10 秒主动刷新一次界面显示剩余时间
-            if int(elapsed) % interval == 0 and int(elapsed) > 0:
-                if game.phase == "betting" and active_baccarat_games.get(game.chat_id) is game:
-                    await update_baccarat_ui(game, app)
-        
-        # 时间到：有人下注自动开牌，无人下注自动解散
-        if game.phase == "betting" and active_baccarat_games.get(game.chat_id) is game:
-            if game.bets:
-                await settle_baccarat(game, app)
-            else:
-                active_baccarat_games.pop(game.chat_id, None)
-                await safe_edit(app.bot, game.chat_id, game.game_msg_id, "⌛ 百家乐等待 60 秒无人下注，本局已取消。", reply_markup=None)
-            
-    game.timer_task = asyncio.create_task(countdown())
 
 async def build_blackjack_wait_board(game, app):
     """构建 21点 等待房间阶段的看板（文本+按钮），供首发与重发复用。"""
@@ -1969,153 +1885,9 @@ async def update_blackjack_ui(game, app):
 
 
 
-async def build_baccarat_bet_board(game, app):
-    """构建百家乐下注阶段的看板（文本+按钮），供首发包与重发复用。"""
-    total_wait = ROOM_WAIT_TIMEOUT
-    remain = max(0, int(total_wait - (time.time() - game.create_time)))
-    history_icons = {"player": "🔵", "banker": "🔴", "tie": "🟢"}
-    history_list = "".join(history_icons.get(r, "") for r in baccarat_history[game.chat_id][-12:]) or "暂无"
-    stats = baccarat_daily_stats[game.chat_id]
-    total = sum(stats.values())
-    if total > 0:
-        stats_text = f"🔵{stats['player']} | 🔴{stats['banker']} | 🟢{stats['tie']} (共{total}局)"
-        percent_text = f"闲 {stats['player']/total*100:.0f}% | 庄 {stats['banker']/total*100:.0f}% | 和 {stats['tie']/total*100:.0f}%"
-    else:
-        stats_text = "暂无数据"
-        percent_text = "等待开局"
-
-    p_total = sum(b["player"] for b in game.bets.values())
-    b_total = sum(b["banker"] for b in game.bets.values())
-    t_total = sum(b["tie"] for b in game.bets.values())
-
-    text = [
-        "👑 <b>百家乐 大赛</b> 👑",
-        "━━━━━━━━━━━━━━━━━",
-        "📊 <b>当日胜率</b>",
-        f"{stats_text}",
-        f"{percent_text}",
-        "",
-        f"📉 <b>历史路书</b>：{history_list}",
-        "",
-        "💰 <b>当前奖池</b>",
-        f"🔵 <b>闲家</b>：{p_total} 积分",
-        f"🔴 <b>庄家</b>：{b_total} 积分",
-        f"🟢 <b>和局</b>：{t_total} 积分",
-        "━━━━━━━━━━━━━━━━━",
-    ]
-    if game.bets:
-        text.append("📋 <b>实时下注</b>")
-        for uid, b in game.bets.items():
-            name = await get_name(app, uid)
-            bet_str = []
-            if b["player"] > 0: bet_str.append(f"🔵{b['player']}")
-            if b["banker"] > 0: bet_str.append(f"🔴{b['banker']}")
-            if b["tie"] > 0: bet_str.append(f"🟢{b['tie']}")
-            text.append(f"👤 <b>玩家</b>：{name} | {' '.join(bet_str)}")
-        text.append("")
-    text.append(f"⏰ <b>将在 {remain} 秒后自动开牌，无人下注将取消</b>")
-    text.append("🔒 庄闲平任你押，发牌后截止")
-    kb = [
-        [InlineKeyboardButton("🔵 押闲 (1:1)", callback_data="bjl_bet_player"), InlineKeyboardButton("🔴 押庄 (1:0.95)", callback_data="bjl_bet_banker")],
-        [InlineKeyboardButton("🟢 押和 (1:8)", callback_data="bjl_bet_tie")],
-        [InlineKeyboardButton("🎮 立即开牌", callback_data="bjl_start"), InlineKeyboardButton("❌ 终止", callback_data="bjl_end")]
-    ]
-    return "\n".join(text), InlineKeyboardMarkup(kb)
 
 
-async def update_baccarat_ui(game, app):
-    if game.phase == "betting":
-        text, kb = await build_baccarat_bet_board(game, app)
-        if game.game_msg_id:
-            await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=kb, parse_mode="HTML")
-        else:
-            msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
-            if msg: game.game_msg_id = msg.message_id
 
-async def settle_baccarat(game, app):
-    if getattr(game, "settled", False):
-        return
-    game.settled = True
-    game.phase = "finished"
-    # 模拟开牌动画
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, "👑 <b>百家乐</b>\n━━━━━━━━━━━━━━━━━\n🎴 <b>正在开牌中，请稍候...</b>", reply_markup=None, parse_mode="HTML")
-    await asyncio.sleep(1.5)
-    
-    p_cards, b_cards, p_val, b_val, result = game.play()
-    
-    # 记录历史与胜率统计
-    if game.mode == "official":
-        baccarat_history[game.chat_id] = (baccarat_history[game.chat_id] + [result])[-12:]
-        baccarat_daily_stats[game.chat_id][result] += 1
-    
-    text = f"👑 <b>百家乐 结算</b>\n\n🔵 <b>闲家</b>：{game.card_to_str(p_cards)} ({p_val}点)\n\n🔴 <b>庄家</b>：{game.card_to_str(b_cards)} ({b_val}点)\n\n"
-    res_map = {"player": "🔵 闲胜", "banker": "🔴 庄胜", "tie": "🟢 和局"}
-    text += f"<b>结果</b>：{res_map[result]}\n━━━━━━━━━━━━━━━━━\n"
-    
-    date = business_date()
-    wallet = game_chips
-    lines = []
-    payouts_applied = False
-
-    # 预取所有玩家名字，避免派彩循环中途网络调用抛异常导致部分派彩
-    bet_uids = list(game.bets.keys())
-    name_map = {}
-    for uid in bet_uids:
-        try: name_map[uid] = await get_name(app, uid)
-        except Exception: name_map[uid] = f"玩家{uid}"
-
-    try:
-        # 阶段一：计算派彩、记录盈亏、清理退款记录（不动钱包，避免中途异常导致部分派彩）
-        compute_list = []
-        for uid, bets in game.bets.items():
-            win_amount = 0
-            total_bet = sum(bets.values())
-            if result == "player": win_amount = bets["player"] * 2
-            elif result == "banker":                     win_amount = round(bets["banker"] * 1.95)
-            elif result == "tie": win_amount = bets["tie"] * 9 + bets["player"] + bets["banker"]  # 押和9倍 + 庄闲投注退还
-
-            net = win_amount - total_bet
-            if game.mode == "official":
-                baccarat_profit_by_date[date][game.chat_id][uid] += net
-            if net != 0:
-                lines.append(f"👤 <b>玩家</b>：{name_map[uid]}\n<b>盈亏</b>：{net:+d}")
-            # 清除退款记录（本局已结束，无论盈亏都清理本游戏的记录）
-            pending_game_bets[game.chat_id].get(uid, {}).pop("baccarat", None)
-            compute_list.append((uid, win_amount))
-        # 阶段二：统一改写钱包（此处仅 dict 操作，不会抛异常，payouts_applied 必定置位）
-        async with user_wallet_locks([uid for uid, _ in compute_list]):
-            for uid, win_amount in compute_list:
-                wallet[game.chat_id][uid] += win_amount
-        payouts_applied = True
-        save_data(); await asyncio.to_thread(force_save_now)
-
-        text += "\n\n".join(lines) if lines else "本局无人盈亏。"
-
-        # 增加当日百家乐盈利榜
-        if game.mode == "official":
-            bjl_rank = sorted(total_profit_by_game(baccarat_profit_by_date, game.chat_id).items(), key=lambda item: item[1], reverse=True)[:30]
-            text += "\n\n🏆 <b>百家乐 累计盈利榜（总数）</b>\n"
-            text += "\n".join([f"{rank_marker(i)} {name_map.get(u, f'玩家{u}')}：{a:+d}" for i, (u, a) in enumerate(bjl_rank, 1)])
-
-        # 核心：删除旧消息，发送新结算消息
-        await safe_delete(app.bot, game.chat_id, game.game_msg_id)
-        await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
-
-        # 应急积分检查
-        if game.mode == "official":
-            for uid in game.bets.keys():
-                await emergency_if_needed(game.chat_id, uid, app)
-    except Exception:
-        logger.exception("百家乐结算异常，群 %s", game.chat_id)
-        if payouts_applied:
-            await safe_send(app.bot, game.chat_id, "⚠️ 百家乐派彩已完成，但结算展示异常，积分不受影响。")
-        else:
-            await safe_send(app.bot, game.chat_id, "⚠️ 百家乐结算异常，本局将退款以保护玩家积分。")
-            for uid, bets in game.bets.items():
-                wallet[game.chat_id][uid] += sum(bets.values())
-    finally:
-        active_baccarat_games.pop(game.chat_id, None)
-        save_data()
 
 async def cmd_21(update, context):
     if not await need_auth(update): return
@@ -2136,959 +1908,77 @@ async def cmd_21(update, context):
     await update_blackjack_ui(game, context.application)  # 直接发送等待房界面，无"准备中"占位
     await start_bj_wait_timeout(game, context.application) # 启动等待超时
 
-async def cmd_bjl(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "百家乐", "bjl"): return
-    cid, uid = update.effective_chat.id, update.effective_user.id
-    if cid in active_baccarat_games:
-        g = active_baccarat_games[cid]
-        if g.phase == "betting":
-            text, kb = await build_baccarat_bet_board(g, context.application)
-            msg = await safe_send(context.bot, cid, text, reply_markup=kb, parse_mode="HTML")
-            if msg: g.game_msg_id = msg.message_id
-        else:
-            await update.message.reply_text("当前已有 百家乐 进行中。")
-        return
-    mode = current_game_mode()
-    game = BaccaratGame(cid, uid, mode)
-    active_baccarat_games[cid] = game
-    await update_baccarat_ui(game, context.application)  # 直接发送押注界面，无"准备中"占位
-    await start_baccarat_timer(game, context.application)
 # ==================== 骰子 ====================
 
-SICBO_FIXED_BET = 500
-SICBO_BET_NAMES = {"big": "🔴大", "small": "🔵小", "odd": "🟡单", "even": "🟢双", "triple": "⚫豹子"}
-SICBO_SPEC_TRIPLE_PAYOUT = 150  # 围骰（特定豹子）1赔150
-SICBO_SUM_PAYOUT = {4: 60, 5: 30, 6: 17, 7: 12, 8: 8, 9: 6, 10: 6,
-                    11: 6, 12: 6, 13: 8, 14: 12, 15: 17, 16: 30, 17: 60}
 
 
-def sicbo_history_token(entry):
-    """路书单条渲染：旧格式字符串 big/small/triple，新格式 [sum, is_triple]"""
-    if isinstance(entry, str):
-        return {"big": "🔴", "small": "🔵", "triple": "⚫"}.get(entry, "")
-    s, trip = entry[0], entry[1]
-    if trip:
-        return f"⚫{s}"
-    return f"🔴{s}" if s >= 11 else f"🔵{s}"
 
 
-def sicbo_neg(n):
-    """数字转 keycap 表情数字：1-9 直映，10=🔟，11-17 拆为 1️⃣+个位"""
-    if n <= 9:
-        return f"{n}\uFE0F\u20E3"
-    if n == 10:
-        return "\U0001F51F"
-    return "1\uFE0F\u20E3" + f"{n - 10}\uFE0F\u20E3"
 
 
-class SicboGame:
-    def __init__(self, cid, owner_id, mode=None):
-        self.chat_id, self.owner_id, self.mode = cid, owner_id, mode or current_game_mode()
-        self.phase = "betting"
-        self.settled = False
-        self.bets = {}      # {uid: {bet_type: amount}}
-        self.amounts = {}   # {uid: selected_amount} 每玩家自选金额
-        self.last_amount = SICBO_FIXED_BET  # 界面参考值
-        self.game_msg_id = None
-        self.create_time = time.time()
-        self.timer_task = None
-
-    def place_bet(self, uid, bet_type, amount):
-        if uid not in self.bets:
-            self.bets[uid] = {}
-        self.bets[uid][bet_type] = self.bets[uid].get(bet_type, 0) + amount
-        # 退款保护：记录该玩家在骰子的累计下注额，重启时据此退还，避免丢积分
-        pending_game_bets[self.chat_id][uid]["sicbo"] = {
-            "amount": sum(self.bets[uid].values()),
-            "mode": self.mode,
-        }
-
-    def get_amount(self, uid):
-        return self.amounts.get(uid, SICBO_FIXED_BET)
-
-    def cancel_timer(self):
-        if self.timer_task and not self.timer_task.done():
-            self.timer_task.cancel()
-            self.timer_task = None
-
-    def play(self):
-        dice = [random.randint(1, 6) for _ in range(3)]
-        total = sum(dice)
-        is_triple = dice[0] == dice[1] == dice[2]
-        return dice, total, is_triple
 
 
-async def build_sicbo_bet_board(game, app):
-    """构建骰子下注阶段的看板（文本+按钮），供首发包与重发复用。"""
-    remain = max(0, int(ROOM_WAIT_TIMEOUT - (time.time() - game.create_time)))
-    history_list = "".join(sicbo_history_token(r) for r in sicbo_history[game.chat_id][-12:]) or "暂无"
-    stats = sicbo_daily_stats[game.chat_id]
-    total_stats = sum(stats.values())
-    stats_text = f"🔵小{stats['small']} | 🔴大{stats['big']} | ⚫豹子{stats['triple']} (共{total_stats}局)" if total_stats > 0 else "暂无数据"
-    pool_total = sum(sum(b.values()) for b in game.bets.values())
-    text = [
-        "🎲 <b>骰子 大赛</b> 🎲",
-        "━━━━━━━━━━━━━━━━━",
-        "📊 <b>当日统计</b>",
-        f"{stats_text}",
-        "",
-        f"📉 <b>历史路书</b>：{history_list}",
-        "",
-        f"💰 <b>奖池</b>：{pool_total} 积分  |  💡 当前下注：{game.last_amount}",
-    ]
-    if game.bets:
-        text.append("📋 <b>实时下注</b>")
-        for uid, b in game.bets.items():
-            name = await get_name(app, uid)
-            parts = []
-            for bt, amt in b.items():
-                if bt.startswith("spec_"):
-                    n = bt.split("_")[1]
-                    parts.append(f"🎯{n}{n}{n}×{amt}")
-                elif bt.startswith("sum_"):
-                    nums = [int(x) for x in bt.split("_")[1:]]
-                    label = "/".join(str(n) for n in nums) if len(nums) <= 2 else f"{nums[0]}-{nums[-1]}"
-                    parts.append(f"总{label}×{amt}")
-                else:
-                    parts.append(f"{SICBO_BET_NAMES.get(bt, bt)}×{amt}")
-            text.append(f"👤 {name} | {' '.join(parts)}")
-        text.append("")
-    text.append(f"⏰ <b>将在 {remain} 秒后自动开牌，无人下注将取消</b>")
-    text.append("🔒 选金额 → 点押注 → 等开牌")
-    text.append("💡 围骰:1:150　总点赔率 4·17=60｜5·16=30｜6·15=17｜7·14=12｜8·13=8｜9-12=6")
-    kb = [
-        [InlineKeyboardButton(f"💰{a}" if a < 1000 else f"💰{a // 1000}K", callback_data=f"sb_amt_{a}") for a in (500, 1000, 2000, 5000)],
-        [InlineKeyboardButton("🔴 大 (1:1)", callback_data="sb_bet_big"), InlineKeyboardButton("🔵 小 (1:1)", callback_data="sb_bet_small")],
-        [InlineKeyboardButton("🟡 单 (1:1)", callback_data="sb_bet_odd"), InlineKeyboardButton("🟢 双 (1:1)", callback_data="sb_bet_even")],
-        [InlineKeyboardButton("⚫ 任意豹子 (1:30)", callback_data="sb_bet_triple")],
-        [InlineKeyboardButton(f"豹子{sicbo_neg(i)}", callback_data=f"sb_bet_spec_{i}") for i in range(1, 7)],
-        *[[InlineKeyboardButton(f"总{sicbo_neg(n)}", callback_data=f"sb_bet_sum_{n}") for n in row]
-          for row in [list(range(4, 8)), list(range(8, 12)), list(range(12, 16)), list(range(16, 18))]],
-        [InlineKeyboardButton("🎮 立即开牌", callback_data="sb_start"), InlineKeyboardButton("❌ 终止", callback_data="sb_end")],
-    ]
-    return "\n".join(text), InlineKeyboardMarkup(kb)
 
 
-async def update_sicbo_ui(game, app):
-    if game.phase != "betting": return
-    text, kb = await build_sicbo_bet_board(game, app)
-    if game.game_msg_id:
-        await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=kb, parse_mode="HTML")
-    else:
-        msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
-        if msg: game.game_msg_id = msg.message_id
 
 
-async def settle_sicbo(game, app):
-    # 重入保护：手动开牌与 60 秒定时器可能同时触发，只派一次彩
-    if getattr(game, "settled", False):
-        return
-    game.settled = True
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, "🎲 <b>骰子</b>\n━━━━━━━━━━━━━━━━━\n🎲 <b>正在摇骰子...</b>", reply_markup=None, parse_mode="HTML")
-    # 发三个官方动画骰子（Telegram 官方动画 + 官方随机，无法控骰）
-    try:
-        dice = []
-        for _ in range(3):
-            dmsg = await app.bot.send_dice(game.chat_id, emoji="🎲")
-            dice.append(dmsg.dice.value)
-        total = sum(dice)
-        is_triple = dice[0] == dice[1] == dice[2]
-    except Exception:
-        logger.exception("send_dice 失败，回退本地随机")
-        dice, total, is_triple = game.play()
-    # 等动画播完再出结果（send_dice 的 value 在动画播放前就返回了）
-    # 三个骰子依次发出，最后一个动画最晚开始，需给足时间
-    await asyncio.sleep(5.5)
-    if is_triple:
-        result = "triple"
-    elif 11 <= total <= 17:
-        result = "big"
-    else:
-        result = "small"
-    if game.mode == "official":
-        sicbo_history[game.chat_id] = (sicbo_history[game.chat_id] + [(total, is_triple)])[-12:]
-        sicbo_daily_stats[game.chat_id][result] += 1
-
-    dice_display = " ".join(f"🎲{d}" for d in dice)
-    result_names = {"big": "🔴 大", "small": "🔵 小", "triple": "⚫ 豹子"}
-    parity = "单" if total % 2 == 1 else "双"
-    text = f"🎲 <b>骰子 结算</b>\n\n{dice_display}\n点数总和：<b>{total}</b> ({parity})\n结果：<b>{result_names[result]}</b>"
-    if is_triple: text += f" (豹子 {dice[0]})"
-    text += "\n━━━━━━━━━━━━━━━━━\n"
-
-    date = business_date()
-    bet_uids = list(game.bets.keys())
-    name_map = {}
-    for uid in bet_uids:
-        try: name_map[uid] = await get_name(app, uid)
-        except Exception: name_map[uid] = f"玩家{uid}"
-    # 阶段一：先计算每位玩家派彩（不动钱包，异常时不会误退已发放玩家的钱），同时生成逐项对账明细
-    payout_list = []
-    for uid, bets in game.bets.items():
-        win_amount = 0
-        total_bet = sum(bets.values())
-        detail = []
-        for bet_type, bet_amt in bets.items():
-            if bet_type == "big":
-                if result == "big":
-                    win_amount += bet_amt * 2
-                    detail.append(f"🔴大 {bet_amt} → ✅ 1:1 = +{bet_amt * 2}")
-                else:
-                    detail.append(f"🔴大 {bet_amt} → ❌")
-            elif bet_type == "small":
-                if result == "small":
-                    win_amount += bet_amt * 2
-                    detail.append(f"🔵小 {bet_amt} → ✅ 1:1 = +{bet_amt * 2}")
-                else:
-                    detail.append(f"🔵小 {bet_amt} → ❌")
-            elif bet_type == "odd":
-                if not is_triple and total % 2 == 1:
-                    win_amount += bet_amt * 2
-                    detail.append(f"🟡单 {bet_amt} → ✅ 1:1 = +{bet_amt * 2}")
-                else:
-                    detail.append(f"🟡单 {bet_amt} → ❌")
-            elif bet_type == "even":
-                if not is_triple and total % 2 == 0:
-                    win_amount += bet_amt * 2
-                    detail.append(f"🟢双 {bet_amt} → ✅ 1:1 = +{bet_amt * 2}")
-                else:
-                    detail.append(f"🟢双 {bet_amt} → ❌")
-            elif bet_type == "triple":
-                if is_triple:
-                    win_amount += bet_amt * 31
-                    detail.append(f"⚫豹子 {bet_amt} → ✅ 1:30 = +{bet_amt * 31}")
-                else:
-                    detail.append(f"⚫豹子 {bet_amt} → ❌")
-            elif bet_type.startswith("spec_"):
-                n = int(bet_type.split("_")[1])
-                if is_triple and dice[0] == n:
-                    pay = bet_amt * (1 + SICBO_SPEC_TRIPLE_PAYOUT)
-                    win_amount += pay
-                    detail.append(f"豹子{n} {bet_amt} → ✅ 1:{SICBO_SPEC_TRIPLE_PAYOUT} = +{pay}")
-                else:
-                    detail.append(f"豹子{n} {bet_amt} → ❌")
-            elif bet_type.startswith("sum_"):
-                nums = [int(x) for x in bet_type.split("_")[1:]]
-                label = "/".join(str(x) for x in nums) if len(nums) <= 2 else f"{nums[0]}-{nums[-1]}"
-                # 豹子通杀总点数（与「大/小」「单/双」一致）：开出豹子时总点数注全输
-                if not is_triple and total in nums:
-                    pay = bet_amt * (1 + SICBO_SUM_PAYOUT.get(total, 6))
-                    win_amount += pay
-                    detail.append(f"总点{label} {bet_amt} → ✅ 1:{SICBO_SUM_PAYOUT.get(total, 6)} = +{pay}")
-                else:
-                    detail.append(f"总点{label} {bet_amt} → ❌{'（豹子通杀）' if is_triple and total in nums else ''}")
-        net = win_amount - total_bet
-        payout_list.append((uid, win_amount, net, total_bet, detail))
-    # 阶段二：应用派彩（先算后付，阶段一异常则钱包未动可安全全额退款）
-    wallet = game_chips
-    lines = []
-    payouts_applied = False
-    paid_uids = set()   # 已实际派彩的玩家；异常退款时必须跳过，否则本金被重复退
-    try:
-        async with user_wallet_locks([uid for uid, *_ in payout_list]):
-            for uid, win_amount, net, total_bet, detail in payout_list:
-                wallet[game.chat_id][uid] += win_amount
-                paid_uids.add(uid)
-                if game.mode == "official": sicbo_profit_by_date[date][game.chat_id][uid] += net
-                lines.append(f"👤 {name_map[uid]}\n  " + "\n  ".join(detail) + f"\n  本金 {total_bet}｜派彩 {win_amount}｜盈亏 {net:+d}")
-                pending_game_bets[game.chat_id].get(uid, {}).pop("sicbo", None)
-        payouts_applied = True
-        save_data(); await asyncio.to_thread(force_save_now)
-        text += "\n\n".join(lines) if lines else "本局无人下注，已取消。"
-        if game.mode == "official":
-            rank = sorted(total_profit_by_game(sicbo_profit_by_date, game.chat_id).items(), key=lambda item: item[1], reverse=True)[:30]
-            text += "\n\n🏆 <b>骰子 累计盈利榜</b>\n"
-            text += "\n".join([f"{rank_marker(i)} {name_map.get(u, f'玩家{u}')}：{a:+d}" for i, (u, a) in enumerate(rank, 1)])
-        # 结算结果独立发新消息（先发结果保证不丢失，再删下注看板）；发新消息失败才降级为原地编辑
-        sent = await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
-        if sent is None:
-            await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=None, parse_mode="HTML")
-        else:
-            await safe_delete(app.bot, game.chat_id, game.game_msg_id)
-        if game.mode == "official":
-            for uid in game.bets.keys(): await emergency_if_needed(game.chat_id, uid, app)
-    except Exception:
-        logger.exception("骰子结算异常，群 %s", game.chat_id)
-        if payouts_applied:
-            await safe_send(app.bot, game.chat_id, "⚠️ 骰子派彩已完成，但结算展示异常，积分不受影响。")
-        else:
-            await safe_send(app.bot, game.chat_id, "⚠️ 骰子结算异常，本局将退款以保护玩家积分。")
-            # 只退尚未派彩的玩家：已派彩者的本金已含在 win_amount 内，重复退会白拿一份本金
-            for uid, bets in game.bets.items():
-                if uid not in paid_uids:
-                    wallet[game.chat_id][uid] += sum(bets.values())
-    finally:
-        active_sicbo_games.pop(game.chat_id, None)
-        save_data()
 
 
-async def start_sicbo_timer(game, app):
-    game.cancel_timer()
-    async def countdown():
-        start_ts = time.time()
-        while True:
-            await asyncio.sleep(1)
-            if time.time() - start_ts >= ROOM_WAIT_TIMEOUT: break
-            if int(time.time() - start_ts) % 10 == 0 and int(time.time() - start_ts) > 0:
-                if game.phase == "betting" and active_sicbo_games.get(game.chat_id) is game:
-                    await update_sicbo_ui(game, app)
-        if game.phase == "betting" and active_sicbo_games.get(game.chat_id) is game:
-            await settle_sicbo(game, app)
-    game.timer_task = asyncio.create_task(countdown())
 
 
-async def cmd_sb(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "骰子", "sb"): return
-    cid, uid = update.effective_chat.id, update.effective_user.id
-    if cid in active_sicbo_games:
-        g = active_sicbo_games[cid]
-        if g.phase == "betting":
-            text, kb = await build_sicbo_bet_board(g, context.application)
-            msg = await safe_send(context.bot, cid, text, reply_markup=kb, parse_mode="HTML")
-            if msg: g.game_msg_id = msg.message_id
-        else:
-            await update.message.reply_text("当前已有 骰子 进行中。")
-        return
-    game = SicboGame(cid, uid, current_game_mode())
-    active_sicbo_games[cid] = game
-    await update_sicbo_ui(game, context.application)
-    await start_sicbo_timer(game, context.application)
 
 
 # ==================== 通用 sendDice 游戏（足球/篮球/飞镖/保龄球） ====================
-SENDDICE_FIXED_BET = 500
 
 # 配置：每个游戏一个条目。bets 每项为 (key, 按钮标签, 赢的value集合, 赔率分子, 赔率分母)
-SENDDICE_GAMES = {
-    "football": {
-        "title": "⚽ 足球射门",
-        "emoji": "⚽",
-        "anim_seconds": 5.0,
-        "settle_hint": "正在开球...",
-        "value_desc": {1: "⚽进球", 2: "⚽进球", 3: "⚽进球", 4: "🧤没进", 5: "🧤没进"},
-        "bets": [
-            ("goal", "⚽ 进球 (1.4倍)", [1, 2, 3], 7, 5),
-            ("miss", "🧤 没进 (2.0倍)", [4, 5], 10, 5),
-        ],
-    },
-    "basketball": {
-        "title": "🏀 篮球投篮",
-        "emoji": "🏀",
-        "anim_seconds": 5.5,
-        "settle_hint": "正在投篮...",
-        "value_desc": {1: "🏀投进", 2: "🏀投进", 3: "🏀投进", 4: "🏀投进", 5: "🧱没进"},
-        "bets": [
-            ("in", "🏀 投进 (1.15倍)", [1, 2, 3, 4], 23, 20),
-            ("out", "🧱 没进 (3.6倍)", [5], 18, 5),
-        ],
-    },
-    "darts": {
-        "title": "🎯 飞镖",
-        "emoji": "🎯",
-        "anim_seconds": 5.5,
-        "settle_hint": "正在投镖...",
-        "value_desc": {1: "🔵1环", 2: "🔵2环", 3: "🔵3环", 4: "🔴4环", 5: "🔴5环", 6: "🎯靶心"},
-        "bets": [
-            ("bull", "🎯 靶心 (5.5倍)", [6], 11, 2),
-            ("big", "🔴 大4-6 (1.8倍)", [4, 5, 6], 9, 5),
-            ("small", "🔵 小1-3 (1.8倍)", [1, 2, 3], 9, 5),
-        ],
-    },
-    "bowling": {
-        "title": "🎳 保龄球",
-        "emoji": "🎳",
-        "anim_seconds": 5.5,
-        "settle_hint": "正在投球...",
-        "value_desc": {1: "击倒1瓶", 2: "击倒2瓶", 3: "击倒3瓶", 4: "击倒4瓶", 5: "击倒5瓶", 6: "🎳全中"},
-        "bets": [
-            ("strike", "🎳 全中 (5倍)", [6], 5, 1),
-            ("miss", "🚫 没全中 (1.15倍)", [1, 2, 3, 4, 5], 23, 20),
-        ],
-    },
-}
-
-active_basketball_games = {}
-active_darts_games = {}
-active_bowling_games = {}
-SENDDICE_ACTIVE = {"football": active_football_games, "basketball": active_basketball_games, "darts": active_darts_games, "bowling": active_bowling_games}
-
-SENDDICE_PROFIT = {"football": football_profit_by_date, "basketball": basketball_profit_by_date, "darts": darts_profit_by_date, "bowling": bowling_profit_by_date}
 
 
-class SendDiceGame:
-    def __init__(self, cid, owner_id, game_type, mode=None):
-        self.chat_id, self.owner_id, self.game_type = cid, owner_id, game_type
-        self.mode = mode or current_game_mode()
-        self.cfg = SENDDICE_GAMES[game_type]
-        self.phase = "betting"
-        self.settled = False
-        self.bets = {}
-        self.amounts = {}
-        self.last_amount = SENDDICE_FIXED_BET
-        self.game_msg_id = None
-        self.create_time = time.time()
-        self.timer_task = None
-
-    def place_bet(self, uid, bet_key, amount):
-        if uid not in self.bets:
-            self.bets[uid] = {}
-        self.bets[uid][bet_key] = self.bets[uid].get(bet_key, 0) + amount
-        pending_game_bets[self.chat_id][uid][self.game_type] = {
-            "amount": sum(self.bets[uid].values()),
-            "mode": self.mode,
-        }
-
-    def get_amount(self, uid):
-        return self.amounts.get(uid, SENDDICE_FIXED_BET)
-
-    def cancel_timer(self):
-        if self.timer_task and not self.timer_task.done():
-            self.timer_task.cancel()
-            self.timer_task = None
 
 
-async def build_senddice_board(game, app):
-    cfg = game.cfg
-    remain = max(0, int(ROOM_WAIT_TIMEOUT - (time.time() - game.create_time)))
-    pool_total = sum(sum(b.values()) for b in game.bets.values())
-    text = [
-        f"{cfg['title']}",
-        "━━━━━━━━━━━━━━━━━",
-        f"💰 <b>奖池</b>：{pool_total} 积分  |  💡 当前下注：{game.last_amount}",
-    ]
-    if game.bets:
-        bet_labels = {key: label for key, label, *_ in cfg["bets"]}
-        text.append("📋 <b>实时下注</b>")
-        for uid, b in game.bets.items():
-            name = await get_name(app, uid)
-            parts = [f"{bet_labels.get(bt, bt)}×{amt}" for bt, amt in b.items()]
-            text.append(f"👤 {name} | {' '.join(parts)}")
-        text.append("")
-    text.append(f"⏰ <b>将在 {remain} 秒后自动开奖，无人下注将取消</b>")
-    text.append("🔒 选金额 → 点选项下注 → 等开奖")
-    kb = [
-        [InlineKeyboardButton(f"💰{a}" if a < 1000 else f"💰{a // 1000}K", callback_data=f"sd_amt_{game.game_type}_{a}") for a in (500, 1000, 2000, 5000)],
-        [InlineKeyboardButton(label, callback_data=f"sd_bet_{game.game_type}_{key}") for key, label, *_ in cfg["bets"]],
-        [InlineKeyboardButton("🎮 开始游戏", callback_data=f"sd_start_{game.game_type}"), InlineKeyboardButton("❌ 终止", callback_data=f"sd_end_{game.game_type}")],
-    ]
-    return "\n".join(text), InlineKeyboardMarkup(kb)
 
 
-async def update_senddice_ui(game, app):
-    if game.phase != "betting": return
-    text, kb = await build_senddice_board(game, app)
-    if game.game_msg_id:
-        await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=kb, parse_mode="HTML")
-    else:
-        msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
-        if msg: game.game_msg_id = msg.message_id
 
 
-async def settle_senddice(game, app):
-    if getattr(game, "settled", False):
-        return
-    game.settled = True
-    cfg = game.cfg
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, f"{cfg['title']}\n━━━━━━━━━━━━━━━━━\n<b>{cfg['settle_hint']}</b>", reply_markup=None, parse_mode="HTML")
-    # 发官方动画（Telegram 官方动画 + 官方随机，无法控结果）
-    try:
-        dmsg = await app.bot.send_dice(game.chat_id, emoji=cfg["emoji"])
-        value = dmsg.dice.value
-    except Exception:
-        logger.exception("send_dice 失败，回退本地随机")
-        value = random.randint(1, 6)
-    # 等动画播完再出结果（send_dice 的 value 在动画播放前就返回了）
-    await asyncio.sleep(cfg.get("anim_seconds", 5.0))
-    date = business_date()
-    bet_uids = list(game.bets.keys())
-    name_map = {}
-    for uid in bet_uids:
-        try: name_map[uid] = await get_name(app, uid)
-        except Exception: name_map[uid] = f"玩家{uid}"
-    # 阶段一：先算派彩（不动钱包），同时生成逐项对账明细
-    payout_list = []
-    for uid, bets in game.bets.items():
-        win_amount = 0
-        total_bet = sum(bets.values())
-        detail = []
-        for bet_key, bet_amt in bets.items():
-            for key, label, win_values, num, den in cfg["bets"]:
-                if key != bet_key:
-                    continue
-                short = label.split(" (")[0]
-                if value in win_values:
-                    pay = bet_amt * num // den
-                    win_amount += pay
-                    mult = str(num // den) if num % den == 0 else f"{num / den:g}"
-                    detail.append(f"{short} {bet_amt} → ✅ ×{mult} = +{pay}")
-                else:
-                    detail.append(f"{short} {bet_amt} → ❌")
-                break
-        net = win_amount - total_bet
-        payout_list.append((uid, win_amount, net, total_bet, detail))
-    # 阶段二：应用派彩（先算后付）
-    wallet = game_chips
-    lines = []
-    payouts_applied = False
-    profit_dict = SENDDICE_PROFIT[game.game_type]
-    try:
-        for uid, win_amount, net, total_bet, detail in payout_list:
-            wallet[game.chat_id][uid] += win_amount
-            if game.mode == "official": profit_dict[date][game.chat_id][uid] += net
-            lines.append(f"👤 {name_map[uid]}\n  " + "\n  ".join(detail) + f"\n  本金 {total_bet}｜派彩 {win_amount}｜盈亏 {net:+d}")
-            pending_game_bets[game.chat_id].get(uid, {}).pop(game.game_type, None)
-        payouts_applied = True
-        save_data(); await asyncio.to_thread(force_save_now)
-        desc = cfg.get("value_desc", {}).get(value, f"值 {value}")
-        text = f"{cfg['title']} 结算\n\n结果：<b>{desc}</b>\n━━━━━━━━━━━━━━━━━\n"
-        text += "\n\n".join(lines) if lines else "本局无人下注，已取消。"
-        if game.mode == "official":
-            rank = sorted(total_profit_by_game(profit_dict, game.chat_id).items(), key=lambda item: item[1], reverse=True)[:30]
-            text += "\n\n🏆 <b>累计盈利榜</b>\n"
-            text += "\n".join([f"{rank_marker(i)} {name_map.get(u, f'玩家{u}')}：{a:+d}" for i, (u, a) in enumerate(rank, 1)])
-        sent = await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
-        if sent is None:
-            await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=None, parse_mode="HTML")
-        else:
-            await safe_delete(app.bot, game.chat_id, game.game_msg_id)
-        if game.mode == "official":
-            for uid in game.bets.keys(): await emergency_if_needed(game.chat_id, uid, app)
-    except Exception:
-        logger.exception("%s 结算异常，群 %s", game.game_type, game.chat_id)
-        if payouts_applied:
-            await safe_send(app.bot, game.chat_id, "⚠️ 派彩已完成，但结算展示异常，积分不受影响。")
-        else:
-            await safe_send(app.bot, game.chat_id, "⚠️ 结算异常，本局将退款以保护玩家积分。")
-            for uid, bets in game.bets.items(): wallet[game.chat_id][uid] += sum(bets.values())
-    finally:
-        SENDDICE_ACTIVE[game.game_type].pop(game.chat_id, None)
-        save_data()
 
 
-async def start_senddice_timer(game, app):
-    game.cancel_timer()
-    async def countdown():
-        start_ts = time.time()
-        while True:
-            await asyncio.sleep(1)
-            if time.time() - start_ts >= ROOM_WAIT_TIMEOUT: break
-            if int(time.time() - start_ts) % 10 == 0 and int(time.time() - start_ts) > 0:
-                if game.phase == "betting" and SENDDICE_ACTIVE[game.game_type].get(game.chat_id) is game:
-                    await update_senddice_ui(game, app)
-        if game.phase == "betting" and SENDDICE_ACTIVE[game.game_type].get(game.chat_id) is game:
-            await settle_senddice(game, app)
-    game.timer_task = asyncio.create_task(countdown())
 
 
-async def cmd_senddice(update, context, game_type):
-    if not await need_auth(update): return
-    cfg = SENDDICE_GAMES[game_type]
-    if not await require_group_chat(update, cfg["title"], game_type): return
-    cid, uid = update.effective_chat.id, update.effective_user.id
-    active_dict = SENDDICE_ACTIVE[game_type]
-    if cid in active_dict:
-        g = active_dict[cid]
-        if g.phase == "betting":
-            text, kb = await build_senddice_board(g, context.application)
-            msg = await safe_send(context.bot, cid, text, reply_markup=kb, parse_mode="HTML")
-            if msg: g.game_msg_id = msg.message_id
-        else:
-            await update.message.reply_text(f"当前已有 {cfg['title']} 进行中。")
-        return
-    game = SendDiceGame(cid, uid, game_type, current_game_mode())
-    active_dict[cid] = game
-    await update_senddice_ui(game, context.application)
-    await start_senddice_timer(game, context.application)
 
 
-async def cmd_basketball(update, context):
-    await cmd_senddice(update, context, "basketball")
 
 
-async def cmd_darts(update, context):
-    await cmd_senddice(update, context, "darts")
 
 
-async def cmd_bowling(update, context):
-    await cmd_senddice(update, context, "bowling")
 
 
-async def cmd_football(update, context):
-    await cmd_senddice(update, context, "football")
+
+
 
 
 # ==================== 梭哈（Five Card Stud） ====================
-STUD_ANTE = 200          # 梭哈底注
-STUD_MIN_RAISE = 100     # 梭哈最低加注
 # treys suit_int 是位掩码（s=1,h=2,d=4,c=8），映射为梭哈花色优先级 ♠>♥>♦>♣
-SUIT_ORDER = {1: 3, 2: 2, 4: 1, 8: 0}
 
 
-class StudGame:
-    """五张梭哈：1 暗 + 4 明，明牌最大者每轮先行动，无公共牌无盲注（仅底注）。"""
-
-    def __init__(self, cid, owner, mode=None):
-        self.chat_id, self.owner_id, self.mode, self.phase = cid, owner, mode or current_game_mode(), "waiting"
-        self.players, self.chips, self.initial_chips = [], {}, {}
-        self.total_bet, self.round_bets = {}, {}
-        self.hole, self.upcards = {}, {}   # 暗牌 1 张 / 明牌列表（0~4）
-        self.folded, self.all_in, self.acted = set(), set(), set()
-        self.raise_locked = set()
-        self.deck = []
-        self.pot = self.current_bet = self.actor_idx = 0
-        self.game_msg_id = self.action_msg_id = None
-        self.turn_task = self.wait_task = None
-        self.evaluator, self.settled, self.showdown_order = Evaluator(), False, []
-
-    def add(self, uid):
-        if self.phase != "waiting" or uid in self.players: return False
-        if game_chips[self.chat_id][uid] < MIN_ENTRY_CHIPS: return False
-        self.players.append(uid)
-        return True
-
-    def start(self):
-        if len(self.players) < 2: return False
-        random.shuffle(self.players)
-        self.cancel_wait(); self.folded.clear(); self.all_in.clear(); self.acted.clear(); self.raise_locked.clear()
-        self.pot = self.current_bet = 0; self.settled = False
-        self.deck = [Card.new(rank + suit) for rank in "23456789TJQKA" for suit in "shdc"]
-        random.shuffle(self.deck)
-        for uid in self.players:
-            self.chips[uid] = game_chips[self.chat_id][uid]; self.initial_chips[uid] = self.chips[uid]
-            self.total_bet[uid] = self.round_bets[uid] = 0
-            ante = min(STUD_ANTE, self.chips[uid]); self.chips[uid] -= ante; self.total_bet[uid] += ante; self.pot += ante
-            if not self.chips[uid]: self.all_in.add(uid)
-        # 发 1 暗 + 1 明
-        for uid in self.players:
-            self.hole[uid] = self.deck.pop()
-            self.upcards[uid] = [self.deck.pop()]
-        self.phase = "round0"
-        self._bring_in()
-        return True
-
-    def _upcard_key(self, card):
-        return (Card.get_rank_int(card), SUIT_ORDER.get(Card.get_suit_int(card), 0))
-
-    def _bring_in(self):
-        """明牌最大者先行动：所有明牌中 rank 最大者，同 rank 比花色 ♠>♥>♦>♣。跳过 all_in 玩家（他们无法加注）。"""
-        best_uid, best_key = None, None
-        for uid in self.players:
-            if uid in self.folded or uid in self.all_in: continue
-            for card in self.upcards.get(uid, []):
-                key = self._upcard_key(card)
-                if best_key is None or key > best_key:
-                    best_key, best_uid = key, uid
-        if best_uid is None:
-            best_uid = next((u for u in self.players if u not in self.folded), self.players[0])
-        self.actor_idx = self.players.index(best_uid)
-        return best_uid
-
-    def current(self):
-        if self.actor_idx >= len(self.players): return None
-        uid = self.players[self.actor_idx]
-        return uid if uid not in self.folded and uid not in self.all_in and uid not in self.acted else None
-
-    def _next(self):
-        n = len(self.players)
-        for offset in range(1, n + 1):
-            idx = (self.actor_idx + offset) % n
-            uid = self.players[idx]
-            if uid not in self.folded and uid not in self.all_in and uid not in self.acted:
-                self.actor_idx = idx
-                return uid
-        return None
-
-    def _round_done(self):
-        return all(uid in self.folded or uid in self.all_in or uid in self.acted for uid in self.players)
-
-    def action(self, uid, kind, extra=0):
-        if uid != self.current(): return False, "还没轮到你"
-        if kind == "fold":
-            self.folded.add(uid); desc = "弃牌"
-        elif kind == "check":
-            if self.round_bets[uid] != self.current_bet: return False, "必须跟注或加注"
-            self.acted.add(uid); desc = "过牌"
-        elif kind == "call":
-            paid = min(self.current_bet - self.round_bets[uid], self.chips[uid])
-            self.chips[uid] -= paid; self.round_bets[uid] += paid; self.total_bet[uid] += paid; self.pot += paid
-            if not self.chips[uid]: self.all_in.add(uid)
-            self.acted.add(uid); desc = f"跟注 {paid}"
-        elif kind == "allin":
-            paid = self.chips[uid]
-            old_bet = self.current_bet; new_total = self.round_bets[uid] + paid
-            self.chips[uid] = 0; self.round_bets[uid] = new_total; self.total_bet[uid] += paid; self.pot += paid; self.all_in.add(uid)
-            if new_total > old_bet:
-                raise_size = new_total - old_bet
-                prior_actors = self.acted.copy()
-                self.current_bet = new_total; self.acted = {uid}
-                if raise_size < STUD_MIN_RAISE:
-                    self.raise_locked.update(prior_actors - {uid})
-                else:
-                    self.raise_locked.clear()
-            else:
-                self.acted.add(uid)
-            desc = f"全下 {paid}"
-        elif kind == "raise":
-            try: extra = int(extra)
-            except (TypeError, ValueError): return False, "无效加注额"
-            to_call = self.current_bet - self.round_bets[uid]; paid = to_call + extra; new_total = self.round_bets[uid] + paid
-            if extra < STUD_MIN_RAISE: return False, f"最低加注为 {STUD_MIN_RAISE}"
-            if paid > self.chips[uid]: return False, f"积分不足：本次需要跟注 {to_call} + 加注 {extra}，共 {paid}，你只有 {self.chips[uid]}"
-            if new_total <= self.current_bet: return False, "加注后总下注必须高于当前下注"
-            if uid in self.raise_locked: return False, "短全下后已行动玩家只能跟注或弃牌"
-            self.chips[uid] -= paid; self.round_bets[uid] = new_total; self.total_bet[uid] += paid; self.pot += paid; self.current_bet = new_total; self.acted = {uid}; self.raise_locked.clear()
-            if not self.chips[uid]: self.all_in.add(uid)
-            desc = f"加注 {extra}"
-        else: return False, "未知操作"
-        alive = [p for p in self.players if p not in self.folded]
-        if len(alive) <= 1 or all(p in self.all_in for p in alive): self.phase = "showdown"
-        elif self._round_done(): self._end_round()
-        else: self._next()
-        return True, desc
-
-    def _deal_upcard(self):
-        for uid in self.players:
-            if uid not in self.folded:
-                self.upcards[uid].append(self.deck.pop())
-
-    def _end_round(self):
-        alive = [p for p in self.players if p not in self.folded]
-        # 所有存活玩家都已 all_in：直接进入 showdown，不要继续发牌（避免 _bring_in 选到 all_in 卡死）
-        if len(alive) <= 1 or all(p in self.all_in for p in alive):
-            self.round_bets = {uid: 0 for uid in self.players}; self.current_bet = 0; self.acted.clear(); self.raise_locked.clear()
-            self.phase = "showdown"; return
-        self.round_bets = {uid: 0 for uid in self.players}; self.current_bet = 0; self.acted.clear(); self.raise_locked.clear()
-        if self.phase == "round0": self._deal_upcard(); self.phase = "round1"
-        elif self.phase == "round1": self._deal_upcard(); self.phase = "round2"
-        elif self.phase == "round2": self._deal_upcard(); self.phase = "round3"
-        else: self.phase = "showdown"; return
-        self._bring_in()
-
-    def hand(self, uid):
-        return [self.hole[uid]] + self.upcards.get(uid, [])
-
-    async def showdown(self):
-        alive = [uid for uid in self.players if uid not in self.folded]
-        self.showdown_order = alive.copy()
-        # 只剩一名未弃牌玩家：直接收池
-        if len(alive) == 1:
-            winner = alive[0]
-            self.chips[winner] += self.pot
-            for uid in self.players:
-                game_chips[self.chat_id][uid] += self.chips[uid] - self.initial_chips.get(uid, game_chips[self.chat_id][uid])
-            save_data(); await asyncio.to_thread(force_save_now)
-            return [(winner, "最后赢家", self.pot, [("全部底池", self.pot)], {})]
-        # 至少两人：先补齐到 5 张牌（1暗+4明）再比大小，处理 early all-in 牌没发够的情况
-        for uid in alive:
-            while len(self.hand(uid)) < 5:
-                self.upcards[uid].append(self.deck.pop())
-        scores = {uid: self.evaluator.evaluate(self.hand(uid), []) for uid in alive}
-        names = {uid: HAND_NAME_CN.get(self.evaluator.class_to_string(self.evaluator.get_rank_class(score)), "未知") for uid, score in scores.items()}
-        payouts = distribute_side_pots(self.total_bet, scores)
-        for uid, item in payouts.items(): self.chips[uid] += item["amount"]
-        for uid in self.players:
-            game_chips[self.chat_id][uid] += self.chips[uid] - self.initial_chips.get(uid, game_chips[self.chat_id][uid])
-        save_data(); await asyncio.to_thread(force_save_now)
-        return [(uid, names[uid], item["amount"], item["details"], names) for uid, item in payouts.items()]
-
-    def cancel_timer(self):
-        task, self.turn_task = self.turn_task, None
-        if task and task is not asyncio.current_task() and not task.done(): task.cancel()
-
-    def cancel_wait(self):
-        task, self.wait_task = self.wait_task, None
-        if task and task is not asyncio.current_task() and not task.done(): task.cancel()
 
 
-async def stud_waiting_text(game, app):
-    players = [f"{i}. {await get_name(app, uid)}" for i, uid in enumerate(game.players, 1)]
-    return f"🃏 新一局梭哈\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players) + "\n\n点击加入，发起人可立即开始。\n⏰ 满 2 人后 60 秒自动开局，不足 2 人 60 秒后自动解散。"
 
 
-async def update_stud_waiting(game, app):
-    rows = [[InlineKeyboardButton("📥 加入游戏", callback_data="stud_join")]]
-    if len(game.players) >= 2: rows.append([InlineKeyboardButton("🎮 开始游戏", callback_data="stud_start")])
-    rows.append([InlineKeyboardButton("❌ 终止房间", callback_data="stud_end")])
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, await stud_waiting_text(game, app), reply_markup=InlineKeyboardMarkup(rows))
 
 
-async def stud_table_text(game, app):
-    phase = {"round0": "第1轮", "round1": "第2轮", "round2": "第3轮", "round3": "第4轮"}.get(game.phase, game.phase)
-    lines = [
-        f"🃏 梭哈｜{phase}",
-        "",
-        "━━━━━━━━━━━━━━━━━",
-        f"💰 奖池：{game.pot}｜当前下注：{game.current_bet}",
-        "━━━━━━━━━━━━━━━━━",
-        "",
-        "👥 玩家状态",
-        "",
-    ]
-    current = game.current()
-    if current:
-        lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需跟：{max(0, game.current_bet - game.round_bets[current])}")
-        lines.append("")
-    for index, uid in enumerate(game.players, 1):
-        status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
-        up = "  ".join(card_str(c) for c in game.upcards.get(uid, [])) or "无"
-        lines.extend([
-            f"{index}. {await get_name(app, uid)}",
-            f"   明牌：{up}",
-            f"   {status}｜投入 {game.total_bet[uid]}｜余筹 {game.chips[uid]}",
-            "",
-        ])
-    return "\n".join(lines)
 
 
-def stud_buttons(game, uid):
-    rows = [[InlineKeyboardButton("🃏 查看暗牌", callback_data="stud_hand")]]
-    if uid != game.current() or uid in game.folded or uid in game.all_in: return InlineKeyboardMarkup(rows)
-    to_call = max(0, game.current_bet - game.round_bets[uid])
-    rows.append([InlineKeyboardButton("❌ 弃牌", callback_data="stud_fold"), InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}", callback_data="stud_check" if not to_call else "stud_call")])
-    if uid not in game.raise_locked and game.chips[uid] >= to_call + STUD_MIN_RAISE:
-        rows.append([InlineKeyboardButton(f"🔼 加注 {STUD_MIN_RAISE}", callback_data=f"stud_raise_{STUD_MIN_RAISE}")])
-    if game.chips[uid] > 0: rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="stud_allin")])
-    return InlineKeyboardMarkup(rows)
 
 
-async def update_stud_table(game, app):
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, await stud_table_text(game, app), reply_markup=None)
 
 
-async def start_stud_turn_timer(game, app):
-    game.cancel_timer()
-    uid = game.current()
-    if uid is None:
-        # 兜底：current() 为空时主动检查是否应进 showdown（避免 all_in 后 _end_round 漏判卡死）
-        alive = [p for p in game.players if p not in game.folded]
-        if len(alive) <= 1 or all(p in game.all_in for p in alive) or game._round_done():
-            game.phase = "showdown"
-            await settle_stud(game, app)
-        return
-    await safe_delete(app.bot, game.chat_id, game.action_msg_id)
-    text = f"{await stud_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {TURN_TIMEOUT} 秒内行动。"
-    msg = await safe_send(app.bot, game.chat_id, text, reply_markup=stud_buttons(game, uid), parse_mode="HTML")
-    game.action_msg_id = msg.message_id if msg else None
-
-    async def timeout_action():
-        await asyncio.sleep(TURN_TIMEOUT)
-        if game.settled or game.phase == "showdown": return
-        if game.current() != uid: return
-        if game.round_bets[uid] == game.current_bet:
-            ok, _ = game.action(uid, "check")
-            if not ok: game.action(uid, "fold")
-            desc = "超时自动过牌"
-        else:
-            game.action(uid, "fold")
-            desc = "超时自动弃牌"
-        await safe_send(app.bot, game.chat_id, f"⏰ {desc}：{await get_name(app, uid)}")
-        if game.phase == "showdown":
-            await safe_delete(app.bot, game.chat_id, game.action_msg_id)
-            await settle_stud(game, app)
-        else: await update_stud_table(game, app); await start_stud_turn_timer(game, app)
-    game.turn_task = asyncio.create_task(timeout_action())
 
 
-async def settle_stud(game, app):
-    if game.settled: return
-    game.settled = True; game.cancel_timer(); game.cancel_wait()
-    try:
-        async with user_wallet_locks([uid for uid in game.players if uid >= 0]):
-            result = await game.showdown()
-        if not result: raise RuntimeError("梭哈摊牌未生成结算结果")
-        date, hand_types = business_date(), result[0][4]
-        name_ids = set(game.players) | set(game.showdown_order)
-        names = {uid: await get_name(app, uid) for uid in name_ids}
-        lines = ["🃏 <b>梭哈结算</b>", "━━━━━━━━━━━━━━━━━", ""]
-        if len(game.showdown_order) > 1:
-            lines.append("亮牌：")
-            for uid in game.players:
-                if uid in game.folded:
-                    lines.extend([f"{names[uid]}：弃牌", ""])
-                else:
-                    cards = "  ".join(card_str(c) for c in game.hand(uid))
-                    lines.extend([f"{names[uid]}：{cards}｜{hand_types.get(uid, '')}", ""])
-        else:
-            lines.append("亮牌：")
-            for uid in game.players:
-                if uid not in game.folded: lines.append(f"{names[uid]}：未亮牌")
-                else: lines.append(f"{names[uid]}：弃牌")
-            lines.append("")
-        lines.append("派奖：")
-        for uid, hand, amount, details, _ in sorted(result, key=lambda item: item[2], reverse=True):
-            lines.extend([f"{names[uid]}：{hand}｜+{amount}（{'，'.join(f'{pool}+{value}' for pool, value in details)}）", ""])
-        lines.append("投入 / 盈亏：")
-        for uid in game.players:
-            net = game.chips[uid] - game.initial_chips[uid]
-            if game.mode == "official":
-                stud_profit_by_date[date][game.chat_id][uid] += net
-            lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
-        if game.mode == "official":
-            rank = sorted(stud_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:50]
-            lines.extend(["", "🏆 <b>当日梭哈累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"])
-            lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
-        await safe_delete(app.bot, game.chat_id, game.action_msg_id)
-        delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
-        if delivered is None:
-            await safe_send(app.bot, game.chat_id, "⚠️ 梭哈已完成结算，但详细结算消息发送失败。")
-    except Exception:
-        logger.exception("梭哈结算异常")
-    finally:
-        if active_stud_games.get(game.chat_id) is game: active_stud_games.pop(game.chat_id, None)
-        if game.mode == "official":
-            for uid in game.players: await emergency_if_needed(game.chat_id, uid, app)
-        save_data(); await asyncio.to_thread(force_save_now)
 
 
-async def start_stud_wait_timeout(game, app):
-    game.cancel_wait()
-    async def countdown():
-        await asyncio.sleep(ROOM_WAIT_TIMEOUT)
-        if game.phase != "waiting" or active_stud_games.get(game.chat_id) is not game:
-            return
-        if len(game.players) >= 2:
-            if game.start():
-                await update_stud_table(game, app)
-                await start_stud_turn_timer(game, app)
-        else:
-            await refund_stud(game, app, "⌛ 梭哈等待 60 秒不足 2 人，房间已自动解散。")
-    game.wait_task = asyncio.create_task(countdown())
 
 
-async def refund_stud(game, app, notice):
-    game.cancel_timer(); game.cancel_wait()
-    game.phase = "cancelled"
-    if active_stud_games.get(game.chat_id) is game:
-        active_stud_games.pop(game.chat_id, None)
-    await safe_delete(app.bot, game.chat_id, game.action_msg_id)
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, notice, reply_markup=None)
-    save_data()
 
 
-async def cmd_suoha(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "梭哈", "suoha"): return
-    cid, uid = update.effective_chat.id, update.effective_user.id
-    game = active_stud_games.get(cid)
-    room_name, _ = poker_room_of(cid, uid, exclude_game=game)
-    if room_name:
-        await update.message.reply_text(f"⚠️ 你已在 {room_name} 房间，请先结束再开新的扑克游戏。"); return
-    mode = game.mode if game and game.phase == "waiting" else current_game_mode()
-    if game_chips[cid][uid] < MIN_ENTRY_CHIPS:
-        await update.message.reply_text(f"❌ 进入梭哈至少需要 {MIN_ENTRY_CHIPS} 积分。"); return
-    if game:
-        if game.phase != "waiting": await update.message.reply_text("当前已有进行中的梭哈。"); return
-        if game.add(uid):
-            await update_stud_waiting(game, context.application); await update.message.reply_text("已加入当前等待房间。")
-        else: await update.message.reply_text("你已在等待房间中。")
-        return
-    game = StudGame(cid, uid, mode); game.add(uid); active_stud_games[cid] = game
-    msg = await safe_send(context.bot, cid, await stud_waiting_text(game, context.application), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 加入游戏", callback_data="stud_join")], [InlineKeyboardButton("❌ 终止房间", callback_data="stud_end")]]))
-    if msg:
-        game.game_msg_id = msg.message_id
-        await start_stud_wait_timeout(game, context.application)
 
 
 # ==================== 炸金花（三张牌，闷牌偷鸡） ====================
@@ -3680,478 +2570,29 @@ async def cmd_jinhua(update, context):
 
 # ==================== 牛牛 PVP ====================
 
-NIUNIU_MIN_PLAYERS = 2
-NIUNIU_MAX_PLAYERS = 6
-NIUNIU_DEFAULT_ENTRY = 500
-NIUNIU_ENTRY_OPTIONS = [200, 500, 1000, 2000]
-NIU_NAMES = {0: "没牛", 1: "牛1", 2: "牛2", 3: "牛3", 4: "牛4", 5: "牛5", 6: "牛6", 7: "牛7", 8: "牛8", 9: "牛9", 10: "牛牛"}
-NIU_MULT = {0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 2, 8: 2, 9: 2, 10: 3}
-NIU_ROBOT_NAMES = ["🤖AI-阿牛", "🤖AI-小翠", "🤖AI-阿强", "🤖AI-阿珍", "🤖AI-大壮", "🤖AI-小芳"]
-NIU_ROBOT_BANK = 10000       # 机器人庄家奖池上限（也是初始额度），输赢后在此池内结算，封顶单局亏损
-
-
-class NiuNiuGame:
-    def __init__(self, cid, owner_id, entry_fee, mode=None):
-        self.chat_id, self.owner_id, self.mode = cid, owner_id, mode or current_game_mode()
-        self.entry_fee = entry_fee
-        self.phase = "waiting"
-        self.players = []           # uid 正=真人，负=电脑人
-        self.hands = {}
-        self.niu_info = {}
-        self.dealer_idx = 0
-        self.game_msg_id = None
-        self.create_time = time.time()
-        self.wait_task = None
-        self.settled = False
-        self.robot_names = {}       # {负uid: 名字}
-
-    def add(self, uid):
-        if self.phase != "waiting" or uid in self.players or len(self.players) >= NIUNIU_MAX_PLAYERS:
-            return False
-        if game_chips[self.chat_id][uid] < self.entry_fee * 3:
-            return False
-        self.players.append(uid)
-        return True
-
-    def add_robot(self):
-        if self.phase != "waiting" or len(self.players) >= NIUNIU_MAX_PLAYERS:
-            return False
-        robot_uid = -(100000 + random.randint(0, 899999))
-        while robot_uid in self.players:
-            robot_uid = -(100000 + random.randint(0, 899999))
-        used = set(self.robot_names.values())
-        available = [n for n in NIU_ROBOT_NAMES if n not in used]
-        name = random.choice(available) if available else f"🤖AI-{len(self.robot_names)+1}"
-        self.robot_names[robot_uid] = name
-        self.players.append(robot_uid)
-        return True
-
-    def leave(self, uid):
-        if self.phase != "waiting" or uid not in self.players:
-            return False
-        self.players.remove(uid)
-        self.robot_names.pop(uid, None)
-        return True
-
-    def start(self):
-        if self.phase != "waiting":
-            return False
-        if len(self.players) < NIUNIU_MIN_PLAYERS:
-            return False
-        self.phase = "dealing"
-        self.dealer_idx = random.randint(0, len(self.players) - 1)
-        deck = [Card.new(rank + suit) for rank in "23456789TJQKA" for suit in "shdc"]
-        random.shuffle(deck)
-        self.hands = {uid: [deck.pop() for _ in range(5)] for uid in self.players}
-        for uid, hand in self.hands.items():
-            self.niu_info[uid] = self.calc_niu(hand)
-        return True
-
-    @staticmethod
-    def card_point(card):
-        raw = Card.int_to_pretty_str(card).strip("[]")
-        rank = raw[:-1]
-        if rank in ('T', 'J', 'Q', 'K'): return 10
-        if rank == 'A': return 1
-        return int(rank)
-
-    @staticmethod
-    def calc_niu(hand):
-        """选3张凑10倍数，剩2张和的个位=牛值。返回 (niu_value, combo_indices, remaining_indices)"""
-        pts = [NiuNiuGame.card_point(c) for c in hand]
-        for i in range(5):
-            for j in range(i + 1, 5):
-                for k in range(j + 1, 5):
-                    if (pts[i] + pts[j] + pts[k]) % 10 == 0:
-                        rem = [r for r in range(5) if r not in (i, j, k)]
-                        niu = (pts[rem[0]] + pts[rem[1]]) % 10
-                        if niu == 0: niu = 10
-                        return niu, [i, j, k], rem
-        return 0, [], list(range(5))
-
-    def max_card(self, uid):
-        return max(self.hands[uid]) if uid in self.hands else 0
-
-    def is_robot(self, uid):
-        return uid < 0
-
-    def cancel_wait(self):
-        if self.wait_task and not self.wait_task.done():
-            self.wait_task.cancel()
-            self.wait_task = None
-
-
-def format_niu_cards(hand, combo):
-    """把凑牛的3张按牌点排序后用括号聚拢，其余牌跟在后面。没牛则全部平铺。"""
-    if combo:
-        combo_cards = sorted([hand[i] for i in combo], key=lambda c: NiuNiuGame.card_point(c))
-        combo_str = " ".join(card_str(c) for c in combo_cards)
-        rest = [hand[i] for i in range(5) if i not in combo]
-        rest_str = " ".join(card_str(c) for c in rest)
-        return f"({combo_str}) {rest_str}"
-    return " ".join(card_str(c) for c in hand)
-
-
-async def build_niuniu_wait_board(game, app):
-    """构建牛牛等待房间阶段的看板（文本+按钮），供首发包与重发复用。"""
-    remain = max(0, int(ROOM_WAIT_TIMEOUT - (time.time() - game.create_time)))
-    text = [
-        "🐂 <b>牛牛 庄家模式</b> 🐂",
-        "━━━━━━━━━━━━━━━━━",
-        f"💰 <b>底注</b>：{game.entry_fee} 积分",
-        f"👥 <b>已加入</b>：{len(game.players)}/{NIUNIU_MAX_PLAYERS}（最少 {NIUNIU_MIN_PLAYERS} 人）",
-        "",
-    ]
-    if game.players:
-        text.append("📋 <b>玩家列表</b>")
-        for uid in game.players:
-            if uid < 0:
-                text.append(f"🤖 {game.robot_names.get(uid, 'AI')}")
-            else:
-                text.append(f"👤 {await get_name(app, uid)}")
-        text.append("")
-    text.append("📌 庄家开局随机指定 · 庄家vs闲家独立结算")
-    text.append("📌 没牛~牛6=1倍 · 牛7~9=2倍 · 牛牛=3倍")
-    text.append(f"⏰ <b>{remain} 秒后自动开始或解散</b>")
-    kb = [[InlineKeyboardButton("📥 加入", callback_data="nn_join")]]
-    if len(game.players) < NIUNIU_MAX_PLAYERS:
-        kb.append([InlineKeyboardButton("🤖 加电脑人", callback_data="nn_robot")])
-    if len(game.players) >= NIUNIU_MIN_PLAYERS:
-        kb.append([InlineKeyboardButton("🎮 开始游戏", callback_data="nn_start")])
-    kb.append([InlineKeyboardButton("🚪 退出", callback_data="nn_leave"), InlineKeyboardButton("❌ 终止", callback_data="nn_end")])
-    return "\n".join(text), InlineKeyboardMarkup(kb)
-
-
-async def update_niuniu_ui(game, app):
-    if game.phase != "waiting": return
-    text, kb = await build_niuniu_wait_board(game, app)
-    if game.game_msg_id:
-        await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=kb, parse_mode="HTML")
-    else:
-        msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
-        if msg: game.game_msg_id = msg.message_id
-
-
-async def settle_niuniu(game, app):
-    if game.settled or game.phase != "waiting":
-        return
-    if not game.start():
-        return
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, "🐂 <b>牛牛</b>\n━━━━━━━━━━━━━━━━━\n🎴 <b>正在发牌...</b>", reply_markup=None, parse_mode="HTML")
-    await asyncio.sleep(2)
-
-    name_map = {}
-    for uid in game.players:
-        if uid < 0:
-            name_map[uid] = game.robot_names.get(uid, "🤖AI")
-        else:
-            try: name_map[uid] = await get_name(app, uid)
-            except Exception: name_map[uid] = f"玩家{uid}"
-
-    dealer_uid = game.players[game.dealer_idx]
-    dealer_niu = game.niu_info[dealer_uid][0]
-    dealer_mult = NIU_MULT[dealer_niu]
-
-    # 第一阶段：计算所有输赢（不操作钱包）
-    results = []
-    for uid in game.players:
-        if uid == dealer_uid: continue
-        p_niu = game.niu_info[uid][0]
-        p_win = p_niu > dealer_niu or (p_niu == dealer_niu and game.max_card(uid) > game.max_card(dealer_uid))
-        amount = game.entry_fee * (NIU_MULT[p_niu] if p_win else dealer_mult)
-        results.append((uid, p_niu, p_win, amount))
-
-    # 第二阶段：操作钱包 + 记录盈亏（庄家余额不足时按余额封顶赔付，杜绝负积分）
-    wallet = game_chips
-    date = business_date()
-    payouts_applied = False
-    lines = []
-    actual_dealer_delta = 0
-    robot_budget = 0
-    # 只要有机器人参与（庄家或闲家），就必须从现有系统奖池余额起步结算，
-    # 否则「真人庄家 vs 机器人闲家」时 robot_budget=0 会导致：庄家打赢机器人白赢(+0)、且写回时把原有奖池清零
-    if dealer_uid < 0 or any(u < 0 for u in game.players):
-        robot_budget = robot_bank[game.chat_id]
-        if robot_budget <= 0:
-            robot_budget = NIU_ROBOT_BANK
-
-    try:
-        # 多人结算：一次性获取所有涉及用户的钱包锁，按 uid 排序避免死锁
-        involved_uids = [uid for uid in game.players if uid >= 0]
-        if dealer_uid >= 0 and dealer_uid not in involved_uids:
-            involved_uids.append(dealer_uid)
-        async with user_wallet_locks(involved_uids):
-            for uid, p_niu, p_win, amount in results:
-                # 四种组合：庄家/闲家 谁是机器人，统一按"真人走钱包、机器人走系统奖池(robot_bank)"处理，
-                # 杜绝机器人当闲家时庄家白赢、或真人输给机器人闲家时积分凭空蒸发
-                if p_win:
-                    # 闲家赢：从庄家获得 amount
-                    if dealer_uid >= 0 and uid >= 0:
-                        # 真人对真人
-                        pay = min(amount, wallet[game.chat_id][dealer_uid])
-                        wallet[game.chat_id][dealer_uid] -= pay
-                        actual_dealer_delta -= pay
-                        wallet[game.chat_id][uid] += pay
-                        actual_net = pay
-                    elif dealer_uid >= 0 and uid < 0:
-                        # 真人庄家 vs 机器人闲家赢：庄家付给系统奖池（house 吸收，避免积分凭空消失）
-                        pay = min(amount, wallet[game.chat_id][dealer_uid])
-                        wallet[game.chat_id][dealer_uid] -= pay
-                        actual_dealer_delta -= pay
-                        robot_budget += pay
-                        actual_net = pay
-                    elif dealer_uid < 0 and uid >= 0:
-                        # 机器人庄家 vs 真人闲家赢：从系统奖池付给真人，封顶当前余额
-                        pay = max(0, min(amount, robot_budget))
-                        robot_budget -= pay
-                        wallet[game.chat_id][uid] += pay
-                        actual_net = pay
-                    else:
-                        # 机器人 vs 机器人：无实际钱包
-                        actual_net = 0
-                else:
-                    # 闲家输：向庄家支付 amount
-                    if dealer_uid >= 0 and uid >= 0:
-                        # 真人对真人
-                        pay = amount
-                        wallet[game.chat_id][uid] -= pay
-                        wallet[game.chat_id][dealer_uid] += pay
-                        actual_dealer_delta += pay
-                        actual_net = -pay
-                    elif dealer_uid >= 0 and uid < 0:
-                        # 真人庄家 vs 机器人闲家输：house 用系统奖池付给真人庄家，封顶余额
-                        pay = max(0, min(amount, robot_budget))
-                        robot_budget -= pay
-                        wallet[game.chat_id][dealer_uid] += pay
-                        actual_dealer_delta += pay
-                        actual_net = -pay
-                    elif dealer_uid < 0 and uid >= 0:
-                        # 机器人庄家 vs 真人闲家输：真人付给系统奖池
-                        pay = amount
-                        wallet[game.chat_id][uid] -= pay
-                        robot_budget += pay
-                        actual_net = -pay
-                    else:
-                        actual_net = 0
-                if game.mode == "official":
-                    if uid >= 0: niuniu_profit_by_date[date][game.chat_id][uid] += actual_net
-                    if dealer_uid >= 0: niuniu_profit_by_date[date][game.chat_id][dealer_uid] -= actual_net
-
-                p_hand = game.hands[uid]
-                p_combo = game.niu_info[uid][1]
-                p_cards = format_niu_cards(p_hand, p_combo)
-                result_icon = "✅" if p_win else "❌"
-                lines.append(f"  {result_icon} {name_map[uid]} | {p_cards} | <b>{NIU_NAMES[p_niu]}</b> | {actual_net:+d}")
-                lines.append("")
-
-            payouts_applied = True
-        save_data(); await asyncio.to_thread(force_save_now)
-        dealer_net = actual_dealer_delta
-        if dealer_uid < 0 or any(u < 0 for u in game.players):
-            # 奖池单局结算后封顶，避免无限累积（机器人当庄家或当闲家都需写回）
-            robot_bank[game.chat_id] = min(NIU_ROBOT_BANK, robot_budget)
-
-        # 庄家牌展示
-        d_hand = game.hands[dealer_uid]
-        d_combo = game.niu_info[dealer_uid][1]
-        d_cards = format_niu_cards(d_hand, d_combo)
-
-        text = [
-            "🐂 <b>牛牛 庄家结算</b>",
-            "━━━━━━━━━━━━━━━━━",
-            f"🎰 <b>庄家</b>：{name_map[dealer_uid]} | {' '.join(d_cards)} | <b>{NIU_NAMES[dealer_niu]}</b>（{dealer_mult}倍）| {dealer_net:+d}",
-            "",
-            "📋 <b>闲家结算</b>（括号内为凑牛的3张）",
-        ]
-        text.extend(lines)
-        if game.mode == "official":
-            rank = sorted(total_profit_by_game(niuniu_profit_by_date, game.chat_id).items(), key=lambda item: item[1], reverse=True)[:30]
-            text.append("")
-            text.append("🏆 <b>牛牛 累计盈利榜</b>")
-            for i, (u, a) in enumerate(rank, 1):
-                if u < 0: continue
-                uname = name_map.get(u)
-                if not uname:
-                    try: uname = await get_name(app, u)
-                    except Exception: uname = f"玩家{u}"
-                text.append(f"{rank_marker(i)} {uname}：{a:+d}")
-
-        await safe_delete(app.bot, game.chat_id, game.game_msg_id)
-        await safe_send_long(app.bot, game.chat_id, "\n".join(text), parse_mode="HTML")
-        if game.mode == "official":
-            for uid in game.players:
-                if uid >= 0: await emergency_if_needed(game.chat_id, uid, app)
-    except Exception:
-        logger.exception("牛牛结算异常，群 %s", game.chat_id)
-        if payouts_applied:
-            await safe_send(app.bot, game.chat_id, "⚠️ 牛牛派彩已完成，但结算展示异常，积分不受影响。")
-        else:
-            await safe_send(app.bot, game.chat_id, "⚠️ 牛牛结算异常，本局作废，积分未变动。")
-    finally:
-        game.settled = True
-        active_niuniu_games.pop(game.chat_id, None)
-        save_data()
-
-
-async def start_niuniu_wait_timeout(game, app):
-    game.cancel_wait()
-    async def expire():
-        await asyncio.sleep(ROOM_WAIT_TIMEOUT)
-        if game.phase != "waiting" or active_niuniu_games.get(game.chat_id) is not game:
-            return
-        if len(game.players) >= NIUNIU_MIN_PLAYERS:
-            await settle_niuniu(game, app)
-        else:
-            active_niuniu_games.pop(game.chat_id, None)
-            await safe_edit(app.bot, game.chat_id, game.game_msg_id, f"⌛ 牛牛等待 {ROOM_WAIT_TIMEOUT} 秒人数不足，房间已解散。", reply_markup=None)
-    game.wait_task = asyncio.create_task(expire())
-
-
-async def cmd_nn(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "牛牛", "nn"): return
-    cid, uid = update.effective_chat.id, update.effective_user.id
-    if cid in active_niuniu_games:
-        g = active_niuniu_games[cid]
-        if g.phase == "waiting":
-            text, kb = await build_niuniu_wait_board(g, context.application)
-            msg = await safe_send(context.bot, cid, text, reply_markup=kb, parse_mode="HTML")
-            if msg: g.game_msg_id = msg.message_id
-        else:
-            await update.message.reply_text("当前已有 牛牛 进行中。")
-        return
-    entry = NIUNIU_DEFAULT_ENTRY
-    if context.args:
-        try: entry = int(context.args[0])
-        except ValueError: pass
-    if entry not in NIUNIU_ENTRY_OPTIONS: entry = NIUNIU_DEFAULT_ENTRY
-    game = NiuNiuGame(cid, uid, entry, current_game_mode())
-    active_niuniu_games[cid] = game
-    await update_niuniu_ui(game, context.application)
-    await start_niuniu_wait_timeout(game, context.application)
 
 
 
-SLOT_SYMBOLS = ["🍒", "🍋", "🍊", "🍇", "🔔", "💎", "7️⃣"]
 
 
-def get_slot_result():
-    """5 格老虎机：按任意位置相同数量结算（F 大奖流支付表）。"""
-    res = [random.choice(SLOT_SYMBOLS) for _ in range(5)]
-    # 取出现次数最多的符号，按最大匹配数结算（5连 > 4连 > 3连 > 无奖）
-    top = max(res, key=res.count)
-    n = res.count(top)
-    if n == 5:
-        return res, 300 if top == "7️⃣" else (150 if top == "💎" else 80)
-    if n == 4:
-        return res, 50 if top == "7️⃣" else (25 if top == "💎" else 12)
-    if n == 3:
-        return res, 12 if top == "7️⃣" else (6 if top == "💎" else 3)
-    return res, 0
 
 
-async def cmd_lhj(update, context):
-    if not await need_auth(update): return
-    uid = update.effective_user.id
-    
-    # 彻底并发：不再限制忙碌状态
-    # if player_is_busy(cid, uid): ...
-
-    # 冷却检查：命令防刷与抽奖冷却同步（统一 5 秒窗口），静默忽略
-    now = time.time()
-    if now - lhj_cmd_spam[uid] < SLOT_COOLDOWN or now - user_cooldowns[uid] < SLOT_COOLDOWN:
-        return
-    lhj_cmd_spam[uid] = now
-    
-    # 弹出选择界面：1次 / 5次 / 10次 / 20次（绑定发起人，他人点击无效）
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 1 次", callback_data=f"lhj_spin_1_{uid}"), InlineKeyboardButton("🎮 5 次", callback_data=f"lhj_spin_5_{uid}")],
-        [InlineKeyboardButton("⚡ 10 次", callback_data=f"lhj_spin_10_{uid}"), InlineKeyboardButton("💥 20 次", callback_data=f"lhj_spin_20_{uid}")],
-        [InlineKeyboardButton("🎲 50 次", callback_data=f"lhj_spin_50_{uid}"), InlineKeyboardButton("💯 100 次", callback_data=f"lhj_spin_100_{uid}")],
-        [InlineKeyboardButton("🃏 200 次", callback_data=f"lhj_spin_200_{uid}"), InlineKeyboardButton("🔥 500 次", callback_data=f"lhj_spin_500_{uid}")],
-        [InlineKeyboardButton("🌟 1000 次", callback_data=f"lhj_spin_1000_{uid}"), InlineKeyboardButton("💠 2000 次", callback_data=f"lhj_spin_2000_{uid}")],
-        [InlineKeyboardButton("🌈 5000 次", callback_data=f"lhj_spin_5000_{uid}"), InlineKeyboardButton("👑 10000 次", callback_data=f"lhj_spin_10000_{uid}")],
-    ])
-    await update.message.reply_text(
-        f"🎰 <b>老虎机</b>（单次 {SLOT_BET} 积分）\n\n请选择转动次数：\n💡 5次={SLOT_BET*5}｜10次={SLOT_BET*10}｜20次={SLOT_BET*20}｜50次={SLOT_BET*50}｜100次={SLOT_BET*100}｜200次={SLOT_BET*200}｜500次={SLOT_BET*500}｜1000次={SLOT_BET*1000}｜2000次={SLOT_BET*2000}｜5000次={SLOT_BET*5000}｜10000次={SLOT_BET*10000}",
-        reply_markup=kb, parse_mode="HTML")
 
 
-async def run_slot_spins(context, cid, uid, count, answer=None):
-    """老虎机连抽核心：扣款、开奖、一条消息结算。answer 用于按钮回调提示。"""
-    mode = current_game_mode()
-    wallet = game_chips
-    now = time.time()
-    if now - user_cooldowns[uid] < SLOT_COOLDOWN:
-        if answer: await answer("🕒 冷却中，稍等几秒再抽", show_alert=True)
-        return False, ""
-    total_cost = SLOT_BET * count
-    if wallet[cid][uid] < total_cost:
-        if answer: await answer(f"❌ 积分不足，{count} 连抽需要 {total_cost} 积分", show_alert=True)
-        return False, ""
-    
-    # 设置冷却（先设冷却，避免异常后还能立即重抽）
-    user_cooldowns[uid] = now
 
-    # 全局并发限制：防止多人同时狂抽导致 Telegram 限流，卡死所有游戏
-    async with SLOT_SPIN_SEM:
-        date = business_date()
-        name = await get_name(context.application, uid)
-        results = [get_slot_result() for _ in range(count)]
-        total_payout = sum(SLOT_BET * m for _, m in results)
 
-        # 结果消息（纯字符串拼接，无 await）
-        if count == 1:
-            res_str = " | ".join(results[0][0])
-            m = results[0][1]
-            if m > 0:
-                result_text = f"🎰 <b>老虎机结果：[ {res_str} ]</b>\n\n🎉 恭喜 {name} 中了 {m} 倍！获得 {total_payout} 积分。"
-            else:
-                result_text = f"🎰 <b>老虎机结果：[ {res_str} ]</b>\n\n💸 很遗憾，{name} 未中奖，失去了 {SLOT_BET} 积分。"
-        elif count <= 20:
-            lines = []
-            for i, (res, m) in enumerate(results, 1):
-                rs = " | ".join(res)
-                lines.append(f"{i}. [ {rs} ] " + (f"🎉 ×{m}" if m > 0 else "💸"))
-            result_text = f"🎰 <b>老虎机 {count} 连抽</b>｜👤 {name}\n━━━━━━━━━━━━━━━━━\n" + "\n".join(lines) + f"\n━━━━━━━━━━━━━━━━━\n💰 总投入 {total_cost}｜总赢回 {total_payout}｜净 {total_payout - total_cost:+d}"
-        else:
-            # 50/100 连抽：按倍率统计，避免超长消息
-            tally = {}
-            for _, m in results:
-                tally[m] = tally.get(m, 0) + 1
-            parts = [f"未中奖 {tally.get(0, 0)} 次"] if tally.get(0) else []
-            for m in sorted((k for k in tally if k > 0), reverse=True):
-                parts.append(f"🎉 中 {m} 倍 × {tally[m]} 次")
-            result_text = f"🎰 <b>老虎机 {count} 连抽</b>｜👤 {name}\n━━━━━━━━━━━━━━━━━\n" + "\n".join(parts) + f"\n━━━━━━━━━━━━━━━━━\n💰 总投入 {total_cost}｜总赢回 {total_payout}｜净 {total_payout - total_cost:+d}"
 
-        # 榜单（含 await get_name，必须在动钱包之前完成）
-        if mode == "official":
-            s_rank = sorted(total_profit_by_game(slot_profit_by_date, cid).items(), key=lambda item: item[1], reverse=True)[:50]
-            # 把本局已确定的净赢并入展示，避免榜单滞后一局（钱包更新在下方，此处仅用于显示）
-            session_net = total_payout - total_cost
-            if session_net != 0:
-                shown = dict(s_rank)
-                shown[uid] = shown.get(uid, 0) + session_net
-                s_rank = sorted(shown.items(), key=lambda item: item[1], reverse=True)[:50]
-            result_text += "\n\n🏆 <b>老虎机累计盈利榜（总数）</b>\n"
-            result_text += "\n".join([f"{rank_marker(i)} {await get_name(context.application, u)}：{a:+d}" for i, (u, a) in enumerate(s_rank, 1)])
 
-        # ===== 所有 await 成功后才动钱包，异常则白拿/白扣都不会发生 =====
-        # 用户级锁：同一用户并发连抽/其他扣款路径串行化，防止检查余额后、扣款前被其他路径扣减导致负分
-        async with wallet_locks[uid]:
-            if wallet[cid][uid] < total_cost:
-                user_cooldowns[uid] = 0  # 余额不足时回滚冷却，允许立即重试
-                if answer: await answer(f"❌ 积分不足，{count} 连抽需要 {total_cost} 积分", show_alert=True)
-                return False, ""
-            wallet[cid][uid] -= total_cost
-            if mode == "official":
-                for _, m in results:
-                    net = SLOT_BET * m - SLOT_BET
-                    slot_profit_by_date[date][cid][uid] += net
-            wallet[cid][uid] += total_payout
-            save_data()
-        if mode == "official": await emergency_if_needed(cid, uid, context.application)
-    return True, result_text
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -4762,14 +3203,9 @@ async def cmd_end(update, context):
     poker = active_poker_games.get(cid)
     race = active_horse_races.get(cid)
     bj = active_blackjack_games.get(cid)
-    bjl = active_baccarat_games.get(cid)
-    sb_game = active_sicbo_games.get(cid)
-    nn_game = active_niuniu_games.get(cid)
-    stud = active_stud_games.get(cid)
     jinhua = active_jinhua_games.get(cid)
-    sd_games = [SENDDICE_ACTIVE[gt].get(cid) for gt in ("football", "basketball", "darts", "bowling")]
 
-    if not any([poker, race, bj, bjl, sb_game, nn_game, stud, jinhua] + sd_games):
+    if not any([poker, race, bj, jinhua]):
         await update.message.reply_text("当前没有进行中的游戏。"); return
 
     notices = []
@@ -4781,11 +3217,6 @@ async def cmd_end(update, context):
         if is_bot_admin(uid) or uid in poker.players:
             await refund_poker(poker, context.application, "🛑 德州扑克已终止，积分已退回。")
             notices.append("德州已退款")
-
-    if stud and (target_all or arg in ["suoha", "stud", "梭哈"]):
-        if is_bot_admin(uid) or uid in stud.players:
-            await refund_stud(stud, context.application, "🛑 梭哈已终止，积分已退回。")
-            notices.append("梭哈已退款")
 
     if jinhua and (target_all or arg in ["jinhua", "zjh", "炸金花", "金花"]):
         if is_bot_admin(uid) or uid in jinhua.players:
@@ -4811,50 +3242,6 @@ async def cmd_end(update, context):
             await safe_edit(context.bot, cid, bj.game_msg_id, "🛑 21点已终止，积分已退回。", reply_markup=None)
             notices.append("21点已退款")
 
-    if bjl: # 百家乐特殊判断，因为 arg 可能对应 bjl
-        if target_all or arg in ["bjl", "baccarat", "百家乐"]:
-            if is_bot_admin(uid) or uid in bjl.bets.keys():
-                bjl.cancel_timer()
-                wallet = game_chips
-                for p_uid, b_dict in bjl.bets.items():
-                    for amount in b_dict.values(): wallet[cid][p_uid] += amount
-                    pending_game_bets[cid].get(p_uid, {}).pop("baccarat", None)
-                active_baccarat_games.pop(cid, None)
-                await safe_edit(context.bot, cid, bjl.game_msg_id, "🛑 百家乐已终止，积分已退回。", reply_markup=None)
-                notices.append("百家乐已退款")
-
-
-    if sb_game and (target_all or arg in ["sb", "sicbo", "骰子"]):
-        if is_bot_admin(uid) or uid in sb_game.bets.keys() or uid == sb_game.owner_id:
-            sb_game.cancel_timer()
-            wallet = game_chips
-            for p_uid, b_dict in sb_game.bets.items():
-                wallet[cid][p_uid] += sum(b_dict.values())
-                pending_game_bets[cid].get(p_uid, {}).pop("sicbo", None)  # 清退款记录，避免重启后二次退款
-            active_sicbo_games.pop(cid, None)
-            await safe_edit(context.bot, cid, sb_game.game_msg_id, "🛑 骰子已终止，积分已退回。", reply_markup=None)
-            notices.append("骰子已退款")
-
-    if nn_game and (target_all or arg in ["nn", "niuniu", "牛牛"]):
-        if is_bot_admin(uid) or uid in nn_game.players or uid == nn_game.owner_id:
-            nn_game.cancel_wait()
-            active_niuniu_games.pop(cid, None)
-            await safe_edit(context.bot, cid, nn_game.game_msg_id, "🛑 牛牛已终止。", reply_markup=None)
-            notices.append("牛牛已终止")
-
-    for gt, gt_cn in (("football", "足球"), ("basketball", "篮球"), ("darts", "飞镖"), ("bowling", "保龄球")):
-        sdg = SENDDICE_ACTIVE[gt].get(cid)
-        if sdg and (target_all or arg in [gt, gt_cn]):
-            if is_bot_admin(uid) or uid in sdg.bets or uid == sdg.owner_id:
-                sdg.cancel_timer()
-                wallet = game_chips
-                for p_uid, b_dict in sdg.bets.items():
-                    wallet[cid][p_uid] += sum(b_dict.values())
-                    pending_game_bets[cid].get(p_uid, {}).pop(gt, None)  # 清退款记录，避免重启后二次退款
-                SENDDICE_ACTIVE[gt].pop(cid, None)
-                await safe_edit(context.bot, cid, sdg.game_msg_id, f"🛑 {gt_cn}已终止，积分已退回。", reply_markup=None)
-                notices.append(f"{gt_cn}已退款")
-
     if not notices:
         await update.message.reply_text("❌ 权限不足或未找到匹配的游戏指令。用法示例：/end dz")
     else:
@@ -4870,33 +3257,16 @@ def player_is_busy(cid, uid):
     bj = active_blackjack_games.get(cid)
     if bj and bj.phase != "waiting" and uid in bj.players:
         return True
-    bjl = active_baccarat_games.get(cid)
-    if bjl and bjl.phase == "betting" and uid in bjl.bets:
-        return True
-    sicbo = active_sicbo_games.get(cid)
-    if sicbo and sicbo.phase == "betting" and uid in sicbo.bets:
-        return True
-    niuniu = active_niuniu_games.get(cid)
-    if niuniu and niuniu.phase != "waiting" and uid in niuniu.players:
-        return True
-    stud = active_stud_games.get(cid)
-    if stud and stud.phase != "waiting" and uid in stud.players:
-        return True
     jinhua = active_jinhua_games.get(cid)
     if jinhua and jinhua.phase != "waiting" and uid in jinhua.players:
         return True
-    for gt in ("football", "basketball", "darts", "bowling"):
-        sdg = SENDDICE_ACTIVE[gt].get(cid)
-        if sdg and sdg.phase == "betting" and uid in sdg.bets:
-            return True
     return False
 
 
 def poker_room_of(cid, uid, exclude_game=None):
-    """玩家所在的扑克游戏房间（德州/梭哈/炸金花，含等待房）。exclude_game 用于排除当前房间。
+    """玩家所在的扑克游戏房间（德州/炸金花，含等待房）。exclude_game 用于排除当前房间。
     返回 (游戏名, 游戏对象)，不在任何房间则返回 (None, None)。"""
     for name, g in (("德州", active_poker_games.get(cid)),
-                    ("梭哈", active_stud_games.get(cid)),
                     ("炸金花", active_jinhua_games.get(cid))):
         if g and g is not exclude_game and uid in g.players:
             return name, g
@@ -4958,7 +3328,7 @@ async def cmd_cx(update, context):
     date = business_date()
     texas = poker_profit_by_date[date].get(cid, {})
     combined = {}
-    for g in (blackjack_profit_by_date, race_profit_by_date, baccarat_profit_by_date, slot_profit_by_date, sicbo_profit_by_date, niuniu_profit_by_date, football_profit_by_date, basketball_profit_by_date, darts_profit_by_date, bowling_profit_by_date, stud_profit_by_date, jinhua_profit_by_date):
+    for g in (blackjack_profit_by_date, race_profit_by_date, jinhua_profit_by_date):
         for uid, v in total_profit_by_game(g, cid).items():
             combined[uid] = combined.get(uid, 0) + v
     if not texas and not combined:
@@ -4988,7 +3358,7 @@ async def cmd_ph(update, context):
         lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value}")
     # 累计盈利榜（含老虎机），方便随时核对战绩，不再只能从抽奖结果里看滞后的榜单
     combined = {}
-    for g in (blackjack_profit_by_date, race_profit_by_date, baccarat_profit_by_date, slot_profit_by_date, sicbo_profit_by_date, niuniu_profit_by_date, football_profit_by_date, basketball_profit_by_date, darts_profit_by_date, bowling_profit_by_date, stud_profit_by_date, jinhua_profit_by_date):
+    for g in (blackjack_profit_by_date, race_profit_by_date, jinhua_profit_by_date):
         for u, v in total_profit_by_game(g, cid).items():
             combined[u] = combined.get(u, 0) + v
     if combined:
@@ -5268,176 +3638,6 @@ async def on_button(update, context):
                 await safe_edit(context.bot, cid, game.game_msg_id, "🛑 21点已手动终止，积分已退回。", reply_markup=None)
             return
 
-        # --- 百家乐 回调 ---
-        if data.startswith("bjl_"):
-            game = active_baccarat_games.get(cid)
-            if not game: await q.answer("游戏已结束", show_alert=True); return
-            if data.startswith("bjl_bet_"):
-                side = data.split("_")[2]
-                bet_amount = BACCARAT_FIXED_BET # 引用全局配置
-                wallet = game_chips
-                async with wallet_locks[uid]:
-                    if wallet[cid][uid] < bet_amount: await q.answer("积分不足", show_alert=True); return
-                    wallet[cid][uid] -= bet_amount
-                game.place_bet(uid, side, bet_amount)
-                side_names = {"player":"闲", "banker":"庄", "tie":"和"}
-                await q.answer(f"✅ 押注 {side_names.get(side, side)} 成功 (累计: {game.bets[uid][side]})", show_alert=False)
-                await update_baccarat_ui(game, context.application)
-            elif data == "bjl_start":
-                if uid != game.owner_id: await q.answer("仅发起人可开始", show_alert=True); return
-                if not game.bets:
-                    game.cancel_timer()
-                    active_baccarat_games.pop(cid, None)
-                    await q.answer("无人下注，本局已取消", show_alert=True)
-                    await safe_edit(context.bot, cid, game.game_msg_id, "🛑 百家乐无人下注，本局已取消。", reply_markup=None)
-                    return
-                await settle_baccarat(game, context.application)
-            elif data == "bjl_end":
-                if not is_bot_admin(uid) and uid != game.owner_id: await q.answer("权限不足", show_alert=True); return
-                game.cancel_timer()
-                # 退还本局下注
-                wallet = game_chips
-                for p_uid, b_dict in game.bets.items():
-                    for amount in b_dict.values(): wallet[cid][p_uid] += amount
-                    pending_game_bets[cid].get(p_uid, {}).pop("baccarat", None)
-                active_baccarat_games.pop(cid, None)
-                await safe_edit(context.bot, cid, game.game_msg_id, "🛑 百家乐已手动终止，积分已退回。", reply_markup=None)
-            return
-
-        # --- 骰子 回调 ---
-        if data.startswith("sb_"):
-            game = active_sicbo_games.get(cid)
-            if not game: await q.answer("游戏已结束", show_alert=True); return
-            # 下注窗已关闭（开牌动画/已结算）时，拒绝任何下注类回调，杜绝关窗不彻底
-            if data.startswith("sb_bet") and game.phase != "betting":
-                await q.answer("下注已截止", show_alert=True); return
-            if data.startswith("sb_amt_"):
-                amt = int(data.split("_")[2])
-                game.amounts[uid] = amt; game.last_amount = amt
-                await q.answer(f"已切换到 {amt} 积分")
-                await update_sicbo_ui(game, context.application)
-            elif data.startswith("sb_bet_spec_"):
-                n = int(data.split("_")[3]); amt = game.get_amount(uid)
-                async with wallet_locks[uid]:
-                    if game_chips[cid][uid] < amt: await q.answer("积分不足", show_alert=True); return
-                    game_chips[cid][uid] -= amt
-                game.place_bet(uid, f"spec_{n}", amt)
-                await q.answer(f"✅ 押围骰 {n}{n}{n} ({amt}积分)")
-                await update_sicbo_ui(game, context.application)
-            elif data.startswith("sb_bet_sum_"):
-                s = int(data.split("_")[3]); amt = game.get_amount(uid)
-                async with wallet_locks[uid]:
-                    if game_chips[cid][uid] < amt: await q.answer("积分不足", show_alert=True); return
-                    game_chips[cid][uid] -= amt
-                game.place_bet(uid, f"sum_{s}", amt)
-                await q.answer(f"✅ 押总点数 {s} ({amt}积分)")
-                await update_sicbo_ui(game, context.application)
-            elif data.startswith("sb_bet_"):
-                bet_type = data.split("_")[2]; amt = game.get_amount(uid)
-                async with wallet_locks[uid]:
-                    if game_chips[cid][uid] < amt: await q.answer("积分不足", show_alert=True); return
-                    game_chips[cid][uid] -= amt
-                game.place_bet(uid, bet_type, amt)
-                await q.answer(f"✅ 押 {SICBO_BET_NAMES.get(bet_type, bet_type)} ({amt}积分)")
-                await update_sicbo_ui(game, context.application)
-            elif data == "sb_start":
-                if uid != game.owner_id: await q.answer("仅发起人可开始", show_alert=True); return
-                await q.answer("🎲 正在开牌...")
-                game.phase = "rolling"   # 立即关闭下注窗，5.5s 动画期间禁止再押注
-                game.cancel_timer(); await settle_sicbo(game, context.application)
-            elif data == "sb_end":
-                if not is_bot_admin(uid) and uid != game.owner_id: await q.answer("权限不足", show_alert=True); return
-                game.cancel_timer()
-                for p_uid, b_dict in game.bets.items():
-                    game_chips[cid][p_uid] += sum(b_dict.values())
-                    pending_game_bets[cid].get(p_uid, {}).pop("sicbo", None)  # 清退款记录，避免重启后二次退款
-                active_sicbo_games.pop(cid, None)
-                await safe_edit(context.bot, cid, game.game_msg_id, "🛑 骰子已手动终止，积分已退回。", reply_markup=None)
-            return
-
-        # --- 通用 sendDice 回调（足球/篮球/飞镖/保龄球） ---
-        if data.startswith("sd_"):
-            parts = data.split("_")
-            if len(parts) < 3: await q.answer("无效操作", show_alert=True); return
-            action, game_type = parts[1], parts[2]
-            active_dict = SENDDICE_ACTIVE.get(game_type)
-            if not active_dict: await q.answer("游戏类型无效", show_alert=True); return
-            game = active_dict.get(cid)
-            if not game: await q.answer("游戏已结束", show_alert=True); return
-            if action == "amt":
-                amt = int(parts[3])
-                game.amounts[uid] = amt; game.last_amount = amt
-                await q.answer(f"已切换到 {amt} 积分")
-                await update_senddice_ui(game, context.application)
-            elif action == "bet":
-                bet_key = parts[3]
-                amt = game.get_amount(uid)
-                if game.phase != "betting": await q.answer("已开奖，无法下注", show_alert=True); return
-                async with wallet_locks[uid]:
-                    if game_chips[cid][uid] < amt: await q.answer("积分不足", show_alert=True); return
-                    game_chips[cid][uid] -= amt
-                game.place_bet(uid, bet_key, amt)
-                await q.answer(f"✅ 下注成功 ({amt}积分)")
-                await update_senddice_ui(game, context.application)
-            elif action == "start":
-                if uid not in game.bets: await q.answer("仅已下注的参与者可开始", show_alert=True); return
-                await q.answer("正在开奖...")
-                game.cancel_timer(); await settle_senddice(game, context.application)
-            elif action == "end":
-                if not is_bot_admin(uid) and uid != game.owner_id: await q.answer("权限不足", show_alert=True); return
-                game.cancel_timer()
-                for p_uid, b_dict in game.bets.items():
-                    game_chips[cid][p_uid] += sum(b_dict.values())
-                    pending_game_bets[cid].get(p_uid, {}).pop(game_type, None)
-                active_dict.pop(cid, None)
-                await safe_edit(context.bot, cid, game.game_msg_id, "🛑 游戏已手动终止，积分已退回。", reply_markup=None)
-            return
-
-        # --- 牛牛 回调 ---
-        if data.startswith("nn_"):
-            game = active_niuniu_games.get(cid)
-            if not game: await q.answer("游戏已结束", show_alert=True); return
-            if data == "nn_join":
-                if not game.add(uid): await q.answer("无法加入：积分不足或房间已满", show_alert=True); return
-                await q.answer("已加入牛牛"); await update_niuniu_ui(game, context.application)
-            elif data == "nn_robot":
-                if uid != game.owner_id and not is_bot_admin(uid): await q.answer("仅发起人可加电脑人", show_alert=True); return
-                if not game.add_robot(): await q.answer("房间已满", show_alert=True); return
-                await q.answer("已加入电脑人"); await update_niuniu_ui(game, context.application)
-            elif data == "nn_start":
-                if uid != game.owner_id: await q.answer("仅发起人可开始", show_alert=True); return
-                if len(game.players) < NIUNIU_MIN_PLAYERS: await q.answer("人数不足", show_alert=True); return
-                game.cancel_wait(); await settle_niuniu(game, context.application)
-            elif data == "nn_leave":
-                if not game.leave(uid): await q.answer("你不在房间内", show_alert=True); return
-                await q.answer("已退出"); await update_niuniu_ui(game, context.application)
-            elif data == "nn_end":
-                if not is_bot_admin(uid) and uid != game.owner_id: await q.answer("权限不足", show_alert=True); return
-                game.cancel_wait()
-                active_niuniu_games.pop(cid, None)
-                await safe_edit(context.bot, cid, game.game_msg_id, "🛑 牛牛已手动终止。", reply_markup=None)
-            return
-
-
-        # --- 老虎机连抽回调（绑定发起人） ---
-        if data.startswith("lhj_spin_"):
-            parts = data.split("_")
-            try:
-                count = int(parts[2]); owner = int(parts[3])
-            except (ValueError, IndexError):
-                await q.answer("无效操作", show_alert=True); return
-            if uid != owner:
-                await q.answer("这是别人的老虎机界面，请自己发送 /lhj", show_alert=True); return
-            if count not in (1, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000):
-                await q.answer("无效操作", show_alert=True); return
-            ok, result_text = await run_slot_spins(context, cid, uid, count, answer=q.answer)
-            if ok and q.message:
-                # 抽奖成功后原地编辑为开奖结果（1 次 API，比删除+发送省一半请求）；编辑失败则直接发送
-                edited = await safe_edit(context.bot, cid, q.message.message_id, result_text, reply_markup=None, parse_mode="HTML")
-                if edited is None:
-                    await safe_send_long(context.bot, cid, result_text, parse_mode="HTML")
-            return
-
         if data.startswith("season_"):
             if data == "season_signup":
                 ok, key = await season_signup(context.application, cid, uid)
@@ -5513,45 +3713,6 @@ async def on_button(update, context):
             await q.answer(desc); await safe_delete(context.bot, cid, game.action_msg_id); await action_notice(cid, context.application, uid, desc)
             if game.phase == "showdown": await settle_poker(game, context.application)
             else: await update_poker_table(game, context.application); await start_turn_timer(game, context.application)
-            return
-        if data.startswith("stud_"):
-            game = active_stud_games.get(cid)
-            if not game: await q.answer("梭哈游戏已结束", show_alert=True); return
-            if data == "stud_hand":
-                hole = game.hole.get(uid)
-                await q.answer(f"你的暗牌：{card_str(hole)}" if hole and uid not in game.folded else "当前无法查看暗牌", show_alert=True); return
-            if data == "stud_end":
-                if not is_bot_admin(uid) and uid not in game.players:
-                    await q.answer("权限不足", show_alert=True); return
-                await refund_stud(game, context.application, "🛑 梭哈已终止，积分已退回。")
-                await q.answer("本局已终止")
-                return
-            if game.phase == "waiting":
-                if data == "stud_join":
-                    room_name, _ = poker_room_of(cid, uid, exclude_game=game)
-                    if room_name:
-                        await q.answer(f"你已在 {room_name} 房间，请先结束再加入", show_alert=True); return
-                    if game_chips[cid][uid] < MIN_ENTRY_CHIPS:
-                        await q.answer(f"进入梭哈至少需要 {MIN_ENTRY_CHIPS} 积分", show_alert=True); return
-                    if game.add(uid):
-                        await q.answer("已加入"); await update_stud_waiting(game, context.application)
-                    else: await q.answer("你已在等待房间中。", show_alert=True)
-                elif data == "stud_start" and uid == game.owner_id and game.start():
-                    game.cancel_wait()
-                    await q.answer("游戏开始"); await update_stud_table(game, context.application); await start_stud_turn_timer(game, context.application)
-                else: await q.answer("无法执行此操作", show_alert=True)
-                return
-            if uid != game.current(): await q.answer("还没轮到你", show_alert=True); return
-            action = {"stud_fold": "fold", "stud_check": "check", "stud_call": "call", "stud_allin": "allin"}.get(data); extra = 0
-            if data.startswith("stud_raise_"):
-                try: action, extra = "raise", int(data.rsplit("_", 1)[1])
-                except ValueError: await q.answer("无效加注额", show_alert=True); return
-            if not action: await q.answer("未知操作", show_alert=True); return
-            ok, desc = game.action(uid, action, extra)
-            if not ok: await q.answer(desc, show_alert=True); return
-            await q.answer(desc); await safe_delete(context.bot, cid, game.action_msg_id); await action_notice(cid, context.application, uid, desc)
-            if game.phase == "showdown": await settle_stud(game, context.application)
-            else: await update_stud_table(game, context.application); await start_stud_turn_timer(game, context.application)
             return
         if data.startswith("jh_"):
             game = active_jinhua_games.get(cid)
@@ -5734,9 +3895,6 @@ async def on_text(update, context):
             # 1. 21点
             bj = active_blackjack_games.get(cid)
             if bj: found = True; await update_blackjack_ui(bj, context.application)
-            # 2. 百家乐
-            bjl = active_baccarat_games.get(cid)
-            if bjl: found = True; await update_baccarat_ui(bjl, context.application)
             # 3. 德州
             poker = active_poker_games.get(cid)
             if poker:
@@ -5765,54 +3923,6 @@ async def on_text(update, context):
                 if msg: race.game_msg_id = msg.message_id
             if not found: await message.reply_text("💡 当前没有任何正在进行的游戏。")
             return
-
-        # 百家乐文字下注
-        baccarat = active_baccarat_games.get(cid)
-        bjl_match = re.fullmatch(r"(?:押|下|买)?(庄|闲|和)\s*(\d+)", text)
-        if bjl_match and baccarat:
-            if baccarat.phase != "betting":
-                await message.reply_text("❌ 百家乐当前不在下注阶段。"); return
-            side_map = {"庄": "banker", "闲": "player", "和": "tie"}
-            side_cn = bjl_match.group(1); side = side_map[side_cn]
-            amount = int(bjl_match.group(2))
-            if amount > 50000:
-                await message.reply_text("❌ 百家乐单次下注上限为 50000 积分。"); return
-            wallet = game_chips
-            async with wallet_locks[user.id]:
-                if wallet[cid][user.id] < amount:
-                    await message.reply_text(f"❌ 积分不足，你只有 {wallet[cid][user.id]}。"); return
-                wallet[cid][user.id] -= amount
-            baccarat.place_bet(user.id, side, amount)
-            await action_notice(cid, context.application, user.id, f"在百家乐押注了 {side_cn} {amount}")
-            await update_baccarat_ui(baccarat, context.application)
-            return
-
-        # 足球/篮球/飞镖/保龄球 文字下注
-        sd_text_match = re.fullmatch(r"(足球|篮球|飞镖|保龄球)\s*(进球|没进|投进|靶心|大|小|全中|没全中)\s*(\d+)", text)
-        if sd_text_match:
-            game_cn = sd_text_match.group(1)
-            opt_cn = sd_text_match.group(2)
-            amount = int(sd_text_match.group(3))
-            game_type = {"足球": "football", "篮球": "basketball", "飞镖": "darts", "保龄球": "bowling"}.get(game_cn)
-            if game_type:
-                game = SENDDICE_ACTIVE[game_type].get(cid)
-                opt_map = {
-                    "football": {"进球": "goal", "没进": "miss"},
-                    "basketball": {"投进": "in", "没进": "out"},
-                    "darts": {"靶心": "bull", "大": "big", "小": "small"},
-                    "bowling": {"全中": "strike", "没全中": "miss"},
-                }
-                bet_key = opt_map[game_type].get(opt_cn)
-                if game and bet_key and game.phase == "betting":
-                    wallet = game_chips
-                    async with wallet_locks[user.id]:
-                        if wallet[cid][user.id] < amount:
-                            await message.reply_text(f"❌ 积分不足，你只有 {wallet[cid][user.id]}。"); return
-                        wallet[cid][user.id] -= amount
-                    game.place_bet(user.id, bet_key, amount)
-                    await action_notice(cid, context.application, user.id, f"在{game_cn}下注了 {opt_cn} {amount}")
-                    await update_senddice_ui(game, context.application)
-                    return
 
         # 21点文字加入
         blackjack = active_blackjack_games.get(cid)
@@ -5847,13 +3957,12 @@ async def on_text(update, context):
             return
 
 
-        # 扑克类游戏文字加注（自动路由到玩家当前轮到的游戏：德州→梭哈→炸金花）
+        # 扑克类游戏文字加注（自动路由到玩家当前轮到的游戏：德州→炸金花）
         bet_match = re.fullmatch(r"(?:继续)?(?:下注|加注)\s*[:：]?\s*(\d+)\s*(?:积分)?", text)
         if bet_match:
             amount = int(bet_match.group(1))
             for game, settle, update, start_timer in [
                 (active_poker_games.get(cid), settle_poker, update_poker_table, start_turn_timer),
-                (active_stud_games.get(cid), settle_stud, update_stud_table, start_stud_turn_timer),
                 (active_jinhua_games.get(cid), settle_jinhua, update_jinhua_table, start_jinhua_turn_timer),
             ]:
                 if not game:
@@ -5871,11 +3980,10 @@ async def on_text(update, context):
                 else: await update(game, context.application); await start_timer(game, context.application)
                 return
 
-        # 扑克类游戏文字全下（自动路由到玩家当前轮到的游戏：德州→梭哈→炸金花）
+        # 扑克类游戏文字全下（自动路由到玩家当前轮到的游戏：德州→炸金花）
         if re.fullmatch(r"全下|all\s*in", text.strip(), re.IGNORECASE):
             for game, settle, update, start_timer in [
                 (active_poker_games.get(cid), settle_poker, update_poker_table, start_turn_timer),
-                (active_stud_games.get(cid), settle_stud, update_stud_table, start_stud_turn_timer),
                 (active_jinhua_games.get(cid), settle_jinhua, update_jinhua_table, start_jinhua_turn_timer),
             ]:
                 if not (game and game.phase != "waiting" and user.id == game.current()):
@@ -5940,7 +4048,6 @@ async def daily_reset_scheduler(app):
                         users[uid] = SEASON_START_CHIPS
                 save_data()
             for cid in race_daily_stats: race_daily_stats[cid] = [0] * HORSE_COUNT
-            for cid in baccarat_daily_stats: baccarat_daily_stats[cid] = {"player": 0, "banker": 0, "tie": 0}
             archive_old_profit_data()
             # 清理已到期的限时商店称号
             _now_ts = int(now_bj().timestamp())
@@ -6126,17 +4233,8 @@ async def post_init(app):
             BotCommand("start", "开始 / 菜单 / 帮助"),
             BotCommand("dz", "德州扑克"),
             BotCommand("sc", "赛车"),
-            BotCommand("lhj", "老虎机"),
             BotCommand("21", "21点"),
-            BotCommand("bjl", "百家乐"),
-            BotCommand("sb", "骰子"),
-            BotCommand("nn", "牛牛"),
-            BotCommand("suoha", "梭哈"),
             BotCommand("jinhua", "炸金花"),
-            BotCommand("football", "足球射门"),
-            BotCommand("basketball", "篮球投篮"),
-            BotCommand("darts", "飞镖"),
-            BotCommand("bowling", "保龄球"),
             BotCommand("end", "结束当前游戏"),
             BotCommand("add", "加/减通用积分(正加负减)"),
             BotCommand("adddz", "加/减德州积分(正加负减)"),
@@ -6186,9 +4284,7 @@ CMD_ALIASES = {
     "开始": cmd_start, "菜单": cmd_start, "帮助": cmd_start,
     "德州": cmd_dz, "德州扑克": cmd_dz,
     "赛车": cmd_sm, "sc": cmd_sm,
-    "老虎机": cmd_lhj,
     "21点": cmd_21, "二十一点": cmd_21,
-    "百家乐": cmd_bjl,
     "结束": cmd_end,
     "加积分": cmd_add, "加分": cmd_add,
     "加德州": cmd_adddz,
@@ -6207,14 +4303,7 @@ CMD_ALIASES = {
     "adminlist": cmd_admin_list, "admins": cmd_admin_list,
     "备份": cmd_backup,
     "恢复": cmd_restore,
-    "骰子": cmd_sb,
-    "牛牛": cmd_nn,
-    "梭哈": cmd_suoha, "suoha": cmd_suoha, "stud": cmd_suoha,
     "炸金花": cmd_jinhua, "jinhua": cmd_jinhua, "zjh": cmd_jinhua, "金花": cmd_jinhua,
-    "足球": cmd_football, "足球射门": cmd_football, "football": cmd_football,
-    "篮球": cmd_basketball, "篮球投篮": cmd_basketball, "basketball": cmd_basketball,
-    "飞镖": cmd_darts, "darts": cmd_darts,
-    "保龄球": cmd_bowling, "bowling": cmd_bowling,
     "排位": cmd_season_play, "排位赛": cmd_season_play, "赛季": cmd_season_play, "赛季赛": cmd_season_play,
     "排位报名": cmd_season_join, "报名排位": cmd_season_join, "赛季报名": cmd_season_join,
     "排位榜": cmd_season_rank, "赛季榜": cmd_season_rank, "赛季排名": cmd_season_rank,
@@ -6229,13 +4318,12 @@ CMD_ALIASES = {
     "赛季分": cmd_season_points, "加赛季分": cmd_season_points, "减赛季分": cmd_season_points, "seasonpoints": cmd_season_points,
     # 旧英文/数字别名（保留兼容，仍可用）
     "start": cmd_start, "dz": cmd_dz, "sm": cmd_sm,
-    "lhj": cmd_lhj, "21": cmd_21, "bjl": cmd_bjl, "end": cmd_end,
+    "21": cmd_21, "end": cmd_end,
     "END": cmd_end, "add": cmd_add, "adddz": cmd_adddz,
     "cx": cmd_cx, "ph": cmd_ph, "sq": cmd_sq, "qxsh": cmd_qxshouquan,
     "换德州": cmd_convert_chips, "兑换德州": cmd_convert_chips, "convert": cmd_convert_chips,
     "addadmin": cmd_addadmin, "deladmin": cmd_deladmin,
     "autosm": cmd_autosm, "backup": cmd_backup, "restore": cmd_restore,
-    "sb": cmd_sb, "nn": cmd_nn,
     "season": cmd_season_play, "seasonplay": cmd_season_play,
     "seasonjoin": cmd_season_join, "seasonrank": cmd_season_rank,
     "seasonstart": cmd_season_start, "seasonend": cmd_season_end,
@@ -6271,29 +4359,148 @@ async def route_command(update, context):
 
 # ---------- 云平台保活 + 云端持久化（Render / Zeabur 等无持久磁盘的平台用）----------
 def start_health_server():
-    """启动极简健康检查服务，供 UptimeRobot 定时 ping，防止平台认为空闲而休眠。
+    """网页后台：密码登录 + 在线调设置。
 
-    端口从环境变量 PORT 读取（Render 自动注入），本地没有时默认 8080。
-    只回 200 ok，不干扰 bot 主逻辑；失败也不影响 bot 运行。
+    端口从环境变量 PORT 读取（平台注入），本地没有时默认 8080。
+    - GET /health      → 200 ok（给 UptimeRobot ping，不需要登录）
+    - GET /            → 未登录显示登录页；已登录显示设置面板
+    - POST /login      → 校验密码，发 Cookie 会话（7 天有效）
+    - POST /save       → 保存设置：立即套用内存全局常量 + 写 bot_settings.json
+    全部跑在独立守护线程，任何异常都不影响 bot 主逻辑。
     """
     try:
         port = int(os.environ.get("PORT", 8080))
+        sessions = {}  # token -> 过期时间戳
+        sess_lock = threading.Lock()
 
-        class _HealthHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
+        def _check_session(cookie_header):
+            if not cookie_header:
+                return False
+            token = None
+            for part in cookie_header.split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == "wb_session":
+                    token = v
+                    break
+            if not token:
+                return False
+            with sess_lock:
+                exp = sessions.get(token)
+                if exp and exp > time.time():
+                    return True
+                sessions.pop(token, None)
+            return False
+
+        def _page(head, body):
+            return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                    f"<title>{head} - 机器人后台</title><style>"
+                    "body{background:#14161f;color:#e8e6df;font-family:system-ui,sans-serif;margin:0;padding:20px}"
+                    ".card{max-width:520px;margin:0 auto;background:#1d1f2a;border:1px solid #34363f;border-radius:12px;padding:24px}"
+                    "h1{font-size:19px;margin:0 0 16px}.row{margin-bottom:14px}"
+                    "label{display:block;font-size:13px;color:#a9a89f;margin-bottom:4px}"
+                    "input{width:100%;box-sizing:border-box;background:#14161f;border:1px solid #3a3d47;color:#e8e6df;"
+                    "border-radius:8px;padding:9px 12px;font-size:15px}"
+                    "input:focus{outline:none;border-color:#5b8fd9}"
+                    "button{width:100%;background:#2f6fce;color:#fff;border:none;border-radius:8px;padding:12px;font-size:16px;cursor:pointer}"
+                    "button:hover{background:#3a7fd8}"
+                    ".tip{font-size:12px;color:#8a8880;margin-top:14px}.ok{color:#6fd08c;font-size:13px;margin-bottom:12px}"
+                    ".err{color:#f09595;font-size:13px;margin-bottom:12px}.grp{font-size:12px;color:#6a695f;margin:18px 0 8px;border-top:1px solid #2a2c36;padding-top:14px}"
+                    "</style></head><body><div class='card'>" + body + "</div></body></html>").encode("utf-8")
+
+        def _login_page(err=""):
+            msg = f"<div class='err'>密码错误，请重试</div>" if err else ""
+            return _page("登录", f"<h1>🔐 机器人后台</h1>{msg}"
+                "<form method='post' action='/login'>"
+                "<div class='row'><label>管理密码</label><input type='password' name='password' autofocus></div>"
+                "<button type='submit'>登 录</button></form>"
+                "<div class='tip'>初始密码 admin888，登录后请立即在面板底部修改。</div>")
+
+        def _admin_page(saved=False, err=""):
+            msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
+            msg += f"<div class='err'>{html.escape(err)}</div>" if err else ""
+            rows, last_grp = [], None
+            for key, _g, label, ftype, lo, hi in SETTINGS_FIELDS:
+                cur = globals().get(_g)
+                step = "0.1" if ftype == "float" else "1"
+                rows.append(f"<div class='row'><label>{html.escape(label)}（{lo} ~ {hi}）"
+                            f"<input type='number' name='{key}' value='{cur}' step='{step}'></label></div>")
+            is_default_pwd = _web_password == WEB_DEFAULT_PASSWORD
+            pwd_tip = "<div class='err'>⚠️ 当前还在用初始密码，请在下方改成自己的密码</div>" if is_default_pwd else ""
+            return _page("设置", f"<h1>⚙️ 机器人设置</h1>{msg}{pwd_tip}"
+                "<form method='post' action='/save'>" + "".join(rows) +
+                "<div class='grp'>安全</div>"
+                "<div class='row'><label>修改后台密码（留空 = 不改，至少4位）"
+                f"<input type='password' name='new_password' placeholder=\"{'建议立即修改' if is_default_pwd else ''}\"></label></div>"
+                "<button type='submit'>💾 保 存</button></form>"
+                "<div class='tip'>保存立即生效，无需重启；设置存在 bot_settings.json，机器人重启后自动加载。</div>")
+
+        class _AdminHandler(BaseHTTPRequestHandler):
+            def _send(self, code, body, headers=None):
+                self.send_response(code)
+                for k, v in (headers or []):
+                    self.send_header(k, v)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(b"ok")
+                self.wfile.write(body)
+
+            def _redirect(self, to, cookie=None):
+                headers = [("Location", to)]
+                if cookie:
+                    headers.append(("Set-Cookie", cookie))
+                self.send_response(302)
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self):
+                path = urlparse(self.path).path
+                if path == "/health":
+                    self._send(200, b"ok", [("Content-Type", "text/plain")]); return
+                if path != "/":
+                    self._send(404, b"not found", [("Content-Type", "text/plain")]); return
+                if not _check_session(self.headers.get("Cookie")):
+                    self._send(200, _login_page()); return
+                qs = parse_qs(urlparse(self.path).query)
+                self._send(200, _admin_page(saved="saved" in qs, err="bad" in qs and "部分数值超出范围或非法，已跳过这些项" or ""))
+
+            def do_POST(self):
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    form = parse_qs(self.rfile.read(length).decode("utf-8"))
+                except Exception:
+                    form = {}
+                path = urlparse(self.path).path
+                if path == "/login":
+                    pwd = (form.get("password", [""])[0] or "").strip()
+                    if secrets.compare_digest(pwd, _web_password):
+                        token = secrets.token_urlsafe(32)
+                        with sess_lock:
+                            sessions[token] = time.time() + 7 * 86400
+                        self._redirect("/", cookie=f"wb_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800")
+                    else:
+                        self._send(200, _login_page(err=1))
+                    return
+                if path == "/save":
+                    if not _check_session(self.headers.get("Cookie")):
+                        self._redirect("/"); return
+                    cfg = {k: v[0] for k, v in form.items() if k != "new_password"}
+                    applied = save_settings(cfg, form.get("new_password", [""])[0])
+                    skipped = [k for k in cfg if k not in applied]
+                    self._redirect("/?saved=1" + ("&bad=1" if skipped else ""))
+                    return
+                self._send(404, b"not found", [("Content-Type", "text/plain")])
 
             def log_message(self, *args):
                 pass  # 抑制访问日志，避免刷屏
 
-        server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+        server = ThreadingHTTPServer(("0.0.0.0", port), _AdminHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        logger.info("健康检查服务已启动，监听端口 %s", port)
+        logger.info("网页后台已启动：端口 %s（/health 健康检查 · / 设置面板）", port)
     except Exception:
-        logger.exception("健康检查服务启动失败（不影响 bot 运行）")
+        logger.exception("网页后台启动失败（不影响 bot 运行）")
 
 
 async def auto_backup(context):
@@ -6324,6 +4531,7 @@ async def auto_backup(context):
 
 def main():
     global save_event
+    load_settings()  # 先套用网页端保存的设置，再启动 bot
     token = os.environ.get("BOT_TOKEN")
     if not token: logger.error("未设置 BOT_TOKEN"); return
     

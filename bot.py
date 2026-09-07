@@ -2521,7 +2521,7 @@ class HorseRace:
 # ---------- 权限与命令 ----------
 def is_auth(cid): return cid in AUTHORIZED_GROUPS
 def is_bot_admin(uid): return uid in BOT_ADMINS
-async def need_auth(update):
+async def need_auth(update, context=None):
     # 授权只针对「群聊」：私聊没有群组概念，不应被「群组未授权」拦截。
     # 私聊里真正受限的游戏/管理命令，各自还有 require_group_chat / is_bot_admin 兜底。
     _u = update.effective_user
@@ -2530,7 +2530,9 @@ async def need_auth(update):
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
         if not is_auth(chat.id):
-            if update.effective_message: await update.effective_message.reply_text("❌ 此群组未授权，请联系管理员。")
+            if update.effective_message:
+                if context is not None and update.message: await send_reply(update, context, "❌ 此群组未授权，请联系管理员。")
+                else: await update.effective_message.reply_text("❌ 此群组未授权，请联系管理员。")
             return False
     return True
 
@@ -2541,20 +2543,20 @@ def is_group_chat(update):
     return chat_type in ("group", "supergroup")
 
 
-async def require_group_chat(update, game_name, cmd):
+async def require_group_chat(update, game_name, cmd, context=None):
     """多人游戏必须在群聊发起；私聊里开只有发起人自己看得到。返回 False 时已回复提示。"""
     if not is_group_chat(update):
-        await update.message.reply_text(
+        await send_reply(update, context, 
             f"⚠️ {game_name}是多人游戏，请在群聊中发起（发送 /{cmd}），别人才能一起玩。私聊里开只有你自己看得到。")
         return False
     return True
 
 async def cmd_start(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
     if is_bot_admin(update.effective_user.id):
         text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拍卖 物品 起拍价 - 发起积分拍卖\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
-    await update.message.reply_text(text)
+    await send_reply(update, context, text)
 
 # ---------- 21点 界面与逻辑 ----------
 async def start_bj_turn_timer(game, app):
@@ -2762,8 +2764,8 @@ async def update_blackjack_ui(game, app):
 
 
 async def cmd_21(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "21点", "21"): return
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "21点", "21", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     if cid in active_blackjack_games:
         g = active_blackjack_games[cid]
@@ -2772,7 +2774,7 @@ async def cmd_21(update, context):
             msg = await safe_send(context.bot, cid, text, reply_markup=kb, parse_mode="HTML")
             if msg: g.game_msg_id = msg.message_id
         else:
-            await update.message.reply_text("当前已有 21点 进行中。")
+            await send_reply(update, context, "当前已有 21点 进行中。")
         return
     mode = current_game_mode()
     game = BlackjackGame(cid, uid, mode)
@@ -3474,21 +3476,21 @@ async def refund_jinhua(game, app, notice):
 
 
 async def cmd_jinhua(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "炸金花", "jinhua"): return
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "炸金花", "jinhua", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     game = active_jinhua_games.get(cid)
     room_name, _ = poker_room_of(cid, uid, exclude_game=game)
     if room_name:
-        await update.message.reply_text(f"⚠️ 你已在 {room_name} 房间，请先结束再开新的扑克游戏。"); return
+        await send_reply(update, context, f"⚠️ 你已在 {room_name} 房间，请先结束再开新的扑克游戏。"); return
     mode = game.mode if game and game.phase == "waiting" else current_game_mode()
     if game_chips[cid][uid] < MIN_ENTRY_CHIPS:
-        await update.message.reply_text(f"❌ 进入炸金花至少需要 {MIN_ENTRY_CHIPS} 积分。"); return
+        await send_reply(update, context, f"❌ 进入炸金花至少需要 {MIN_ENTRY_CHIPS} 积分。"); return
     if game:
-        if game.phase != "waiting": await update.message.reply_text("当前已有进行中的炸金花。"); return
+        if game.phase != "waiting": await send_reply(update, context, "当前已有进行中的炸金花。"); return
         if game.add(uid):
-            await update_jinhua_waiting(game, context.application); await update.message.reply_text("已加入当前等待房间。")
-        else: await update.message.reply_text("你已在等待房间中。")
+            await update_jinhua_waiting(game, context.application); await send_reply(update, context, "已加入当前等待房间。")
+        else: await send_reply(update, context, "你已在等待房间中。")
         return
     game = JinhuaGame(cid, uid, mode); game.add(uid); active_jinhua_games[cid] = game
     msg = await safe_send(context.bot, cid, await jinhua_waiting_text(game, context.application), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 加入游戏", callback_data="jh_join")], [InlineKeyboardButton("❌ 终止房间", callback_data="jh_end")]]))
@@ -3542,24 +3544,24 @@ async def start_wait_timeout(game, app):
 
 
 async def cmd_dz(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "德州扑克", "dz"): return
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "德州扑克", "dz", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id; game = active_poker_games.get(cid)
     room_name, _ = poker_room_of(cid, uid, exclude_game=game)
     if room_name:
-        await update.message.reply_text(f"⚠️ 你已在 {room_name} 房间，请先结束再开新的扑克游戏。"); return
+        await send_reply(update, context, f"⚠️ 你已在 {room_name} 房间，请先结束再开新的扑克游戏。"); return
     mode = game.mode if game and game.phase == "waiting" else current_game_mode()
     wallet = game_chips
     if wallet[cid][uid] < MIN_ENTRY_CHIPS:
         label = "积分"
-        await update.message.reply_text(f"❌ 进入德州至少需要 {MIN_ENTRY_CHIPS} {label}。"); return
+        await send_reply(update, context, f"❌ 进入德州至少需要 {MIN_ENTRY_CHIPS} {label}。"); return
     if game:
         if game.season:
-            await update.message.reply_text("当前有排位赛房间，请用 /排位 加入或开局。"); return
-        if game.phase != "waiting": await update.message.reply_text("当前已有进行中的德州扑克。"); return
+            await send_reply(update, context, "当前有排位赛房间，请用 /排位 加入或开局。"); return
+        if game.phase != "waiting": await send_reply(update, context, "当前已有进行中的德州扑克。"); return
         if game.add(uid):
-            await update_poker_waiting(game, context.application); await update.message.reply_text("已加入当前等待房间。")
-        else: await update.message.reply_text("你已在等待房间中。")
+            await update_poker_waiting(game, context.application); await send_reply(update, context, "已加入当前等待房间。")
+        else: await send_reply(update, context, "你已在等待房间中。")
         return
     # 注意：不再在此清空亮牌队列，保留上一局（已结束）单赢未亮牌的数据，供玩家随时补亮牌
     game = PokerGame(cid, uid, mode); game.add(uid); active_poker_games[cid] = game
@@ -3755,56 +3757,56 @@ async def render_season_lobby(app, cid):
 
 
 async def cmd_season_join(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "德州排位赛", "排位"): return
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "德州排位赛", "排位", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     ok, key = await season_signup(context.application, cid, uid)
     await render_season_lobby(context.application, cid)
     if key == "started":
-        await update.message.reply_text(f"🏆 报名满 {SEASON_MIN_PLAYERS} 人，第{season_id}赛季「{season_name or '排位赛'}」开始！每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。用 /排位 开局。")
+        await send_reply(update, context, f"🏆 报名满 {SEASON_MIN_PLAYERS} 人，第{season_id}赛季「{season_name or '排位赛'}」开始！每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。用 /排位 开局。")
     elif key == "joined_active":
-        await update.message.reply_text(f"✅ 已加入进行中的赛季（需满 {SEASON_MIN_GAMES} 局才上榜）。当前分 {season_points[cid][uid]}。用 /排位 开局。")
+        await send_reply(update, context, f"✅ 已加入进行中的赛季（需满 {SEASON_MIN_GAMES} 局才上榜）。当前分 {season_points[cid][uid]}。用 /排位 开局。")
     else:
         n = len(season_joined[cid])
-        await update.message.reply_text(f"✅ 已报名本赛季排位赛（{n}/{SEASON_MIN_PLAYERS}）。满 {SEASON_MIN_PLAYERS} 人自动开赛；也可点群里的大厅看板报名。")
+        await send_reply(update, context, f"✅ 已报名本赛季排位赛（{n}/{SEASON_MIN_PLAYERS}）。满 {SEASON_MIN_PLAYERS} 人自动开赛；也可点群里的大厅看板报名。")
 
 
 async def cmd_season_start(update, context):
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可强制开赛"); return
-    if not await require_group_chat(update, "德州排位赛", "排位"): return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可强制开赛"); return
+    if not await require_group_chat(update, "德州排位赛", "排位", context): return
     cid = update.effective_chat.id
     if season_active:
-        await update.message.reply_text("⚠️ 本赛季已在进行中。"); return
+        await send_reply(update, context, "⚠️ 本赛季已在进行中。"); return
     name = " ".join(context.args) if context.args else ""
     ok, msg = await start_season(cid, name, forced=True)
     if ok:
-        await update.message.reply_text(f"🏆 第{season_id}赛季「{season_name or '排位赛'}」由管理员强制开启！每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。用 /排位 开局。")
+        await send_reply(update, context, f"🏆 第{season_id}赛季「{season_name or '排位赛'}」由管理员强制开启！每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。用 /排位 开局。")
     else:
-        await update.message.reply_text(msg)
+        await send_reply(update, context, msg)
 
 
 async def cmd_season_end(update, context):
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     if not season_active:
-        await update.message.reply_text("⚠️ 当前无进行中的赛季。"); return
+        await send_reply(update, context, "⚠️ 当前无进行中的赛季。"); return
     await season_settle(context.application, manual=True)
-    await update.message.reply_text("🏁 赛季已手动结算并重置。")
+    await send_reply(update, context, "🏁 赛季已手动结算并重置。")
 
 
 async def cmd_season_rank(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     if not season_active:
-        await update.message.reply_text("⚠️ 当前无进行中的赛季排位赛。"); return
+        await send_reply(update, context, "⚠️ 当前无进行中的赛季排位赛。"); return
     lines = await season_standings_lines(context.application, cid, uid=uid)
     await safe_send_long(context.bot, cid, "\n".join(lines))
 
 
 async def cmd_god(update, context):
     """查看当前赌神与历届荣誉墙。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     app = context.application
     cid = update.effective_chat.id
     lines = ["👑 <b>🎰赌神 荣誉殿堂</b>", "━" * 16]
@@ -3835,32 +3837,32 @@ async def cmd_god(update, context):
 async def cmd_god_grant(update, context):
     """管理员封赌神（全局唯一，覆盖上任）。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     if not context.args:
-        await update.message.reply_text("用法：/封赌神 <用户ID>"); return
+        await send_reply(update, context, "用法：/封赌神 <用户ID>"); return
     try:
         uid = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ 用户 ID 必须是数字。"); return
+        await send_reply(update, context, "❌ 用户 ID 必须是数字。"); return
     for _u in list(user_titles.keys()):
         user_titles[_u].discard(TITLE_GAMBLING_GOD)
         if not user_titles[_u]:
             del user_titles[_u]
     user_titles.setdefault(uid, set()).add(TITLE_GAMBLING_GOD)
     save_data()
-    await update.message.reply_text(f"👑 已将 {uid} 封为 🎰赌神（覆盖上任）。")
+    await send_reply(update, context, f"👑 已将 {uid} 封为 🎰赌神（覆盖上任）。")
 
 
 async def cmd_god_revoke(update, context):
     """管理员撤赌神。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     if not context.args:
-        await update.message.reply_text("用法：/撤赌神 <用户ID>"); return
+        await send_reply(update, context, "用法：/撤赌神 <用户ID>"); return
     try:
         uid = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ 用户 ID 必须是数字。"); return
+        await send_reply(update, context, "❌ 用户 ID 必须是数字。"); return
     if uid in user_titles and TITLE_GAMBLING_GOD in user_titles[uid]:
         user_titles[uid].discard(TITLE_GAMBLING_GOD)
         if title_equipped.get(uid) == TITLE_GAMBLING_GOD:
@@ -3868,16 +3870,16 @@ async def cmd_god_revoke(update, context):
         if not user_titles[uid]:
             del user_titles[uid]
         save_data()
-        await update.message.reply_text(f"🔻 已撤销 {uid} 的 🎰赌神 称号。")
+        await send_reply(update, context, f"🔻 已撤销 {uid} 的 🎰赌神 称号。")
     else:
-        await update.message.reply_text("ℹ️ 该用户当前没有 🎰赌神 称号。")
+        await send_reply(update, context, "ℹ️ 该用户当前没有 🎰赌神 称号。")
 
 
 async def cmd_shop(update, context):
     """积分商店：列出可兑换的称号。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("🏪 积分商店请在群聊中使用（发 /商店）。"); return
+        await send_reply(update, context, "🏪 积分商店请在群聊中使用（发 /商店）。"); return
     lines = ["🏪 <b>积分商店 · 称号兑换</b>", "━" * 16]
     for t, cfg in SHOP_TITLES.items():
         cur = "积分"
@@ -3890,17 +3892,17 @@ async def cmd_shop(update, context):
 
 async def cmd_redeem(update, context):
     """兑换称号：扣统一积分 + 挂称号（永久或限时）。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("🏪 积分商店请在群聊中使用（发 /商店）。"); return
+        await send_reply(update, context, "🏪 积分商店请在群聊中使用（发 /商店）。"); return
     if not context.args:
-        await update.message.reply_text("用法：/兑换 称号名（用 /商店 查看可兑换称号）"); return
+        await send_reply(update, context, "用法：/兑换 称号名（用 /商店 查看可兑换称号）"); return
     # 容错：用户经常顺手多打「购买/一个/来一个」之类，按空格 join 后找不到。
     # 优先取第一个参数（称号意图词），join 作为兜底（SHOP_TITLES 实际全无空格）。
     title = context.args[0].strip()
     cfg = SHOP_TITLES.get(title) or SHOP_TITLES.get("".join(context.args).strip())
     if not cfg:
-        await update.message.reply_text("❌ 该称号不存在，用 /商店 查看可兑换称号。"); return
+        await send_reply(update, context, "❌ 该称号不存在，用 /商店 查看可兑换称号。"); return
     uid = update.effective_user.id
     cid = update.effective_chat.id
     # 已持有且未过期则拒绝重复兑换
@@ -3908,14 +3910,14 @@ async def cmd_redeem(update, context):
     if title in held:
         exp = title_expiry.get(uid, {}).get(title)
         if exp is None or exp > int(now_bj().timestamp()):
-            await update.message.reply_text("ℹ️ 你已持有该称号，无需重复兑换。"); return
+            await send_reply(update, context, "ℹ️ 你已持有该称号，无需重复兑换。"); return
     if player_is_busy(cid, uid):
-        await update.message.reply_text("⚠️ 你正在游戏中，请先结束当前游戏再兑换。"); return
+        await send_reply(update, context, "⚠️ 你正在游戏中，请先结束当前游戏再兑换。"); return
     wallet = game_chips
     cur = "积分"
     async with wallet_locks[uid]:
         if wallet[cid][uid] < cfg["price"]:
-            await update.message.reply_text(f"❌ 你的{cur}不足：需要 {cfg['price']}，当前 {wallet[cid][uid]}。"); return
+            await send_reply(update, context, f"❌ 你的{cur}不足：需要 {cfg['price']}，当前 {wallet[cid][uid]}。"); return
         wallet[cid][uid] -= cfg["price"]
         user_titles.setdefault(uid, set()).add(title)
         if cfg["duration"] is not None:
@@ -3924,16 +3926,16 @@ async def cmd_redeem(update, context):
             title_expiry.setdefault(uid, {}).pop(title, None)
         save_data()
     dur = "永久" if cfg["duration"] is None else f"{cfg['duration'] // 86400}天"
-    await update.message.reply_text(f"🎉 兑换成功！获得称号 {title_icon(title)}<b>{html.escape(title)}</b>（{dur}），花费 {cfg['price']} {cur}，剩余 {wallet[cid][uid]}。", parse_mode="HTML")
+    await send_reply(update, context, f"🎉 兑换成功！获得称号 {title_icon(title)}<b>{html.escape(title)}</b>（{dur}），花费 {cfg['price']} {cur}，剩余 {wallet[cid][uid]}。", parse_mode="HTML")
 
 
 async def cmd_my_titles(update, context):
     """查看我持有的所有称号。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     uid = update.effective_user.id
     ts = user_titles.get(uid, set())
     if not ts:
-        await update.message.reply_text("你还没有任何称号，用 /商店 查看可兑换称号。")
+        await send_reply(update, context, "你还没有任何称号，用 /商店 查看可兑换称号。")
         return
     lines = ["🎖 <b>我的称号</b>", "━" * 16]
     equipped = title_equipped.get(uid)
@@ -3960,45 +3962,45 @@ async def cmd_my_titles(update, context):
 
 async def cmd_equip(update, context):
     """佩戴某个已持有的称号（切换昵称前缀，可覆盖默认）。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not context.args:
-        await update.message.reply_text("用法：/佩戴 称号名（用 /我的称号 查看你持有的称号）")
+        await send_reply(update, context, "用法：/佩戴 称号名（用 /我的称号 查看你持有的称号）")
         return
     title = "".join(context.args)
     uid = update.effective_user.id
     ts = user_titles.get(uid, set())
     if title not in ts:
-        await update.message.reply_text("❌ 你尚未持有该称号，用 /我的称号 查看。")
+        await send_reply(update, context, "❌ 你尚未持有该称号，用 /我的称号 查看。")
         return
     title_equipped[uid] = title
     save_data()
-    await update.message.reply_text(f"✅ 已佩戴 <b>{html.escape(title)}</b>，将显示在昵称前。", parse_mode="HTML")
+    await send_reply(update, context, f"✅ 已佩戴 <b>{html.escape(title)}</b>，将显示在昵称前。", parse_mode="HTML")
 
 
 async def cmd_season_points(update, context):
     """管理员加减排位分（正为加，负为减）。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
-    if not await need_auth(update): return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
+    if not await need_auth(update, context): return
     try:
         uid, amount = await _parse_target_amount(update, context)
         if amount == 0: raise ValueError
     except (ValueError, IndexError):
-        await update.message.reply_text("用法：/赛季分 用户ID 数量（正加负减），或回复玩家消息后使用 /赛季分 数量"); return
+        await send_reply(update, context, "用法：/赛季分 用户ID 数量（正加负减），或回复玩家消息后使用 /赛季分 数量"); return
     cid = update.effective_chat.id
     if not season_active and uid not in season_points.get(cid, {}):
-        await update.message.reply_text("⚠️ 该玩家不在当前赛季，且赛季未激活。"); return
+        await send_reply(update, context, "⚠️ 该玩家不在当前赛季，且赛季未激活。"); return
     if amount < 0 and season_points.get(cid, {}).get(uid, 0) < -amount:
-        await update.message.reply_text("❌ 该玩家排位分不足。"); return
+        await send_reply(update, context, "❌ 该玩家排位分不足。"); return
     season_points.setdefault(cid, defaultdict(int))[uid] += amount
     season_joined.setdefault(cid, set()).add(uid)
     save_data()
     verb = "增加" if amount > 0 else "扣除"
-    await update.message.reply_text(f"✅ 已为 {await get_name(context.application, uid)} {verb} {abs(amount)} 排位分，当前 {season_points[cid][uid]}。")
+    await send_reply(update, context, f"✅ 已为 {await get_name(context.application, uid)} {verb} {abs(amount)} 排位分，当前 {season_points[cid][uid]}。")
 
 
 async def cmd_season_help(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid = update.effective_chat.id
     text = (
         "🏆 <b>德州排位赛使用说明</b>\n\n"
@@ -4024,8 +4026,8 @@ async def cmd_season_help(update, context):
 
 
 async def cmd_season_play(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "德州排位赛", "排位"): return
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "德州排位赛", "排位", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     if not season_active:
         ok, key = await season_signup(context.application, cid, uid)
@@ -4034,7 +4036,7 @@ async def cmd_season_play(update, context):
         else:
             # UX2：/排位 静默报名不弹看板（看板仅在 /排位报名 或按钮点击时出现，减少刷屏）
             n = len(season_joined[cid])
-            await update.message.reply_text(f"✅ 已报名本赛季排位赛（{n}/{SEASON_MIN_PLAYERS}）。满 {SEASON_MIN_PLAYERS} 人自动开赛；发 /排位报名 可看报名大厅。")
+            await send_reply(update, context, f"✅ 已报名本赛季排位赛（{n}/{SEASON_MIN_PLAYERS}）。满 {SEASON_MIN_PLAYERS} 人自动开赛；发 /排位报名 可看报名大厅。")
             return
     # 赛季进行中：开 / 入房间（赛中未报名者自动补报名）
     if uid not in season_joined.get(cid, set()):
@@ -4045,17 +4047,17 @@ async def cmd_season_play(update, context):
             season_rebuy[cid][uid] = 0
         save_data()
     if season_points[cid][uid] <= 0:
-        await update.message.reply_text("❌ 你的排位分已用完，等待应急补分或下局。"); return
+        await send_reply(update, context, "❌ 你的排位分已用完，等待应急补分或下局。"); return
     game = active_poker_games.get(cid)
     if game:
         if game.season:
-            if game.phase != "waiting": await update.message.reply_text("当前已有进行中的排位赛。"); return
+            if game.phase != "waiting": await send_reply(update, context, "当前已有进行中的排位赛。"); return
             if game.add(uid):
-                await update_poker_waiting(game, context.application); await update.message.reply_text("已加入当前等待房间。")
-            else: await update.message.reply_text("你已在等待房间中。")
+                await update_poker_waiting(game, context.application); await send_reply(update, context, "已加入当前等待房间。")
+            else: await send_reply(update, context, "你已在等待房间中。")
             return
         else:
-            await update.message.reply_text("当前有日常德州房间，请先 /结束 后再开排位赛。"); return
+            await send_reply(update, context, "当前有日常德州房间，请先 /结束 后再开排位赛。"); return
     game = PokerGame(cid, uid, current_game_mode(), season=True); game.add(uid); active_poker_games[cid] = game
     msg = await safe_send(context.bot, cid, await poker_waiting_text(game, context.application), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 加入游戏", callback_data="texas_join")], [InlineKeyboardButton("❌ 终止房间", callback_data="texas_end")]]))
     if msg:
@@ -4063,8 +4065,8 @@ async def cmd_season_play(update, context):
         await start_wait_timeout(game, context.application)
 
 async def cmd_sm(update, context):
-    if not await need_auth(update): return
-    if not await require_group_chat(update, "赛车", "sc"): return
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "赛车", "sc", context): return
     cid = update.effective_chat.id
     if cid in active_horse_races:
         race = active_horse_races[cid]
@@ -4073,7 +4075,7 @@ async def cmd_sm(update, context):
             msg = await safe_send(context.bot, cid, await race.view(context.application), reply_markup=race.buttons())
             if msg: race.game_msg_id = msg.message_id
         else:
-            await update.message.reply_text("当前已有赛车进行中。")
+            await send_reply(update, context, "当前已有赛车进行中。")
         return
     mode = current_game_mode()
     jackpot = race_jackpot.get(cid, 0) if mode == "official" else 0
@@ -4101,7 +4103,7 @@ async def refund_poker(game, app, notice):
 
 
 async def cmd_end(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     arg = context.args[0].lower() if context.args else ""
     
@@ -4111,7 +4113,7 @@ async def cmd_end(update, context):
     jinhua = active_jinhua_games.get(cid)
 
     if not any([poker, race, bj, jinhua]):
-        await update.message.reply_text("当前没有进行中的游戏。"); return
+        await send_reply(update, context, "当前没有进行中的游戏。"); return
 
     notices = []
     # 如果带了参数，只针对性关闭
@@ -4148,10 +4150,10 @@ async def cmd_end(update, context):
             notices.append("21点已退款")
 
     if not notices:
-        await update.message.reply_text("❌ 权限不足或未找到匹配的游戏指令。用法示例：/end dz")
+        await send_reply(update, context, "❌ 权限不足或未找到匹配的游戏指令。用法示例：/end dz")
     else:
         save_data()
-        await update.message.reply_text("；".join(notices))
+        await send_reply(update, context, "；".join(notices))
 def player_is_busy(cid, uid):
     poker = active_poker_games.get(cid)
     if poker and poker.phase != "waiting" and uid in poker.players:
@@ -4188,33 +4190,33 @@ async def _parse_target_amount(update, context):
 
 async def cmd_add(update, context):
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     if not ADMIN_ADJUST_ENABLED:
-        await update.message.reply_text("❌ 管理员加减分功能已关闭（网页「积分系统 → 积分设置」可开启）。"); return
-    if not await need_auth(update): return
+        await send_reply(update, context, "❌ 管理员加减分功能已关闭（网页「积分系统 → 积分设置」可开启）。"); return
+    if not await need_auth(update, context): return
     try:
         uid, amount = await _parse_target_amount(update, context)
         if amount == 0: raise ValueError
     except (ValueError, IndexError):
-        await update.message.reply_text("用法：/add 用户ID 数量（正为加，负为减），或回复玩家消息后使用 /add 数量"); return
+        await send_reply(update, context, "用法：/add 用户ID 数量（正为加，负为减），或回复玩家消息后使用 /add 数量"); return
     cid = update.effective_chat.id
     if player_is_busy(cid, uid):
-        await update.message.reply_text("该玩家正在游戏中，无法修改积分。"); return
+        await send_reply(update, context, "该玩家正在游戏中，无法修改积分。"); return
     async with wallet_locks[uid]:
         if amount < 0 and game_chips[cid][uid] < -amount:
-            await update.message.reply_text("❌ 玩家积分不足。"); return
+            await send_reply(update, context, "❌ 玩家积分不足。"); return
         old_bal = game_chips[cid][uid]
         game_chips[cid][uid] += amount; save_data()
     verb = "添加" if amount > 0 else "扣除"
     msg = _fmt_tpl("add_msg_tpl", target=await get_name(context.application, uid),
                    verb=verb, amount=abs(amount), balance=game_chips[cid][uid])
-    await update.message.reply_text(msg)
+    await send_reply(update, context, msg)
     await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
 
 
 
 async def cmd_cx(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid = update.effective_chat.id
     date = business_date()
     texas = poker_profit_by_date[date].get(cid, {})
@@ -4223,7 +4225,7 @@ async def cmd_cx(update, context):
         for uid, v in total_profit_by_game(g, cid).items():
             combined[uid] = combined.get(uid, 0) + v
     if not texas and not combined:
-        reply = await update.message.reply_text("当前业务日暂无盈亏记录。")
+        reply = await send_reply(update, context, "当前业务日暂无盈亏记录。")
         if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
             schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
         return
@@ -4244,7 +4246,7 @@ async def cmd_cx(update, context):
         schedule_delete(context.application, cid, msgs, REPLY_DELETE_SECONDS)
 
 async def cmd_ph(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid = update.effective_chat.id
     lines = ["💰 积分榜", "━"*14]
     for i, (uid, value) in enumerate(sorted(game_chips[cid].items(), key=lambda x:x[1], reverse=True)[:50], 1):
@@ -4264,26 +4266,26 @@ async def cmd_ph(update, context):
 
 async def cmd_sq(update, context):
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 授权需在群聊中进行：请在目标群里发送 /授权，机器人会把该群加入授权名单。私聊里授权无意义，且会导致游戏开在私聊、别人看不到。")
+        await send_reply(update, context, "⚠️ 授权需在群聊中进行：请在目标群里发送 /授权，机器人会把该群加入授权名单。私聊里授权无意义，且会导致游戏开在私聊、别人看不到。")
         return
     cid = update.effective_chat.id
     AUTHORIZED_GROUPS.add(cid); save_data()
-    await update.message.reply_text(f"✅ 当前群已授权：{cid}")
+    await send_reply(update, context, f"✅ 当前群已授权：{cid}")
 
 async def cmd_qxshouquan(update, context):
     if not is_bot_admin(update.effective_user.id): return
     try: cid = int(context.args[0])
-    except (IndexError, ValueError): await update.message.reply_text("用法：取消授权 群ID（或 /qxsh 群ID）"); return
-    AUTHORIZED_GROUPS.discard(cid); save_data(); await update.message.reply_text(f"✅ 已取消授权 {cid}")
+    except (IndexError, ValueError): await send_reply(update, context, "用法：取消授权 群ID（或 /qxsh 群ID）"); return
+    AUTHORIZED_GROUPS.discard(cid); save_data(); await send_reply(update, context, f"✅ 已取消授权 {cid}")
 
 async def cmd_auth_list(update, context):
     """管理员查看所有已授权群组（列出群 ID，尽量附带群名）。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     if not AUTHORIZED_GROUPS:
-        await update.message.reply_text("📋 当前没有任何已授权群组。"); return
+        await send_reply(update, context, "📋 当前没有任何已授权群组。"); return
     lines = ["📋 <b>已授权群组列表</b>", f"共 {len(AUTHORIZED_GROUPS)} 个：", "━"*14]
     for cid in sorted(AUTHORIZED_GROUPS):
         title = chat_name_cache.get(cid)
@@ -4301,7 +4303,7 @@ async def cmd_auth_list(update, context):
 async def cmd_ban(update, context):
     """管理员拉黑玩家（禁止使用机器人）。支持 /拉黑 用户ID 或 回复玩家消息 /拉黑"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     target = None
     replied = update.message.reply_to_message
     if replied:
@@ -4315,11 +4317,11 @@ async def cmd_ban(update, context):
         try: target = int(context.args[0])
         except (IndexError, ValueError): pass
     if not target:
-        await update.message.reply_text("用法：/拉黑 用户ID，或回复玩家消息后使用 /拉黑"); return
+        await send_reply(update, context, "用法：/拉黑 用户ID，或回复玩家消息后使用 /拉黑"); return
     if is_bot_admin(target):
-        await update.message.reply_text("⚠️ 不能拉黑管理员。"); return
+        await send_reply(update, context, "⚠️ 不能拉黑管理员。"); return
     if target in BLACKLISTED_USERS:
-        await update.message.reply_text("ℹ️ 该用户已在黑名单中。"); return
+        await send_reply(update, context, "ℹ️ 该用户已在黑名单中。"); return
     # 用 ID 拉黑且尚无缓存名字时，主动 get_chat 取名缓存（失败则回退"玩家{ID}"）
     if target not in user_names:
         try:
@@ -4329,12 +4331,12 @@ async def cmd_ban(update, context):
         except Exception:
             pass
     BLACKLISTED_USERS.add(target); save_data()
-    await update.message.reply_text(f"🚫 已拉黑 {await get_name(context.application, target)}（{target}），该用户已被禁止使用机器人。")
+    await send_reply(update, context, f"🚫 已拉黑 {await get_name(context.application, target)}（{target}），该用户已被禁止使用机器人。")
 
 async def cmd_unban(update, context):
     """管理员解封玩家。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     target = None
     if update.message.reply_to_message:
         target = update.message.reply_to_message.from_user.id
@@ -4342,18 +4344,18 @@ async def cmd_unban(update, context):
         try: target = int(context.args[0])
         except (IndexError, ValueError): pass
     if not target:
-        await update.message.reply_text("用法：/解黑 用户ID，或回复玩家消息后使用 /解黑"); return
+        await send_reply(update, context, "用法：/解黑 用户ID，或回复玩家消息后使用 /解黑"); return
     if target not in BLACKLISTED_USERS:
-        await update.message.reply_text("ℹ️ 该用户不在黑名单中。"); return
+        await send_reply(update, context, "ℹ️ 该用户不在黑名单中。"); return
     BLACKLISTED_USERS.discard(target); save_data()
-    await update.message.reply_text(f"✅ 已解封 {await get_name(context.application, target)}（{target}）。")
+    await send_reply(update, context, f"✅ 已解封 {await get_name(context.application, target)}（{target}）。")
 
 async def cmd_banlist(update, context):
     """管理员查看黑名单。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     if not BLACKLISTED_USERS:
-        await update.message.reply_text("📋 当前黑名单为空。"); return
+        await send_reply(update, context, "📋 当前黑名单为空。"); return
     lines = [f"📋 <b>黑名单（共 {len(BLACKLISTED_USERS)} 人）</b>", "━"*14]
     for uid in sorted(BLACKLISTED_USERS):
         lines.append(f"• {await get_name(context.application, uid)}（{uid}）")
@@ -4362,7 +4364,7 @@ async def cmd_banlist(update, context):
 async def cmd_list_all(update, context):
     """管理员一键查看：管理员 / 授权群 / 黑名单 三合一总览。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     app = context.application
     lines = ["📋 <b>管理总览</b>", "━"*18]
 
@@ -4407,31 +4409,31 @@ async def cmd_list_all(update, context):
 
 async def cmd_addadmin(update, context):
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     try: uid = int(context.args[0])
     except (IndexError, ValueError):
-        await update.message.reply_text("用法：/addadmin 用户ID，例如 /addadmin 123456789"); return
+        await send_reply(update, context, "用法：/addadmin 用户ID，例如 /addadmin 123456789"); return
     if uid in BOT_ADMINS:
-        await update.message.reply_text(f"ℹ️ {uid} 已经是管理员了"); return
+        await send_reply(update, context, f"ℹ️ {uid} 已经是管理员了"); return
     BOT_ADMINS.add(uid); save_data()
-    await update.message.reply_text(f"✅ 已添加机器人管理员：{uid}")
+    await send_reply(update, context, f"✅ 已添加机器人管理员：{uid}")
 
 async def cmd_deladmin(update, context):
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     try: uid = int(context.args[0])
     except (IndexError, ValueError):
-        await update.message.reply_text("用法：/deladmin 用户ID，例如 /deladmin 123456789"); return
+        await send_reply(update, context, "用法：/deladmin 用户ID，例如 /deladmin 123456789"); return
     if uid in ADMIN_USER_IDS:
-        await update.message.reply_text(f"⚠️ {uid} 是种子管理员，重启后自动恢复，无法移除（如需移除请改代码 ADMIN_USER_IDS）"); return
+        await send_reply(update, context, f"⚠️ {uid} 是种子管理员，重启后自动恢复，无法移除（如需移除请改代码 ADMIN_USER_IDS）"); return
     if uid not in BOT_ADMINS:
-        await update.message.reply_text(f"ℹ️ {uid} 不是管理员"); return
+        await send_reply(update, context, f"ℹ️ {uid} 不是管理员"); return
     BOT_ADMINS.discard(uid); save_data()
-    await update.message.reply_text(f"✅ 已移除机器人管理员：{uid}")
+    await send_reply(update, context, f"✅ 已移除机器人管理员：{uid}")
 
 async def cmd_admin_list(update, context):
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     seeds = set(ADMIN_USER_IDS)
     dynamic = BOT_ADMINS - seeds
     lines = ["👑 <b>当前机器人管理员</b>",
@@ -4449,10 +4451,10 @@ async def cmd_admin_list(update, context):
     await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
 async def cmd_autosm(update, context):
-    if not await need_auth(update): return
-    if not is_bot_admin(update.effective_user.id): await update.message.reply_text("❌ 仅 Bot 管理员可操作"); return
+    if not await need_auth(update, context): return
+    if not is_bot_admin(update.effective_user.id): await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
     cid = update.effective_chat.id; hourly_race_enabled[cid] = not hourly_race_enabled[cid]; save_data()
-    await update.message.reply_text(f"整点自动赛车：{'✅ 已开启' if hourly_race_enabled[cid] else '❌ 已关闭'}")
+    await send_reply(update, context, f"整点自动赛车：{'✅ 已开启' if hourly_race_enabled[cid] else '❌ 已关闭'}")
 
 async def on_button(update, context):
     try:
@@ -4750,6 +4752,13 @@ async def on_button(update, context):
             elif game.phase == "open_pending": await show_jinhua_action(game, context.application)
             else: await start_jinhua_turn_timer(game, context.application)
             return
+        # --- 积分兑换：点蓝色商品按钮直接兑换 ---
+        if data.startswith("redeem_buy_"):
+            try: idx = int(data[len("redeem_buy_"):])
+            except ValueError:
+                await q.answer("无效商品", show_alert=True); return
+            await _redeem_buy_cb(q, idx, context)
+            return
         if data.startswith("rp_grab_"):
             p = rp_packets.get(data[8:])
             if not p:
@@ -4931,7 +4940,7 @@ async def on_text(update, context):
 
         # 拉黑拦截：被封禁用户（非管理员）禁止使用全部功能，连帮助都看不到
         if update.effective_user.id in BLACKLISTED_USERS and not is_bot_admin(update.effective_user.id):
-            await message.reply_text("🚫 你已被禁止使用本机器人，如有疑问请联系管理员。"); return
+            await send_reply(update, context, "🚫 你已被禁止使用本机器人，如有疑问请联系管理员。"); return
 
         # 新成员观察期：入群未满观察时长的成员发言即删，并禁言至观察期结束（管理员豁免）
         if OBSERVE_ENABLED and OBSERVE_SECONDS > 0 and is_group_chat(update) and not is_bot_admin(user.id):
@@ -5026,7 +5035,7 @@ async def on_text(update, context):
                 await safe_delete(context.bot, cid, race.game_msg_id)
                 msg = await safe_send(context.bot, cid, await race.view(context.application), reply_markup=race.buttons())
                 if msg: race.game_msg_id = msg.message_id
-            if not found: await message.reply_text("💡 当前没有任何正在进行的游戏。")
+            if not found: await send_reply(update, context, "💡 当前没有任何正在进行的游戏。")
             return
 
         # 21点文字加入
@@ -5034,18 +5043,18 @@ async def on_text(update, context):
         bj_match = re.fullmatch(r"(?:下注|下|押|买)?(?:21点|21)\s*(\d+)", text)
         if bj_match and blackjack:
             if blackjack.phase != "waiting":
-                await message.reply_text("❌ 21点已经开始，请等待下一局。"); return
+                await send_reply(update, context, "❌ 21点已经开始，请等待下一局。"); return
             amount = int(bj_match.group(1))
             if amount < BJ_MIN_BET:
-                await message.reply_text(f"❌ 21点最低下注 {BJ_MIN_BET} 积分。"); return
+                await send_reply(update, context, f"❌ 21点最低下注 {BJ_MIN_BET} 积分。"); return
             wallet = game_chips
             async with wallet_locks[user.id]:
                 if wallet[cid][user.id] < amount:
-                    await message.reply_text(f"❌ 积分不足，你只有 {wallet[cid][user.id]}。"); return
+                    await send_reply(update, context, f"❌ 积分不足，你只有 {wallet[cid][user.id]}。"); return
                 if blackjack.add_player(user.id, amount):
                     wallet[cid][user.id] -= amount
                 else:
-                    await message.reply_text("❌ 你已在局中或无法加入。"); return
+                    await send_reply(update, context, "❌ 你已在局中或无法加入。"); return
             await action_notice(cid, context.application, user.id, f"加入了 21点，下注 {amount}")
             await update_blackjack_ui(blackjack, context.application)
             return
@@ -5055,7 +5064,7 @@ async def on_text(update, context):
         if match and race:
             horse, amount = int(match.group(1))-1, int(match.group(2))
             ok, desc = await race.bet(user.id, horse, amount)
-            if not ok: await message.reply_text(f"❌ {desc}"); return
+            if not ok: await send_reply(update, context, f"❌ {desc}"); return
             race.name_cache[user.id] = await get_name(context.application, user.id)
             await action_notice(cid, context.application, user.id, f"下注 {amount} 于 {HORSE_EMOJI[horse]}")
             await safe_edit(context.bot, cid, race.game_msg_id, await race.view(context.application), reply_markup=race.buttons())
@@ -5079,7 +5088,7 @@ async def on_text(update, context):
                 elif not (game.phase != "waiting" and user.id == game.current()):
                     continue
                 ok, desc = game.action(user.id, "raise", amount)
-                if not ok: await message.reply_text(f"❌ {desc}"); return
+                if not ok: await send_reply(update, context, f"❌ {desc}"); return
                 await action_notice(cid, context.application, user.id, desc)
                 if game.phase == "showdown": await settle(game, context.application)
                 else: await update(game, context.application); await start_timer(game, context.application)
@@ -5094,7 +5103,7 @@ async def on_text(update, context):
                 if not (game and game.phase != "waiting" and user.id == game.current()):
                     continue
                 ok, desc = game.action(user.id, "allin")
-                if not ok: await message.reply_text(f"❌ {desc}"); return
+                if not ok: await send_reply(update, context, f"❌ {desc}"); return
                 await action_notice(cid, context.application, user.id, desc)
                 if game.phase == "showdown": await settle(game, context.application)
                 else: await update(game, context.application); await start_timer(game, context.application)
@@ -5103,7 +5112,7 @@ async def on_text(update, context):
         logger.exception("文本指令处理异常")
         # 命令分发异常不再静默：给用户明确反馈，便于排查而非毫无反应
         try:
-            await message.reply_text("⚠️ 指令处理出错，请联系管理员。")
+            await send_reply(update, context, "⚠️ 指令处理出错，请联系管理员。")
         except Exception:
             pass
 
@@ -5153,7 +5162,7 @@ def _mall_price(item):
 
 async def cmd_my_level(update, context):
     """查询我的积分等级与距下一级的差距。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     if not POINT_LEVELS:
         await send_reply(update, context, "ℹ️ 积分等级未配置（后台「积分系统 → 积分等级」添加）。"); return
@@ -5210,17 +5219,17 @@ def _award_chat_points(cid, uid, text):
     game_chips[cid][uid] += gain
 
 async def cmd_sign(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not SIGN_ENABLED:
-        await update.message.reply_text("ℹ️ 签到功能未开启。"); return
+        await send_reply(update, context, "ℹ️ 签到功能未开启。"); return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 签到请在群聊中进行。"); return
+        await send_reply(update, context, "⚠️ 签到请在群聊中进行。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     today = now_bj().strftime("%Y-%m-%d")
     yesterday = (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")
     info = sign_data[cid][uid]
     if info.get("last") == today:
-        await update.message.reply_text(f"✅ 今天已经签过啦（连续 {info.get('streak', 0)} 天）。"); return
+        await send_reply(update, context, f"✅ 今天已经签过啦（连续 {info.get('streak', 0)} 天）。"); return
     streak = info.get("streak", 0) + 1 if info.get("last") == yesterday else 1
     reward = SIGN_BASE_REWARD + (SIGN_STREAK_BONUS if streak % 7 == 0 else 0)
     async with wallet_locks[uid]:
@@ -5231,22 +5240,22 @@ async def cmd_sign(update, context):
     bonus = "（含连续7天额外奖励）" if streak % 7 == 0 else ""
     msg = _fmt_tpl("sign_msg_tpl", name=await get_name(context.application, uid),
                    streak=streak, reward=reward, bonus=bonus, balance=game_chips[cid][uid])
-    await update.message.reply_text(msg)
+    await send_reply(update, context, msg)
     await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
 
 async def cmd_sign_rank(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid = update.effective_chat.id
     users = [(uid, v.get("streak", 0)) for uid, v in sign_data.get(cid, {}).items() if v.get("streak", 0) > 0]
     if not users:
-        await update.message.reply_text("本群还没有签到记录，发「签到」抢头名！"); return
+        await send_reply(update, context, "本群还没有签到记录，发「签到」抢头名！"); return
     lines = ["📅 连续签到排行", "━" * 14]
     for i, (uid, s) in enumerate(sorted(users, key=lambda x: (-x[1], x[0]))[:20], 1):
         lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：连续 {s} 天")
     await safe_send_long(context.bot, cid, "\n".join(lines))
 
 async def cmd_my_points(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     balance = game_chips[cid][uid]
     date = now_bj().strftime("%Y-%m-%d")
@@ -5257,7 +5266,7 @@ async def cmd_my_points(update, context):
     lv_line = f"🎖 等级：{lv}\n" if lv else ""
     msg = _fmt_tpl("query_msg_tpl", name=await get_name(context.application, uid),
                    balance=balance, level_line=lv_line, signed=signed, streak=streak, today_chat=today_chat)
-    reply = await update.message.reply_text(msg)
+    reply = await send_reply(update, context, msg)
     if POINTS_DELETE_SECONDS > 0 and is_group_chat(update):
         async def _del():
             await asyncio.sleep(POINTS_DELETE_SECONDS)
@@ -5267,7 +5276,7 @@ async def cmd_my_points(update, context):
         schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
 
 async def cmd_points_rank(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid = update.effective_chat.id
     lines = ["💰 积分排行榜", "━" * 14]
     for i, (uid, value) in enumerate(sorted(game_chips[cid].items(), key=lambda x: x[1], reverse=True)[:20], 1):
@@ -5287,49 +5296,27 @@ def _parse_dt_bj(spec):
         except ValueError: continue
     return None
 
-async def cmd_points_redeem(update, context):
-    """积分兑换（阿福式活动）：发触发词看商品列表，「触发词 编号/名称」立即兑换。
-    剩余数量 0=不限；有Limit的兑完自动下架；支持起止时间与每人限购。"""
-    if not await need_auth(update): return
-    if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 积分兑换请在群聊中使用。"); return
-    cid, uid = update.effective_chat.id, update.effective_user.id
+def _redeem_gate():
+    """兑换时间窗检查：返回拒绝文案或 None（可兑换）。"""
     now = now_bj()
     start, end = _parse_dt_bj(REDEEM_START), _parse_dt_bj(REDEEM_END)
     if start and now < start:
-        await update.message.reply_text(f"⏳ 兑换活动尚未开始（{REDEEM_START} 起）。"); return
+        return f"⏳ 兑换活动尚未开始（{REDEEM_START} 起）。"
     if end and now > end:
-        await update.message.reply_text("🔚 兑换活动已结束。"); return
-    items = [x for x in redeem_goods if x.get("on", True)]
-    if not items:
-        await update.message.reply_text("🎁 暂无兑换商品，管理员可在后台「积分系统 → 积分兑换」上架。"); return
-    args = context.args or []
-    if not args:  # 商品列表公告
-        lines = ["🎁 积分兑换", "━" * 14]
-        for i, x in enumerate(items, 1):
-            left = int(x.get("left", 0) or 0)
-            lines.append(f"{i}. " + _fmt_tpl("redeem_msg_list", goodsName=x["name"],
-                                             pointNum=int(x.get("price", 0) or 0),
-                                             leftNum=("不限" if left <= 0 else left)))
-        lines.append("")
-        lines.append(f"💡 发「{REDEEM_CMD} 编号/名称」（如：{REDEEM_CMD} 1）立即兑换。")
-        await safe_send_long(context.bot, cid, "\n".join(lines)); return
-    arg = args[0].strip()
-    item = None
-    if arg.isdigit() and 1 <= int(arg) <= len(items):
-        item = items[int(arg) - 1]
-    else:
-        item = next((x for x in items if x["name"] == arg), None)
-    if not item:
-        await update.message.reply_text(f"❌ 没有这个商品，发「{REDEEM_CMD}」查看列表。"); return
+        return "🔚 兑换活动已结束。"
+    return None
+
+async def _redeem_execute(context, cid, uid, item):
+    """执行兑换（命令与按钮回调共用）：限购→扣费→自动下架→台账→群通知+私聊通知。
+    返回 None=成功；字符串=拒绝原因。"""
     if REDEEM_MAX_PER_USER > 0 and redeem_counts.get(uid, 0) >= REDEEM_MAX_PER_USER:
-        await update.message.reply_text(f"❌ 每人限兑 {REDEEM_MAX_PER_USER} 次，你已用完额度。"); return
+        return f"❌ 每人限兑 {REDEEM_MAX_PER_USER} 次，你已用完额度。"
     price = int(item.get("price", 0) or 0)
     left = int(item.get("left", 0) or 0)
     old_bal = game_chips[cid][uid]
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
-            await update.message.reply_text(f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"); return
+            return f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"
         game_chips[cid][uid] -= price
         if left > 0:
             item["left"] = left - 1
@@ -5347,14 +5334,71 @@ async def cmd_points_redeem(update, context):
         await context.bot.send_message(uid, _fmt_tpl("redeem_msg_ok_dm", goodsName=item["name"], pointNum=price))
     except TelegramError:
         pass  # 未私聊过 bot 的用户收不到 DM，群通知已足
+    return None
+
+async def _redeem_buy_cb(q, idx, context):
+    """蓝色按钮点一下直接兑换：idx=上架商品编号（与列表消息一致）。"""
+    cid, uid = q.message.chat.id, q.from_user.id
+    gate = _redeem_gate()
+    if gate:
+        await q.answer(gate, show_alert=True); return
+    items = [x for x in redeem_goods if x.get("on", True)]
+    if not (1 <= idx <= len(items)):
+        await q.answer("❌ 商品不存在或已下架，重新发「%s」看最新列表" % REDEEM_CMD, show_alert=True); return
+    err = await _redeem_execute(context, cid, uid, items[idx - 1])
+    if err:
+        await q.answer(err, show_alert=True)
+    else:
+        await q.answer("🎉 兑换成功！")
+
+async def cmd_points_redeem(update, context):
+    """积分兑换（阿福式活动）：发触发词看商品按钮列表，点蓝色按钮立即兑换；
+    仍支持「触发词 编号/名称」。剩余 0=不限；限量兑完自动下架；支持起止时间与每人限购。"""
+    if not await need_auth(update, context): return
+    if not is_group_chat(update):
+        await send_reply(update, context, "⚠️ 积分兑换请在群聊中使用。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    gate = _redeem_gate()
+    if gate:
+        await send_reply(update, context, gate); return
+    items = [x for x in redeem_goods if x.get("on", True)]
+    if not items:
+        await send_reply(update, context, "🎁 暂无兑换商品，管理员可在后台「积分系统 → 积分兑换」上架。"); return
+    args = context.args or []
+    if not args:  # 商品按钮列表：点蓝色按钮直接兑换
+        rows = []
+        for i, x in enumerate(items, 1):
+            left = int(x.get("left", 0) or 0)
+            label = _fmt_tpl("redeem_msg_list", goodsName=x["name"],
+                             pointNum=int(x.get("price", 0) or 0),
+                             leftNum=("不限" if left <= 0 else left))
+            rows.append([InlineKeyboardButton(label, callback_data=f"redeem_buy_{i}")])
+        text = (f"🎁 积分兑换\n{'━' * 14}\n点击蓝色商品按钮立即兑换"
+                f"\n💡 也可以发「{REDEEM_CMD} 编号/名称」兑换")
+        msg = await safe_send(context.bot, cid, text,
+                              reply_markup=InlineKeyboardMarkup(rows))
+        if msg and REPLY_DELETE_SECONDS > 0:
+            schedule_delete(context.application, cid, msg, REPLY_DELETE_SECONDS)
+        return
+    arg = args[0].strip()
+    item = None
+    if arg.isdigit() and 1 <= int(arg) <= len(items):
+        item = items[int(arg) - 1]
+    else:
+        item = next((x for x in items if x["name"] == arg), None)
+    if not item:
+        await send_reply(update, context, f"❌ 没有这个商品，发「{REDEEM_CMD}」查看列表。"); return
+    err = await _redeem_execute(context, cid, uid, item)
+    if err:
+        await send_reply(update, context, err)
 
 async def cmd_mall(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not MALL_ENABLED:
-        await update.message.reply_text("ℹ️ 积分商城未开启。"); return
+        await send_reply(update, context, "ℹ️ 积分商城未开启。"); return
     items = [x for x in MALL_ITEMS if x.get("on", True)]
     if not items:
-        await update.message.reply_text(_fmt_tpl("mall_msg_empty")); return
+        await send_reply(update, context, _fmt_tpl("mall_msg_empty")); return
     page = 1
     if context.args and context.args[0].isdigit():
         page = max(1, int(context.args[0]))
@@ -5367,19 +5411,22 @@ async def cmd_mall(update, context):
         lines.append(f"{i}. {item['name']}　—　{_mall_price(item)} 积分" + (f"（{desc}）" if desc else ""))
     lines.append("")
     lines.append("💡 发「购买 编号」（如：购买 1）即可用积分兑换，管理员会尽快发货。")
-    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines))
+    msgs = await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines))
+    if msgs and REPLY_DELETE_SECONDS > 0:
+        for m_ in msgs:
+            schedule_delete(context.application, update.effective_chat.id, m_, REPLY_DELETE_SECONDS)
 
 async def cmd_mall_buy(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 购买请在群聊中进行。"); return
+        await send_reply(update, context, "⚠️ 购买请在群聊中进行。"); return
     if not MALL_ENABLED:
-        await update.message.reply_text("ℹ️ 积分商城未开启。"); return
+        await send_reply(update, context, "ℹ️ 积分商城未开启。"); return
     items = [x for x in MALL_ITEMS if x.get("on", True)]
     if not items:
-        await update.message.reply_text(_fmt_tpl("mall_msg_empty")); return
+        await send_reply(update, context, _fmt_tpl("mall_msg_empty")); return
     if not context.args:
-        await update.message.reply_text(f"用法：购买 编号（1~{len(items)}），用「积分商城」查看列表。"); return
+        await send_reply(update, context, f"用法：购买 编号（1~{len(items)}），用「积分商城」查看列表。"); return
     arg = context.args[0].strip()
     item = None
     if arg.isdigit() and 1 <= int(arg) <= len(items):
@@ -5388,35 +5435,35 @@ async def cmd_mall_buy(update, context):
         name = arg.lstrip("0123456789.、 ").strip()
         item = next((x for x in items if x["name"] == name), None)
     if not item:
-        await update.message.reply_text("❌ 没有这个商品，用「积分商城」查看列表。"); return
+        await send_reply(update, context, "❌ 没有这个商品，用「积分商城」查看列表。"); return
     stk = item.get("stock")
     if isinstance(stk, int) and stk <= 0:
-        await update.message.reply_text("❌ 该商品已售罄。"); return
+        await send_reply(update, context, "❌ 该商品已售罄。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     price = _mall_price(item)
     if MALL_MIN_AGE_DAYS > 0:  # 兑换门槛1：与 bot 首次互动满 N 天（小号没有历史）
         seen = user_first_seen.get(uid)
         days = (now_bj().timestamp() - seen) / 86400 if seen else 0.0
         if days < MALL_MIN_AGE_DAYS:
-            await update.message.reply_text(f"❌ 兑换门槛：使用满 {MALL_MIN_AGE_DAYS} 天才能兑换（当前 {days:.0f} 天）。"); return
+            await send_reply(update, context, f"❌ 兑换门槛：使用满 {MALL_MIN_AGE_DAYS} 天才能兑换（当前 {days:.0f} 天）。"); return
     if MALL_MIN_ACTIVE_DAYS > 0:  # 兑换门槛2：有游戏盈亏记录的天数 ≥N
         active_days = set()
         for prof in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date):
             for d, chats in prof.items():
                 if uid in (chats.get(cid) or {}): active_days.add(d)
         if len(active_days) < MALL_MIN_ACTIVE_DAYS:
-            await update.message.reply_text(f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"); return
+            await send_reply(update, context, f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"); return
     old_bal = game_chips[cid][uid]
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
-            await update.message.reply_text(f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"); return
+            await send_reply(update, context, f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"); return
         game_chips[cid][uid] -= price
         if isinstance(stk, int):
             item["stock"] = stk - 1
         mall_orders.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "uid": uid,
                             "name": await get_name(context.application, uid), "item": item["name"], "price": price})
         save_data()
-    await update.message.reply_text(_fmt_tpl("mall_msg_buy",
+    await send_reply(update, context, _fmt_tpl("mall_msg_buy",
         name=await get_name(context.application, uid), item=item["name"], price=price, balance=game_chips[cid][uid]))
     await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
     try:
@@ -5428,9 +5475,9 @@ async def cmd_mall_buy(update, context):
 
 async def cmd_record(update, context):
     """个人战绩：本群四游戏累计盈亏汇总。用法：战绩 / 回复成员消息发「战绩」/「战绩 用户ID」。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 战绩请在群聊中查看。"); return
+        await send_reply(update, context, "⚠️ 战绩请在群聊中查看。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     args = context.args or []
     reply = update.message.reply_to_message
@@ -5456,7 +5503,7 @@ async def cmd_record(update, context):
     lines.append("━━━━━━━━━━━━")
     lines.append(f"💰 累计：{sum(per.values()):+d}")
     lines.append(f"📅 活跃 {len(days)} 天｜💳 当前余额 {balance}")
-    reply_msg = await update.message.reply_text("\n".join(lines))
+    reply_msg = await send_reply(update, context, "\n".join(lines))
     schedule_delete(context.application, cid, reply_msg, REPLY_DELETE_SECONDS)
 
 
@@ -5467,17 +5514,17 @@ async def cmd_webcode(update, context):
     用这条命令主动索取即可——命令是用户发起的，不受该限制。
     """
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅机器人管理员可用。"); return
+        await send_reply(update, context, "❌ 仅机器人管理员可用。"); return
     now = time.time()
     alive = [(k, v) for k, v in web_pending_otp.items() if v["exp"] > now]
     if not alive:
-        await update.message.reply_text(
+        await send_reply(update, context, 
             "当前没有待验证的登录请求。\n\n"
             "用法：先在网页端输入密码 → 再回来发 /网页码 取验证码。")
         return
     _tok, rec = alive[-1]
     left = int(rec["exp"] - now)
-    await update.message.reply_text(
+    await send_reply(update, context, 
         f"🔐 <b>后台登录验证码</b>\n\n"
         f"验证码：<code>{rec['code']}</code>\n"
         f"来源 IP：<code>{rec['ip']}</code>\n"
@@ -5726,9 +5773,9 @@ async def cmd_lottery(update, context):
       /开奖开奖                           → 管理员手动立即开奖
       /开奖结束                           → 管理员强制结束并退款（按需）
     """
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not LOTTERY_ENABLED:
-        await update.message.reply_text("❌ 群组抽奖已关闭（后台「积分系统→群组抽奖」可开启）"); return
+        await send_reply(update, context, "❌ 群组抽奖已关闭（后台「积分系统→群组抽奖」可开启）"); return
     cid = update.effective_chat.id
     uid = update.effective_user.id
     text = (update.message.text or "").strip()
@@ -5746,14 +5793,14 @@ async def cmd_lottery(update, context):
         if args_part in ("开奖", "开奖开奖", "开", "开奖", "开奖开奖"):
             lo = _lottery_active(cid)
             if not lo:
-                await update.message.reply_text("❌ 当前没有进行中的抽奖活动"); return
-            await update.message.reply_text("🎲 正在开奖…")
+                await send_reply(update, context, "❌ 当前没有进行中的抽奖活动"); return
+            await send_reply(update, context, "🎲 正在开奖…")
             await _lottery_draw(context.application, cid, lo)
             return
         if args_part in ("结束", "取消"):
             lo = _lottery_active(cid)
             if not lo:
-                await update.message.reply_text("❌ 当前没有进行中的抽奖活动"); return
+                await send_reply(update, context, "❌ 当前没有进行中的抽奖活动"); return
             # 退积分（若有扣费）
             if lo["fee"] > 0:
                 for u, _, _ in lo["participants"]:
@@ -5768,7 +5815,7 @@ async def cmd_lottery(update, context):
     if not args_part:
         lo = _lottery_active(cid)
         if not lo:
-            await update.message.reply_text(
+            await send_reply(update, context, 
                 "❌ 当前没有进行中的抽奖\n\n"
                 "管理员开局：<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数或时间</code>",
                 parse_mode="HTML")
@@ -5777,30 +5824,30 @@ async def cmd_lottery(update, context):
         if ok:
             name = await get_name(context.application, uid)
             bal = game_chips.get(cid, {}).get(uid, 0)
-            await update.message.reply_text(
+            await send_reply(update, context, 
                 LOTTERY_MSG_JOINED.format(nick=html.escape(name), n=info, balance=bal),
                 parse_mode="HTML")
             # 公告上的已参与人数实时刷新
             await _lottery_refresh_announce(context.application, cid, lo)
         elif info == "dup":
             name = await get_name(context.application, uid)
-            await update.message.reply_text(LOTTERY_MSG_DUP.format(nick=html.escape(name)))
+            await send_reply(update, context, LOTTERY_MSG_DUP.format(nick=html.escape(name)))
         else:
             name = await get_name(context.application, uid)
-            await update.message.reply_text(LOTTERY_MSG_FAIL.format(nick=html.escape(name), reason=info))
+            await send_reply(update, context, LOTTERY_MSG_FAIL.format(nick=html.escape(name), reason=info))
         return
     # 管理员开新活动
     if not is_bot_admin(uid):
-        await update.message.reply_text("❌ 仅管理员可以开局"); return
+        await send_reply(update, context, "❌ 仅管理员可以开局"); return
     if _lottery_active(cid):
-        await update.message.reply_text("⚠️ 当前群已有进行中的抽奖，请先 /开奖开奖 或 /开奖结束"); return
+        await send_reply(update, context, "⚠️ 当前群已有进行中的抽奖，请先 /开奖开奖 或 /开奖结束"); return
     # 解析 "标题 | 奖品 | 秒数"（秒数可选，奖品必填）
     parts = [p.strip() for p in args_part.split("|")]
     title = parts[0]
     if not title or len(title) > 50:
-        await update.message.reply_text("❌ 标题不能为空或超过 50 字"); return
+        await send_reply(update, context, "❌ 标题不能为空或超过 50 字"); return
     if len(parts) < 2:
-        await update.message.reply_text(
+        await send_reply(update, context, 
             "用法：\n"
             "<code>/开奖 标题 | 奖品A:数量,奖品B:数量 | 秒数或开奖时间</code>\n\n"
             "示例：\n"
@@ -5810,13 +5857,13 @@ async def cmd_lottery(update, context):
             parse_mode="HTML"); return
     prizes, perr = _lottery_parse_prizes(parts[1])
     if perr:
-        await update.message.reply_text(f"❌ {perr}"); return
+        await send_reply(update, context, f"❌ {perr}"); return
     # 第三段：纯数字=秒数倒计时；或指定开奖时间（20:00 / 09-08 20:00 / 2026-09-08 20:00）
     end_ts = None
     if len(parts) >= 3 and parts[2]:
         end_ts = _lottery_parse_end(parts[2])
         if end_ts is None:
-            await update.message.reply_text(
+            await send_reply(update, context, 
                 "❌ 开奖时间格式不对\n\n支持：<code>90</code>（90秒后）、<code>20:00</code>、"
                 "<code>09-08 20:00</code>、<code>2026-09-08 20:00</code>",
                 parse_mode="HTML"); return
@@ -5876,11 +5923,11 @@ async def cmd_weblogin(update, context):
     """
     uid = update.effective_user.id
     if not is_bot_admin(uid):
-        await update.message.reply_text("⛔ 仅机器人管理员可用")
+        await send_reply(update, context, "⛔ 仅机器人管理员可用")
         return
     base = (WEB_BASE_URL or "").strip().rstrip("/")
     if not base:
-        await update.message.reply_text(
+        await send_reply(update, context, 
             "⚠️ 还没配置后台地址，一键登录不可用。\n\n"
             "请先用密码登录网页后台 → 「通用与应急」→「后台公网地址」\n"
             "填你的后台访问地址（如 https://xxx.northflank.app），保存后再来。")
@@ -5901,16 +5948,16 @@ async def cmd_weblogin(update, context):
             "· 不是你本人操作请忽略"),
             parse_mode="HTML", disable_web_page_preview=True)
         if update.effective_chat.id != uid:
-            await update.message.reply_text("✅ 登录链接已发到你的私聊（2 分钟内有效）")
+            await send_reply(update, context, "✅ 登录链接已发到你的私聊（2 分钟内有效）")
     except Exception:
-        await update.message.reply_text(
+        await send_reply(update, context, 
             "⚠️ 链接发送失败（你可能从未私聊过本机器人）。\n"
             "请先私聊我发 /start，然后再发 /后台。")
 
 async def cmd_status(update, context):
     """机器人自检（管理员）：运行时长/各游戏活跃局/台账/数据文件/调度任务。"""
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅机器人管理员可用。"); return
+        await send_reply(update, context, "❌ 仅机器人管理员可用。"); return
     uptime = int(time.time() - BOT_BOOT_TS)
     uptime_txt = f"{uptime // 86400}天{uptime % 86400 // 3600}小时{uptime % 3600 // 60}分"
     try: dsz = f"{os.path.getsize(DATA_FILE) / 1024:.0f} KB"
@@ -5926,19 +5973,19 @@ async def cmd_status(update, context):
         f"📒 资金流台账：{len(ledger)} 条",
         f"💾 数据文件：{dsz}｜后台任务：{len(background_tasks)} 个",
     ]
-    await update.message.reply_text("\n".join(lines))
+    await send_reply(update, context, "\n".join(lines))
 
 
 async def cmd_redpacket(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not REDPACKET_ENABLED:
-        await update.message.reply_text("ℹ️ 红包功能未开启。"); return
+        await send_reply(update, context, "ℹ️ 红包功能未开启。"); return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 红包请在群聊中发。"); return
+        await send_reply(update, context, "⚠️ 红包请在群聊中发。"); return
     cid = update.effective_chat.id
 
     async def _reply(text):  # 机器人提示语也按后台设置自动删除
-        reply = await update.message.reply_text(text)
+        reply = await send_reply(update, context, text)
         schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
 
     args = context.args
@@ -6036,11 +6083,11 @@ async def _rp_grab(p, pid, uid, context, q):
 # ---------- 积分转赠 / 积分拍卖 / 购买积分（统一钱包） ----------
 async def cmd_inherit(update, context):
     """积分转赠（继承）：把积分转给同群其他成员，可收手续费。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 转赠请在群聊中使用。"); return
+        await send_reply(update, context, "⚠️ 转赠请在群聊中使用。"); return
     if not INHERIT_ENABLED:
-        await update.message.reply_text("❌ 转赠功能未开启（网页「积分系统 → 积分继承」可开启）。"); return
+        await send_reply(update, context, "❌ 转赠功能未开启（网页「积分系统 → 积分继承」可开启）。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     args = context.args or []
     reply = update.message.reply_to_message
@@ -6049,24 +6096,24 @@ async def cmd_inherit(update, context):
     elif len(args) >= 2 and args[0].isdigit() and args[1].isdigit():
         target, amount = int(args[0]), int(args[1])
     else:
-        await update.message.reply_text("用法：回复成员消息发「转赠 数量」，或「转赠 用户ID 数量」"); return
+        await send_reply(update, context, "用法：回复成员消息发「转赠 数量」，或「转赠 用户ID 数量」"); return
     if amount <= 0:
-        await update.message.reply_text("❌ 转赠数量必须为正数。"); return
+        await send_reply(update, context, "❌ 转赠数量必须为正数。"); return
     if target == uid:
-        await update.message.reply_text("❌ 不能转给自己。"); return
+        await send_reply(update, context, "❌ 不能转给自己。"); return
     if player_is_busy(cid, uid) or player_is_busy(cid, target):
-        await update.message.reply_text("⚠️ 转赠双方有正在进行的游戏，请先结束。"); return
+        await send_reply(update, context, "⚠️ 转赠双方有正在进行的游戏，请先结束。"); return
     fee = amount * INHERIT_FEE_PERCENT // 100
     recv = amount - fee
     if INHERIT_DAILY_LIMIT > 0:  # 每日转赠总额上限（防小号互刷）
         today = now_bj().strftime("%Y-%m-%d")
         used = inherit_daily[today][cid].get(uid, 0)
         if used + amount > INHERIT_DAILY_LIMIT:
-            await update.message.reply_text(f"❌ 超出每日转赠上限：今日已转出 {used}，上限 {INHERIT_DAILY_LIMIT}（网页「积分继承」可调）。"); return
+            await send_reply(update, context, f"❌ 超出每日转赠上限：今日已转出 {used}，上限 {INHERIT_DAILY_LIMIT}（网页「积分继承」可调）。"); return
     old_self, old_tgt = game_chips[cid][uid], game_chips[cid][target]
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < amount:
-            await update.message.reply_text(f"❌ 你的积分不足：需要 {amount}，当前 {game_chips[cid][uid]}。"); return
+            await send_reply(update, context, f"❌ 你的积分不足：需要 {amount}，当前 {game_chips[cid][uid]}。"); return
         game_chips[cid][uid] -= amount
         game_chips[cid][target] += recv
         if INHERIT_DAILY_LIMIT > 0:
@@ -6074,7 +6121,7 @@ async def cmd_inherit(update, context):
         ledger_add(cid, uid, target, amount, "转赠")  # 资金流台账
         save_data()
     fee_txt = f"（手续费 {fee}）" if fee else ""
-    await update.message.reply_text(_fmt_tpl("inherit_msg_ok",
+    await send_reply(update, context, _fmt_tpl("inherit_msg_ok",
         name=await get_name(context.application, uid), target=await get_name(context.application, target, cid=cid),
         amount=amount, fee=fee_txt, recv=recv, balance=game_chips[cid][uid]))
     await _check_level_change(context.application, cid, uid, old_self, game_chips[cid][uid])
@@ -6110,22 +6157,22 @@ async def _auction_settle(cid, app):
 
 async def cmd_auction(update, context):
     """管理员发起积分拍卖：/拍卖 物品名 起拍价，按钮加价，价高者得。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 拍卖请在群聊中使用。"); return
+        await send_reply(update, context, "⚠️ 拍卖请在群聊中使用。"); return
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可发起拍卖。"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可发起拍卖。"); return
     if not AUCTION_ENABLED:
-        await update.message.reply_text("❌ 拍卖功能未开启（网页「积分系统 → 积分拍卖」可开启）。"); return
+        await send_reply(update, context, "❌ 拍卖功能未开启（网页「积分系统 → 积分拍卖」可开启）。"); return
     cid = update.effective_chat.id
     args = context.args or []
     if len(args) < 2 or not args[-1].isdigit():
-        await update.message.reply_text("用法：/拍卖 物品名 起拍价"); return
+        await send_reply(update, context, "用法：/拍卖 物品名 起拍价"); return
     if cid in auctions:
-        await update.message.reply_text("⚠️ 本群已有拍卖进行中，结标后再开。"); return
+        await send_reply(update, context, "⚠️ 本群已有拍卖进行中，结标后再开。"); return
     item, price = " ".join(args[:-1]), int(args[-1])
     if price < 0:
-        await update.message.reply_text("❌ 起拍价不能为负。"); return
+        await send_reply(update, context, "❌ 起拍价不能为负。"); return
     auctions[cid] = {"item": item, "price": price, "top_uid": None, "step": AUCTION_STEP,
                      "end_ts": now_bj().timestamp() + AUCTION_DURATION, "msg_id": None, "task": None}
     msg = await safe_send(context.bot, cid, _auction_text(cid),
@@ -6285,25 +6332,25 @@ async def _guess_do_cancel(app, cid):
 
 async def cmd_guess_open(update, context):
     """管理员发起积分竞猜：/开竞猜 题目/选项A/选项B [时长分钟]，按钮下注，封盘后按比例瓜分。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 竞猜请在群聊中使用。"); return
+        await send_reply(update, context, "⚠️ 竞猜请在群聊中使用。"); return
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可发起竞猜。"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可发起竞猜。"); return
     if not GUESS_ENABLED:
-        await update.message.reply_text("❌ 竞猜功能未开启（网页「积分系统 → 积分竞猜」可开启）。"); return
+        await send_reply(update, context, "❌ 竞猜功能未开启（网页「积分系统 → 积分竞猜」可开启）。"); return
     cid = update.effective_chat.id
     spec = " ".join(context.args or []).strip()
     parts = [p.strip() for p in spec.split("/") if p.strip()]
     if len(parts) < 3 or len(parts) > 4:
-        await update.message.reply_text("用法：/开竞猜 题目/选项A/选项B [时长分钟]"); return
+        await send_reply(update, context, "用法：/开竞猜 题目/选项A/选项B [时长分钟]"); return
     duration = GUESS_DURATION
     if len(parts) == 4:
         if not parts[3].isdigit():
-            await update.message.reply_text("❌ 时长必须是分钟数字。"); return
+            await send_reply(update, context, "❌ 时长必须是分钟数字。"); return
         duration = max(1, min(1440, int(parts[3])))
     if cid in guesses:
-        await update.message.reply_text("⚠️ 本群已有竞猜进行中，结算或撤销后再开。"); return
+        await send_reply(update, context, "⚠️ 本群已有竞猜进行中，结算或撤销后再开。"); return
     guesses[cid] = {"q": parts[0][:50], "a": parts[1][:20], "b": parts[2][:20],
                     "end_ts": now_bj().timestamp() + duration * 60, "locked": False,
                     "bets": {}, "side_pots": {"A": 0, "B": 0}, "msg_id": None, "task": None}
@@ -6315,40 +6362,40 @@ async def cmd_guess_open(update, context):
 
 async def cmd_guess_settle(update, context):
     """管理员开出竞猜答案：/竞猜结算 A 或 /竞猜结算 B，猜中方按比例瓜分奖池。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 请在群聊中使用。"); return
+        await send_reply(update, context, "⚠️ 请在群聊中使用。"); return
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可结算竞猜。"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可结算竞猜。"); return
     err = await _guess_do_settle(context.application, update.effective_chat.id,
                                  (context.args or [""])[0] if context.args else "")
     if err:
-        await update.message.reply_text(f"❌ {err}")
+        await send_reply(update, context, f"❌ {err}")
 
 
 async def cmd_guess_cancel(update, context):
     """管理员撤销竞猜：/竞猜撤销，全额退款。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 请在群聊中使用。"); return
+        await send_reply(update, context, "⚠️ 请在群聊中使用。"); return
     if not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅 Bot 管理员可撤销竞猜。"); return
+        await send_reply(update, context, "❌ 仅 Bot 管理员可撤销竞猜。"); return
     err = await _guess_do_cancel(context.application, update.effective_chat.id)
     if err:
-        await update.message.reply_text(f"❌ {err}")
+        await send_reply(update, context, f"❌ {err}")
 
 
 async def cmd_box(update, context):
     """积分盲盒：扣 BOX_PRICE 开一次，按权重随机 BOX_POOL，结果走 send_settle 自动回收。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not BOX_ENABLED:
-        await update.message.reply_text("❌ 盲盒未开启（网页「积分系统 → 积分盲盒」可开启）。"); return
+        await send_reply(update, context, "❌ 盲盒未开启（网页「积分系统 → 积分盲盒」可开启）。"); return
     if not box_pool:
-        await update.message.reply_text("🎁 奖品池还是空的，管理员在后台「积分盲盒」里配置。"); return
+        await send_reply(update, context, "🎁 奖品池还是空的，管理员在后台「积分盲盒」里配置。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < BOX_PRICE:
-            await update.message.reply_text(f"❌ 积分不足：开一次需要 {BOX_PRICE}，你当前 {game_chips[cid][uid]}。"); return
+            await send_reply(update, context, f"❌ 积分不足：开一次需要 {BOX_PRICE}，你当前 {game_chips[cid][uid]}。"); return
         game_chips[cid][uid] -= BOX_PRICE
         weights = [max(1, int(p.get("weight", 1) or 1)) for p in box_pool]
         pick = random.choices(box_pool, weights=weights, k=1)[0]
@@ -6366,11 +6413,11 @@ async def cmd_box(update, context):
 
 async def cmd_buy_points(update, context):
     """购买积分（人工确认制，无需支付通道）：玩家申请 → 私聊通知管理员 → 管理员一键确认到账。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 请在群聊中申请购买积分。"); return
+        await send_reply(update, context, "⚠️ 请在群聊中申请购买积分。"); return
     if not BUY_ENABLED:
-        await update.message.reply_text("❌ 购买积分功能未开启（网页「积分系统 → 购买积分」可开启）。"); return
+        await send_reply(update, context, "❌ 购买积分功能未开启（网页「积分系统 → 购买积分」可开启）。"); return
     args = context.args or []
     if not args:
         on = sorted([p for p in buy_packages if p.get("on")], key=lambda x: x.get("sort", 0))
@@ -6381,7 +6428,7 @@ async def cmd_buy_points(update, context):
             lines.append("")
             lines.append("💡 发「充值 套餐名」或「充值 数量」提交申请，管理员确认后到账。")
             await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines)); return
-        await update.message.reply_text(f"用法：充值 数量（{BUY_MIN} ~ {BUY_MAX}）\n提交申请后联系管理员转账，管理员确认后积分自动到账。"); return
+        await send_reply(update, context, f"用法：充值 数量（{BUY_MIN} ~ {BUY_MAX}）\n提交申请后联系管理员转账，管理员确认后积分自动到账。"); return
     pkg_arg = args[0].strip()
     amount = int(pkg_arg) if pkg_arg.isdigit() else None
     if amount is None:
@@ -6389,15 +6436,15 @@ async def cmd_buy_points(update, context):
         if p:
             amount = int(p.get("points", 0) or 0)
     if not amount:
-        await update.message.reply_text("❌ 没有这个套餐；按数量充值用法：充值 数量。"); return
+        await send_reply(update, context, "❌ 没有这个套餐；按数量充值用法：充值 数量。"); return
     from_pkg = amount is not None and not pkg_arg.isdigit()
     if not from_pkg and not (BUY_MIN <= amount <= BUY_MAX):
-        await update.message.reply_text(f"❌ 单次购买需在 {BUY_MIN} ~ {BUY_MAX} 之间。"); return
+        await send_reply(update, context, f"❌ 单次购买需在 {BUY_MIN} ~ {BUY_MAX} 之间。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     oid = secrets.token_hex(4)
     buy_orders[oid] = {"cid": cid, "uid": uid, "amount": amount, "ts": now_bj().strftime("%Y-%m-%d %H:%M")}
     save_data()
-    await update.message.reply_text(f"📝 购买申请已提交：{amount} 积分（单号 {oid}）\n请联系管理员完成转账，确认后积分自动到账。")
+    await send_reply(update, context, f"📝 购买申请已提交：{amount} 积分（单号 {oid}）\n请联系管理员完成转账，确认后积分自动到账。")
     try:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ 确认到账", callback_data=f"buyok_{oid}"),
                                     InlineKeyboardButton("❌ 取消", callback_data=f"buyno_{oid}")]])
@@ -6438,12 +6485,12 @@ def _admin_log(cid, admin_uid, action, target):
 
 async def cmd_mute(update, context):
     """禁言：回复消息发「禁言 分钟」或「禁言 用户ID 分钟」。白名单免疫。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, admin = update.effective_chat.id, update.effective_user.id
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 禁言请在群聊中使用。"); return
+        await send_reply(update, context, "⚠️ 禁言请在群聊中使用。"); return
     if not await _is_group_admin(context, cid, admin):
-        await update.message.reply_text("❌ 仅管理员可操作"); return
+        await send_reply(update, context, "❌ 仅管理员可操作"); return
     args = context.args or []
     reply = update.message.reply_to_message
     if reply and args and args[0].isdigit():
@@ -6451,25 +6498,25 @@ async def cmd_mute(update, context):
     elif len(args) >= 2 and args[0].lstrip("-").isdigit() and args[1].isdigit():
         target, minutes = int(args[0]), max(1, min(int(args[1]), 43200))
     else:
-        await update.message.reply_text("用法：回复消息发「禁言 分钟」，或「禁言 用户ID 分钟」"); return
+        await send_reply(update, context, "用法：回复消息发「禁言 分钟」，或「禁言 用户ID 分钟」"); return
     if target in whitelist[cid]:
-        await update.message.reply_text("✅ 该用户在白名单中，已跳过禁言。"); return
+        await send_reply(update, context, "✅ 该用户在白名单中，已跳过禁言。"); return
     if target == admin:
-        await update.message.reply_text("❌ 不能禁言自己。"); return
+        await send_reply(update, context, "❌ 不能禁言自己。"); return
     try:
         await context.bot.restrict_chat_member(cid, target, permissions=ChatPermissions(can_send_messages=False),
                                                until_date=int(now_bj().timestamp()) + minutes * 60)
     except Exception as e:
-        await update.message.reply_text(f"❌ 禁言失败（需 bot 为群管理员且有禁言权限）：{e}"); return
+        await send_reply(update, context, f"❌ 禁言失败（需 bot 为群管理员且有禁言权限）：{e}"); return
     tname = user_names.get(target, str(target))
     _admin_log(cid, admin, f"禁言 {minutes} 分钟", tname); save_data()
-    await update.message.reply_text(f"🔇 已禁言 {tname} {minutes} 分钟。")
+    await send_reply(update, context, f"🔇 已禁言 {tname} {minutes} 分钟。")
 
 async def cmd_unmute(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, admin = update.effective_chat.id, update.effective_user.id
     if not await _is_group_admin(context, cid, admin):
-        await update.message.reply_text("❌ 仅管理员可操作"); return
+        await send_reply(update, context, "❌ 仅管理员可操作"); return
     reply = update.message.reply_to_message
     args = context.args or []
     if reply:
@@ -6477,24 +6524,24 @@ async def cmd_unmute(update, context):
     elif args and args[0].lstrip("-").isdigit():
         target = int(args[0])
     else:
-        await update.message.reply_text("用法：回复消息发「解禁」，或「解禁 用户ID」"); return
+        await send_reply(update, context, "用法：回复消息发「解禁」，或「解禁 用户ID」"); return
     try:
         await context.bot.restrict_chat_member(cid, target, permissions=ChatPermissions(
             can_send_messages=True, can_send_other_messages=True, can_add_web_page_previews=True,
             can_send_polls=True, can_invite_users=True))
     except Exception as e:
-        await update.message.reply_text(f"❌ 解禁失败：{e}"); return
+        await send_reply(update, context, f"❌ 解禁失败：{e}"); return
     _admin_log(cid, admin, "解除禁言", user_names.get(target, str(target))); save_data()
-    await update.message.reply_text(f"🔊 已解除 {user_names.get(target, target)} 的禁言。")
+    await send_reply(update, context, f"🔊 已解除 {user_names.get(target, target)} 的禁言。")
 
 async def cmd_groupban(update, context):
     """Telegram 级封禁：踢出并禁止再入群（区别于 /拉黑 的 bot 层黑名单）。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, admin = update.effective_chat.id, update.effective_user.id
     if not is_group_chat(update):
-        await update.message.reply_text("⚠️ 请在群聊中使用。"); return
+        await send_reply(update, context, "⚠️ 请在群聊中使用。"); return
     if not await _is_group_admin(context, cid, admin):
-        await update.message.reply_text("❌ 仅管理员可操作"); return
+        await send_reply(update, context, "❌ 仅管理员可操作"); return
     reply = update.message.reply_to_message
     args = context.args or []
     if reply:
@@ -6502,39 +6549,39 @@ async def cmd_groupban(update, context):
     elif args and args[0].lstrip("-").isdigit():
         target = int(args[0])
     else:
-        await update.message.reply_text("用法：回复消息发「群封」，或「群封 用户ID」"); return
+        await send_reply(update, context, "用法：回复消息发「群封」，或「群封 用户ID」"); return
     if target in whitelist[cid]:
-        await update.message.reply_text("✅ 该用户在白名单中，已跳过。"); return
+        await send_reply(update, context, "✅ 该用户在白名单中，已跳过。"); return
     try:
         await context.bot.ban_chat_member(cid, target)
     except Exception as e:
-        await update.message.reply_text(f"❌ 封禁失败（需 bot 为群管理员）：{e}"); return
+        await send_reply(update, context, f"❌ 封禁失败（需 bot 为群管理员）：{e}"); return
     tname = user_names.get(target, str(target))
     _admin_log(cid, admin, "Telegram级封禁", tname); save_data()
-    await update.message.reply_text(f"🔨 已将 {tname} 封禁并移出群组（可用「群解封」撤销）。")
+    await send_reply(update, context, f"🔨 已将 {tname} 封禁并移出群组（可用「群解封」撤销）。")
 
 async def cmd_groupunban(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, admin = update.effective_chat.id, update.effective_user.id
     if not await _is_group_admin(context, cid, admin):
-        await update.message.reply_text("❌ 仅管理员可操作"); return
+        await send_reply(update, context, "❌ 仅管理员可操作"); return
     args = context.args or []
     if not args or not args[0].lstrip("-").isdigit():
-        await update.message.reply_text("用法：群解封 用户ID"); return
+        await send_reply(update, context, "用法：群解封 用户ID"); return
     target = int(args[0])
     try:
         await context.bot.unban_chat_member(cid, target, only_if_banned=True)
     except Exception as e:
-        await update.message.reply_text(f"❌ 解封失败：{e}"); return
+        await send_reply(update, context, f"❌ 解封失败：{e}"); return
     _admin_log(cid, admin, "Telegram级解封", str(target)); save_data()
-    await update.message.reply_text(f"✅ 已解封 {target}，可重新拉入群。")
+    await send_reply(update, context, f"✅ 已解封 {target}，可重新拉入群。")
 
 async def cmd_whitelist(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid = update.effective_chat.id
     users = whitelist.get(cid, set())
     if not users:
-        await update.message.reply_text("白名单为空。回复成员消息发「加白」可加入。"); return
+        await send_reply(update, context, "白名单为空。回复成员消息发「加白」可加入。"); return
     lines = ["📋 白名单成员", "━" * 14]
     for i, u in enumerate(sorted(users), 1):
         lines.append(f"{i}. {user_names.get(u, u)}（{u}）")
@@ -6542,10 +6589,10 @@ async def cmd_whitelist(update, context):
     await safe_send_long(context.bot, cid, "\n".join(lines))
 
 async def cmd_whitelist_add(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, admin = update.effective_chat.id, update.effective_user.id
     if not await _is_group_admin(context, cid, admin):
-        await update.message.reply_text("❌ 仅管理员可操作"); return
+        await send_reply(update, context, "❌ 仅管理员可操作"); return
     reply = update.message.reply_to_message
     args = context.args or []
     if reply:
@@ -6553,16 +6600,16 @@ async def cmd_whitelist_add(update, context):
     elif args and args[0].lstrip("-").isdigit():
         target = int(args[0])
     else:
-        await update.message.reply_text("用法：回复成员消息发「加白」，或「加白 用户ID」"); return
+        await send_reply(update, context, "用法：回复成员消息发「加白」，或「加白 用户ID」"); return
     whitelist[cid].add(target); save_data()
     _admin_log(cid, admin, "加白名单", user_names.get(target, str(target)))
-    await update.message.reply_text(f"✅ 已把 {user_names.get(target, target)} 加入白名单。")
+    await send_reply(update, context, f"✅ 已把 {user_names.get(target, target)} 加入白名单。")
 
 async def cmd_whitelist_del(update, context):
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid, admin = update.effective_chat.id, update.effective_user.id
     if not await _is_group_admin(context, cid, admin):
-        await update.message.reply_text("❌ 仅管理员可操作"); return
+        await send_reply(update, context, "❌ 仅管理员可操作"); return
     reply = update.message.reply_to_message
     args = context.args or []
     if reply:
@@ -6570,19 +6617,19 @@ async def cmd_whitelist_del(update, context):
     elif args and args[0].lstrip("-").isdigit():
         target = int(args[0])
     else:
-        await update.message.reply_text("用法：回复成员消息发「删白」，或「删白 用户ID」"); return
+        await send_reply(update, context, "用法：回复成员消息发「删白」，或「删白 用户ID」"); return
     whitelist[cid].discard(target); save_data()
     _admin_log(cid, admin, "移出白名单", user_names.get(target, str(target)))
-    await update.message.reply_text(f"✅ 已把 {user_names.get(target, target)} 移出白名单。")
+    await send_reply(update, context, f"✅ 已把 {user_names.get(target, target)} 移出白名单。")
 
 async def cmd_adminlist_tg(update, context):
     """列出本群 Telegram 管理员（实时接口）。"""
-    if not await need_auth(update): return
+    if not await need_auth(update, context): return
     cid = update.effective_chat.id
     try:
         admins = await context.bot.get_chat_administrators(cid)
     except Exception as e:
-        await update.message.reply_text(f"❌ 获取失败：{e}"); return
+        await send_reply(update, context, f"❌ 获取失败：{e}"); return
     lines = ["👥 本群管理员", "━" * 14]
     for a in sorted(admins, key=lambda x: (x.status != "creator", x.user.id)):
         mark = "👑" if a.status == "creator" else "⚙️"
@@ -6844,15 +6891,15 @@ async def cmd_backup(update, context):
     """管理员备份：把数据文件发送到管理员私聊。"""
     uid = update.effective_user.id
     if not is_bot_admin(uid):
-        await update.message.reply_text("⛔ 仅管理员可用")
+        await send_reply(update, context, "⛔ 仅管理员可用")
         return
     # 强制写盘，确保文件是最新的
     ok = await asyncio.to_thread(force_save_now)
     if not ok:
-        await update.message.reply_text("⚠️ 写盘失败，请稍后再试")
+        await send_reply(update, context, "⚠️ 写盘失败，请稍后再试")
         return
     if not os.path.exists(DATA_FILE):
-        await update.message.reply_text("⚠️ 数据文件不存在")
+        await send_reply(update, context, "⚠️ 数据文件不存在")
         return
     # 拆开 try：把「数据文件发送」单独包，失败时把真实异常返回给管理员；
     # 之前一个大 try 吞所有，群内 /backup 失败只会看到「请先 /start」这种误导性提示。
@@ -6867,7 +6914,7 @@ async def cmd_backup(update, context):
         )
     except Exception as exc:
         logger.exception("数据备份发送失败")
-        await update.message.reply_text(
+        await send_reply(update, context, 
             f"⚠️ 数据备份失败：{type(exc).__name__}: {str(exc)[:200]}\n"
             f"请把这条错误发我排查（常见原因：私聊未 /start、容器磁盘满、文件被另一进程锁定）"
         )
@@ -6885,12 +6932,12 @@ async def cmd_backup(update, context):
         except Exception as exc:
             logger.exception("设置备份发送失败")
             # 数据备份已成功，设置备份失败只是少一个文件，不影响主流程
-            await update.message.reply_text(
+            await send_reply(update, context, 
                 f"⚠️ 设置备份失败：{type(exc).__name__}: {str(exc)[:160]}"
             )
     # 在群里发的命令时，提示一下文件已发到私聊
     if update.effective_chat.id != uid:
-        await update.message.reply_text("✅ 备份文件已发送到你的私聊")
+        await send_reply(update, context, "✅ 备份文件已发送到你的私聊")
 
 
 async def cmd_restore(update, context):
@@ -6898,11 +6945,11 @@ async def cmd_restore(update, context):
     global data_dirty
     uid = update.effective_user.id
     if not is_bot_admin(uid):
-        await update.message.reply_text("⛔ 仅管理员可用")
+        await send_reply(update, context, "⛔ 仅管理员可用")
         return
     replied = update.message.reply_to_message
     if not replied or not replied.document:
-        await update.message.reply_text("⚠️ 请回复一个 JSON 备份文件，再发送 /restore\n\n用法：点开备份文件 → 回复 → 发送 /restore")
+        await send_reply(update, context, "⚠️ 请回复一个 JSON 备份文件，再发送 /restore\n\n用法：点开备份文件 → 回复 → 发送 /restore")
         return
     tmp_path = f"{DATA_FILE}.restore_tmp"
     try:
@@ -6925,7 +6972,7 @@ async def cmd_restore(update, context):
                                      data.get("cmd_aliases") or {}, data.get("tg_menu") or [])
                 load_settings()
                 await asyncio.to_thread(force_save_now)
-                await update.message.reply_text("\n".join([
+                await send_reply(update, context, "\n".join([
                     "✅ 网页设置恢复成功，已立即生效",
                     "━━━━━━━━━━━━━━━",
                     f"⚙️ 恢复设置项：{len(data.get('fields', {}))} 项",
@@ -6935,7 +6982,7 @@ async def cmd_restore(update, context):
                 logger.warning("管理员 %s 恢复了网页设置", uid)
             except Exception:
                 logger.exception("设置恢复失败")
-                await update.message.reply_text("⚠️ 设置恢复失败，文件可能已损坏")
+                await send_reply(update, context, "⚠️ 设置恢复失败，文件可能已损坏")
             return
         # 验证通过：先阻止后台保存线程用旧数据覆盖新文件
         data_dirty = False
@@ -6975,7 +7022,7 @@ async def cmd_restore(update, context):
         try:
             all_players = {u for users in list(game_chips.values()) for u in users}
             game_total = sum(sum(users.values()) for users in list(game_chips.values()))
-            await update.message.reply_text("\n".join([
+            await send_reply(update, context, "\n".join([
                 "✅ 数据恢复成功，已立即生效（无需重启）",
                 "━━━━━━━━━━━━━━━",
                 f"👥 玩家总数：{len(all_players)}",
@@ -6987,15 +7034,15 @@ async def cmd_restore(update, context):
             ]))
         except Exception:
             logger.exception("生成恢复摘要失败")
-            await update.message.reply_text("✅ 数据恢复成功，已立即生效（无需重启）")
+            await send_reply(update, context, "✅ 数据恢复成功，已立即生效（无需重启）")
         logger.warning("管理员 %s 执行了数据恢复，已直接载入内存", uid)
     except json.JSONDecodeError:
-        await update.message.reply_text("⚠️ 文件不是有效的 JSON 格式，恢复已取消")
+        await send_reply(update, context, "⚠️ 文件不是有效的 JSON 格式，恢复已取消")
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
     except Exception as e:
         logger.exception("恢复失败")
-        await update.message.reply_text(f"⚠️ 恢复失败：{e}")
+        await send_reply(update, context, f"⚠️ 恢复失败：{e}")
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
@@ -7170,7 +7217,7 @@ async def _dispatch_alias(cmd, args, update, context):
     命中已知命令后，按 POINTS_DELETE_SECONDS 自动删除用户发的命令消息（全局，群聊限定）。"""
     handler = CMD_ALIASES.get(cmd)
     if not handler:
-        await update.message.reply_text("❓ 未知命令，发送 /开始 查看可用命令")
+        await send_reply(update, context, "❓ 未知命令，发送 /开始 查看可用命令")
         return
     context.args = args
     # 抽奖相关消息（参与关键词/开奖命令）不删：参与痕迹与开奖信息都要保留在群里
@@ -7186,7 +7233,7 @@ async def route_command(update, context):
     _remember_name(update)
     # 拉黑拦截：被封禁用户（非管理员）禁止使用全部命令
     if update.effective_user.id in BLACKLISTED_USERS and not is_bot_admin(update.effective_user.id):
-        await update.message.reply_text("🚫 你已被禁止使用本机器人，如有疑问请联系管理员。"); return
+        await send_reply(update, context, "🚫 你已被禁止使用本机器人，如有疑问请联系管理员。"); return
     parts = update.message.text.strip().split()
     if not parts or not parts[0].startswith("/"):
         return
@@ -7874,8 +7921,15 @@ def start_health_server():
                                   f"<input type='hidden' name='cid' value='{sel_cid}'>"
                                   f"<input type='hidden' name='uid' value='0'>"
                                   "<button type='submit' style='padding:4px 12px;cursor:pointer;background:#8a3b3b;color:#fff;border:none;border-radius:6px'>🧹 清除全部警告</button></form>") if sel_cid else ""
+                chips_clear_btn = (f"<form style='display:inline;margin:0' method='post' action='/memops'>"
+                                   f"<input type='hidden' name='op' value='chips_clear_all'>"
+                                   f"<input type='hidden' name='cid' value='{sel_cid}'>"
+                                   f"<input type='hidden' name='uid' value='0'>"
+                                   "<button type='submit' onclick=\"return confirm('确定清空该群所有成员的积分？此操作不可恢复！')\" "
+                                   "style='padding:4px 12px;cursor:pointer;background:#8a3b3b;color:#fff;border:none;border-radius:6px'>💰 清除全部积分</button></form>") if sel_cid else ""
+                impexp_link = ("<a href='/page/points/impexp'><button type='button' style='padding:4px 12px;cursor:pointer;background:#3d6b4f;color:#fff;border:none;border-radius:6px'>📥 积分导入/导出</button></a>") if sel_cid else ""
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>数据来自成员档案+积分账本+进群事件；封禁/踢出需要 bot 是群管理员</div>{msg}"
-                        f"<div class='card'><h3>🧹 批量操作 {clear_warn_btn}</h3></div>"
+                        f"<div class='card'><h3>🧹 批量操作 {chips_clear_btn} {clear_warn_btn} {impexp_link}</h3></div>"
                         "<div class='card' style='margin-top:18px'>"
                         "<form method='get' action='/page/members/mlist' style='display:flex;flex-wrap:wrap;gap:10px;align-items:end'>"
                         f"<div><div class='sub'>群</div><select name='cid' required>{_group_options(selected=sel_cid)}</select></div>"
@@ -8852,6 +8906,11 @@ def start_health_server():
                         warn_counts.pop(cid_, None)
                         save_data()
                         _mb(note=f"🧹 已清除群 {cid_} 全部警告（{n} 人）")
+                    elif op == "chips_clear_all" and cid_:
+                        n = len(game_chips.get(cid_, {}))
+                        game_chips.pop(cid_, None)
+                        save_data()
+                        _mb(note=f"🧹 已清空群 {cid_} 全部成员积分（{n} 人）")
                     elif op == "wl_add" and cid_ and uid_:
                         whitelist.setdefault(cid_, set()).add(uid_); save_data()
                         admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid_,

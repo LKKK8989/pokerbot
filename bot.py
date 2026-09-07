@@ -16,9 +16,9 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update, ChatPermissions
 from telegram.error import BadRequest, RetryAfter, TelegramError
-from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, MessageHandler, filters
 from treys import Card, Evaluator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -92,6 +92,7 @@ SETTINGS_GROUPS = [
     ("general",   "通用与应急", "⚙️"),
     ("season",    "排位赛",     "🏆"),
     ("points",    "积分系统",   "💰"),
+    ("members",   "群组管理",   "👥"),
     ("security",  "安全",       "🔒"),
 ]
 SETTINGS_FIELDS = [
@@ -156,6 +157,13 @@ sign_data = defaultdict(lambda: defaultdict(dict))   # sign_data[cid][uid] = {"l
 chat_today = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # chat_today[date][cid][uid] = 当日聊天已得积分
 mall_orders = []                                     # [{"ts","cid","uid","name","item","price"}]
 rp_packets = {}                                      # pid -> {"cid","from","left_amt","left_n","grabbed":{uid:amt},"ts","msg_id"}
+
+# ---------- 群组管理数据 ----------
+member_profiles = defaultdict(lambda: defaultdict(dict))  # member_profiles[cid][uid] = {"name","first","last","msgs"}
+whitelist = defaultdict(set)                         # whitelist[cid] = {uid} 白名单（免疫禁言等）
+leave_records = defaultdict(list)                    # leave_records[cid] = [{"ts","uid","name"}] 退群记录(每群留100)
+join_requests = defaultdict(list)                    # join_requests[cid] = [{"ts","uid","name"}] 入群申请(每群留100)
+admin_logs = []                                      # [{"ts","cid","admin","action","target"}] 管理员操作记录(留300)
 
 def _write_settings_file(cfg: dict, password: str):
     try:
@@ -533,6 +541,11 @@ def force_save_now():
                 "sign_data": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in sign_data.items()},
                 "chat_today": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in chats.items()} for date, chats in chat_today.items()},
                 "mall_orders": mall_orders[-200:],
+                "member_profiles": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in member_profiles.items()},
+                "whitelist": {str(cid): sorted(users) for cid, users in whitelist.items()},
+                "leave_records": {str(cid): v[-100:] for cid, v in leave_records.items()},
+                "join_requests": {str(cid): v[-100:] for cid, v in join_requests.items()},
+                "admin_logs": admin_logs[-300:],
             }
             os.makedirs(os.path.dirname(os.path.abspath(DATA_FILE)), exist_ok=True)
             with open(DATA_TEMP_FILE, "w", encoding="utf-8") as file:
@@ -635,6 +648,17 @@ def load_data():
                     chat_today[str(date)][int(cid)][int(uid)] = int(v)
         mall_orders.clear()
         mall_orders.extend(data.get("mall_orders", [])[-200:])
+        # 群组管理数据恢复
+        for cid, users in data.get("member_profiles", {}).items():
+            for uid, v in users.items():
+                if isinstance(v, dict): member_profiles[int(cid)][int(uid)] = v
+        for cid, uids in data.get("whitelist", {}).items():
+            whitelist[int(cid)].update(int(u) for u in uids)
+        for cid, v in data.get("leave_records", {}).items():
+            leave_records[int(cid)] = list(v)[-100:]
+        for cid, v in data.get("join_requests", {}).items():
+            join_requests[int(cid)] = list(v)[-100:]
+        admin_logs.extend(data.get("admin_logs", [])[-300:])
         AUTHORIZED_GROUPS.update(int(cid) for cid in data.get("authorized_groups", []))
         BOT_ADMINS.clear(); BOT_ADMINS.update(ADMIN_USER_IDS)
         BOT_ADMINS.update(int(x) for x in data.get("bot_admins", []))
@@ -4056,6 +4080,15 @@ async def on_text(update, context):
             _award_chat_points(cid, user.id, text)
         except Exception:
             logger.exception("聊天积分记账异常（已吞并）")
+        # 成员档案：发言即记录（首次见/最后见/消息数）
+        try:
+            prof = member_profiles[cid][user.id]
+            if not prof:
+                prof.update({"name": user_names.get(user.id, f"用户{user.id}"), "first": now_bj().strftime("%Y-%m-%d %H:%M"), "msgs": 0})
+            prof["last"] = now_bj().strftime("%Y-%m-%d %H:%M")
+            prof["msgs"] = prof.get("msgs", 0) + 1
+        except Exception:
+            logger.exception("成员档案记录异常（已吞并）")
         
         # 统一刷新逻辑
         if text in ["棋盘", "刷新", "看棋", "board", "qp"]:
@@ -4378,7 +4411,211 @@ async def _rp_grab(p, pid, uid, context, q):
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧧 抢红包", callback_data=f"rp_grab_{pid}")]]))
 
 
-# ---------- 定时任务与启动 ----------
+# ---------- 群组管理（禁言/封禁/白名单/退群记录/操作记录） ----------
+async def _is_group_admin(context, cid, uid):
+    """判断是否群管理员（创建者/管理员），失败时仅认 Bot 管理员体系。"""
+    if is_bot_admin(uid):
+        return True
+    try:
+        member = await context.bot.get_chat_member(cid, uid)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+def _admin_log(cid, admin_uid, action, target):
+    admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid,
+                       "admin": user_names.get(admin_uid, str(admin_uid)), "action": action, "target": target})
+
+async def cmd_mute(update, context):
+    """禁言：回复消息发「禁言 分钟」或「禁言 用户ID 分钟」。白名单免疫。"""
+    if not await need_auth(update): return
+    cid, admin = update.effective_chat.id, update.effective_user.id
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 禁言请在群聊中使用。"); return
+    if not await _is_group_admin(context, cid, admin):
+        await update.message.reply_text("❌ 仅管理员可操作"); return
+    args = context.args or []
+    reply = update.message.reply_to_message
+    if reply and args and args[0].isdigit():
+        target, minutes = reply.from_user.id, max(1, min(int(args[0]), 43200))
+    elif len(args) >= 2 and args[0].lstrip("-").isdigit() and args[1].isdigit():
+        target, minutes = int(args[0]), max(1, min(int(args[1]), 43200))
+    else:
+        await update.message.reply_text("用法：回复消息发「禁言 分钟」，或「禁言 用户ID 分钟」"); return
+    if target in whitelist[cid]:
+        await update.message.reply_text("✅ 该用户在白名单中，已跳过禁言。"); return
+    if target == admin:
+        await update.message.reply_text("❌ 不能禁言自己。"); return
+    try:
+        await context.bot.restrict_chat_member(cid, target, permissions=ChatPermissions(can_send_messages=False),
+                                               until_date=int(now_bj().timestamp()) + minutes * 60)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 禁言失败（需 bot 为群管理员且有禁言权限）：{e}"); return
+    tname = user_names.get(target, str(target))
+    _admin_log(cid, admin, f"禁言 {minutes} 分钟", tname); save_data()
+    await update.message.reply_text(f"🔇 已禁言 {tname} {minutes} 分钟。")
+
+async def cmd_unmute(update, context):
+    if not await need_auth(update): return
+    cid, admin = update.effective_chat.id, update.effective_user.id
+    if not await _is_group_admin(context, cid, admin):
+        await update.message.reply_text("❌ 仅管理员可操作"); return
+    reply = update.message.reply_to_message
+    args = context.args or []
+    if reply:
+        target = reply.from_user.id
+    elif args and args[0].lstrip("-").isdigit():
+        target = int(args[0])
+    else:
+        await update.message.reply_text("用法：回复消息发「解禁」，或「解禁 用户ID」"); return
+    try:
+        await context.bot.restrict_chat_member(cid, target, permissions=ChatPermissions(
+            can_send_messages=True, can_send_other_messages=True, can_add_web_page_previews=True,
+            can_send_polls=True, can_invite_users=True))
+    except Exception as e:
+        await update.message.reply_text(f"❌ 解禁失败：{e}"); return
+    _admin_log(cid, admin, "解除禁言", user_names.get(target, str(target))); save_data()
+    await update.message.reply_text(f"🔊 已解除 {user_names.get(target, target)} 的禁言。")
+
+async def cmd_groupban(update, context):
+    """Telegram 级封禁：踢出并禁止再入群（区别于 /拉黑 的 bot 层黑名单）。"""
+    if not await need_auth(update): return
+    cid, admin = update.effective_chat.id, update.effective_user.id
+    if not is_group_chat(update):
+        await update.message.reply_text("⚠️ 请在群聊中使用。"); return
+    if not await _is_group_admin(context, cid, admin):
+        await update.message.reply_text("❌ 仅管理员可操作"); return
+    reply = update.message.reply_to_message
+    args = context.args or []
+    if reply:
+        target = reply.from_user.id
+    elif args and args[0].lstrip("-").isdigit():
+        target = int(args[0])
+    else:
+        await update.message.reply_text("用法：回复消息发「群封」，或「群封 用户ID」"); return
+    if target in whitelist[cid]:
+        await update.message.reply_text("✅ 该用户在白名单中，已跳过。"); return
+    try:
+        await context.bot.ban_chat_member(cid, target)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 封禁失败（需 bot 为群管理员）：{e}"); return
+    tname = user_names.get(target, str(target))
+    _admin_log(cid, admin, "Telegram级封禁", tname); save_data()
+    await update.message.reply_text(f"🔨 已将 {tname} 封禁并移出群组（可用「群解封」撤销）。")
+
+async def cmd_groupunban(update, context):
+    if not await need_auth(update): return
+    cid, admin = update.effective_chat.id, update.effective_user.id
+    if not await _is_group_admin(context, cid, admin):
+        await update.message.reply_text("❌ 仅管理员可操作"); return
+    args = context.args or []
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text("用法：群解封 用户ID"); return
+    target = int(args[0])
+    try:
+        await context.bot.unban_chat_member(cid, target, only_if_banned=True)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 解封失败：{e}"); return
+    _admin_log(cid, admin, "Telegram级解封", str(target)); save_data()
+    await update.message.reply_text(f"✅ 已解封 {target}，可重新拉入群。")
+
+async def cmd_whitelist(update, context):
+    if not await need_auth(update): return
+    cid = update.effective_chat.id
+    users = whitelist.get(cid, set())
+    if not users:
+        await update.message.reply_text("白名单为空。回复成员消息发「加白」可加入。"); return
+    lines = ["📋 白名单成员", "━" * 14]
+    for i, u in enumerate(sorted(users), 1):
+        lines.append(f"{i}. {user_names.get(u, u)}（{u}）")
+    lines.append("💡 白名单成员免疫禁言/群封；「加白」「删白」管理。")
+    await safe_send_long(context.bot, cid, "\n".join(lines))
+
+async def cmd_whitelist_add(update, context):
+    if not await need_auth(update): return
+    cid, admin = update.effective_chat.id, update.effective_user.id
+    if not await _is_group_admin(context, cid, admin):
+        await update.message.reply_text("❌ 仅管理员可操作"); return
+    reply = update.message.reply_to_message
+    args = context.args or []
+    if reply:
+        target = reply.from_user.id
+    elif args and args[0].lstrip("-").isdigit():
+        target = int(args[0])
+    else:
+        await update.message.reply_text("用法：回复成员消息发「加白」，或「加白 用户ID」"); return
+    whitelist[cid].add(target); save_data()
+    _admin_log(cid, admin, "加白名单", user_names.get(target, str(target)))
+    await update.message.reply_text(f"✅ 已把 {user_names.get(target, target)} 加入白名单。")
+
+async def cmd_whitelist_del(update, context):
+    if not await need_auth(update): return
+    cid, admin = update.effective_chat.id, update.effective_user.id
+    if not await _is_group_admin(context, cid, admin):
+        await update.message.reply_text("❌ 仅管理员可操作"); return
+    reply = update.message.reply_to_message
+    args = context.args or []
+    if reply:
+        target = reply.from_user.id
+    elif args and args[0].lstrip("-").isdigit():
+        target = int(args[0])
+    else:
+        await update.message.reply_text("用法：回复成员消息发「删白」，或「删白 用户ID」"); return
+    whitelist[cid].discard(target); save_data()
+    _admin_log(cid, admin, "移出白名单", user_names.get(target, str(target)))
+    await update.message.reply_text(f"✅ 已把 {user_names.get(target, target)} 移出白名单。")
+
+async def cmd_adminlist_tg(update, context):
+    """列出本群 Telegram 管理员（实时接口）。"""
+    if not await need_auth(update): return
+    cid = update.effective_chat.id
+    try:
+        admins = await context.bot.get_chat_administrators(cid)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 获取失败：{e}"); return
+    lines = ["👥 本群管理员", "━" * 14]
+    for a in sorted(admins, key=lambda x: (x.status != "creator", x.user.id)):
+        mark = "👑" if a.status == "creator" else "⚙️"
+        lines.append(f"{mark} {a.user.first_name or ''}（{a.user.id}）")
+    await safe_send_long(context.bot, cid, "\n".join(lines))
+
+async def on_member_event(update, context):
+    """成员进出事件：退群/入群记录（bot 需为群管理员才能收到）。"""
+    try:
+        cmu = update.chat_member
+        if not cmu:
+            return
+        cid = cmu.chat.id
+        new, old = cmu.new_chat_member, cmu.old_chat_member
+        uid, name = new.user.id, new.user.first_name or f"用户{new.user.id}"
+        ts = now_bj().strftime("%Y-%m-%d %H:%M")
+        if new.status == "left" and old.status != "left":
+            leave_records[cid].append({"ts": ts, "uid": uid, "name": name})
+            leave_records[cid] = leave_records[cid][-100:]
+        elif new.status in ("member", "administrator") and old.status in ("left", "kicked"):
+            leave_records[cid].append({"ts": ts, "uid": uid, "name": name, "join": True})
+            leave_records[cid] = leave_records[cid][-100:]
+        _remember_name(update)
+        save_data()
+    except Exception:
+        logger.exception("成员事件处理异常（已吞并）")
+
+async def on_join_request(update, context):
+    """入群申请记录（群需开启「申请加入」；批准在 Telegram 客户端原生操作）。"""
+    try:
+        req = update.chat_join_request
+        if not req:
+            return
+        cid = req.chat.id
+        uid, name = req.from_user.id, req.from_user.first_name or f"用户{req.from_user.id}"
+        join_requests[cid].append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "uid": uid, "name": name})
+        join_requests[cid] = join_requests[cid][-100:]
+        save_data()
+    except Exception:
+        logger.exception("入群申请处理异常（已吞并）")
+
+
+
 async def season_settle_scheduler(app):
     """独立赛季结算调度：每 60 秒检查一次到点，精确到分钟结算（不再依赖每日 0 点循环，避免最多延迟 ~24h）。"""
     while True:
@@ -4721,6 +4958,10 @@ CMD_ALIASES = {
     "god": cmd_god, "godgrant": cmd_god_grant, "godrevoke": cmd_god_revoke,
     "sign": cmd_sign, "signrank": cmd_sign_rank, "mypoints": cmd_my_points,
     "pointsrank": cmd_points_rank, "mall": cmd_mall, "buy": cmd_mall_buy,
+    "禁言": cmd_mute, "mute": cmd_mute, "解禁": cmd_unmute, "unmute": cmd_unmute,
+    "群封": cmd_groupban, "groupban": cmd_groupban, "群解封": cmd_groupunban, "groupunban": cmd_groupunban,
+    "白名单": cmd_whitelist, "加白": cmd_whitelist_add, "删白": cmd_whitelist_del,
+    "群管理员": cmd_adminlist_tg, "admins": cmd_adminlist_tg,
 }
 
 async def _dispatch_alias(cmd, args, update, context):
@@ -4822,6 +5063,26 @@ def start_health_server():
                     ".stat .t{font-size:12px;color:#8a89a0}"
                     ".q{display:inline-block;margin:6px 6px 0 0;background:#2b2854;color:#d6d2f5;"
                     "text-decoration:none;font-size:13px;padding:9px 14px;border-radius:10px}"
+                    ".row{display:flex;align-items:center;justify-content:space-between;gap:16px;"
+                    "padding:13px 2px;border-bottom:1px solid #26273a}"
+                    ".row:last-child{border-bottom:none}"
+                    ".row .lbl{font-size:14px;color:#c9c8da}"
+                    ".row .lbl small{display:block;color:#8a89a0;font-size:12px;margin-top:2px}"
+                    ".row input[type=number],.row input[type=text]{width:220px;flex-shrink:0}"
+                    ".tg{position:relative;width:44px;height:24px;flex-shrink:0}"
+                    ".tg input{opacity:0;width:0;height:0;position:absolute}"
+                    ".tg .sl{position:absolute;inset:0;background:#34354a;border-radius:24px;transition:.2s;cursor:pointer}"
+                    ".tg .sl:before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;"
+                    "background:#fff;border-radius:50%;transition:.2s}"
+                    ".tg input:checked+.sl{background:#7c6cf0}"
+                    ".tg input:checked+.sl:before{transform:translateX(20px)}"
+                    "textarea{width:100%;background:#151621;border:1px solid #34354a;color:#e6e5f0;"
+                    "border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit}"
+                    "textarea:focus{outline:none;border-color:#7c6cf0}"
+                    ".tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}"
+                    ".tbl td,.tbl th{padding:8px 6px;border-bottom:1px solid #26273a;text-align:left}"
+                    ".tbl th{color:#8a89a0;font-weight:400}"
+                    ".tbl tr:last-child td{border-bottom:none}"
                     "@media(max-width:720px){.wrap{flex-direction:column}.side{width:100%;display:flex;"
                     "overflow-x:auto;border-right:none;border-bottom:1px solid #26273a;padding:10px}"
                     ".logo{display:none}.side a{flex-shrink:0}.main{padding:14px}}"
@@ -4858,25 +5119,25 @@ def start_health_server():
                 cur = globals().get(_g)
                 if ftype == "bool":
                     checked = " checked" if cur else ""
-                    rows.append(f"<label style='display:flex;align-items:center;gap:10px;cursor:pointer'>"
-                                f"<input type='checkbox' name='{key}'{checked} style='width:18px;height:18px;accent-color:#7c6cf0'>"
-                                f"<span>{html.escape(label)}</span></label>")
+                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
+                                f"<label class='tg'><input type='checkbox' name='{key}'{checked}>"
+                                f"<span class='sl'></span></label></div>")
                 elif ftype in ("levels", "items"):
                     if isinstance(cur, (list, tuple)) and cur and isinstance(cur[0], dict):
                         val = "\n".join(f"{x['name']}:{x['value']}" for x in cur)
                     else:
                         val = str(cur or "")
-                    rows.append(f"<label>{html.escape(label)}（每行一条：名称:数值）"
-                                f"<textarea name='{key}' rows='5' style='width:100%;background:#151621;border:1px solid #34354a;"
-                                f"color:#e6e5f0;border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit'>{html.escape(val)}</textarea></label>")
+                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                                f"<div class='lbl'>{html.escape(label)}<small>每行一条：名称:数值</small></div>"
+                                f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(val)}</textarea></div>")
                 elif ftype in ("names", "emoji", "bets"):
                     val = ",".join(str(x) for x in cur) if isinstance(cur, (list, tuple)) else str(cur)
-                    rows.append(f"<label>{html.escape(label)}"
-                                f"<input type='text' name='{key}' value='{html.escape(val, quote=True)}'></label>")
+                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
+                                f"<input type='text' name='{key}' value='{html.escape(val, quote=True)}'></div>")
                 else:
-                    step = "0.1" if ftype == "float" else "1"
-                    rows.append(f"<label>{html.escape(label)}（{lo} ~ {hi}）"
-                                f"<input type='number' name='{key}' value='{cur}' step='{step}'></label>")
+                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}"
+                                f"<small>范围 {lo} ~ {hi}</small></div>"
+                                f"<input type='number' name='{key}' value='{cur}' step='{'0.1' if ftype == 'float' else '1'}'></div>")
             return "".join(rows)
 
         def _home_page():
@@ -4894,11 +5155,62 @@ def start_health_server():
                 stat("炸金花底注", "JINHUA_ANTE") +
                 "</div><div class='card' style='margin-top:18px'><h1>快捷入口</h1>" + quick + "</div>")
 
+        def _members_body():
+            """群组管理只读页：成员档案 / 进出记录 / 入群申请 / 白名单 / 操作记录。"""
+            def tbl(headers, rows):
+                if not rows:
+                    return "<div class='sub' style='margin-top:8px'>暂无记录</div>"
+                head = "".join(f"<th>{h}</th>" for h in headers)
+                body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+                return f"<table class='tbl'><tr>{head}</tr>{body}</table>"
+            parts = []
+            # 1. 已见成员档案（按群汇总，每群展示活跃前 30）
+            for cid, users in member_profiles.items():
+                if not users:
+                    continue
+                ranked = sorted(users.items(), key=lambda kv: -(kv[1].get("msgs", 0) or 0))[:30]
+                rows = [[html.escape(str(v.get("name", f"用户{u}"))), f"<code>{u}</code>",
+                         v.get("msgs", 0), v.get("first", "-"), v.get("last", "-")] for u, v in ranked]
+                parts.append(f"<div class='card'><h1>👥 已见成员 · 群 {cid}（共 {len(users)} 人，活跃前 30）</h1>"
+                             f"<div class='sub'>发过言/进过群才会建档；Telegram 不允许 bot 拉取从不说话的潜水名单</div>"
+                             + tbl(["成员", "ID", "消息数", "首次见到", "最近发言"], rows) + "</div>")
+            if not member_profiles:
+                parts.append("<div class='card'><h1>👥 已见成员</h1><div class='sub' style='margin-top:8px'>暂无档案</div></div>")
+            # 2. 退群/入群记录
+            lv_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                        "🟢 入群" if r.get("join") else "🔴 退群"]
+                       for cid, lst in leave_records.items() for r in reversed(lst[-30:])]
+            parts.append("<div class='card'><h1>进出记录（最近 30 条）</h1>"
+                         "<div class='sub'>bot 需为群管理员才能收到成员进出事件</div>"
+                         + tbl(["时间", "成员", "ID", "类型"], lv_rows[-30:]) + "</div>")
+            # 3. 入群申请
+            jq_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>"]
+                       for cid, lst in join_requests.items() for r in reversed(lst[-30:])]
+            parts.append("<div class='card'><h1>📨 入群申请（最近 30 条）</h1>"
+                         "<div class='sub'>群需开启「申请加入」；批准/拒绝在 Telegram 客户端原生操作</div>"
+                         + tbl(["时间", "申请人", "ID"], jq_rows[-30:]) + "</div>")
+            # 4. 白名单
+            wl_rows = [[cid, html.escape(user_names.get(u, str(u))), f"<code>{u}</code>"]
+                       for cid, us in whitelist.items() for u in sorted(us)]
+            parts.append("<div class='card'><h1>🛡️ 白名单</h1>"
+                         "<div class='sub'>免疫禁言/群封；群里回复消息发「加白」「删白」管理</div>"
+                         + tbl(["群", "成员", "ID"], wl_rows) + "</div>")
+            # 5. 管理员操作记录
+            op_rows = [[r.get("ts", ""), f"群 {r.get('cid', '')}", html.escape(r.get("admin", "")),
+                        html.escape(r.get("action", "")), html.escape(r.get("target", ""))]
+                       for r in reversed(admin_logs[-30:])]
+            parts.append("<div class='card'><h1>📜 管理员操作记录（最近 30 条）</h1>"
+                         "<div class='sub'>bot 执行的每次禁言/封禁/白名单操作自动留档</div>"
+                         + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows[-30:]) + "</div>")
+            return "".join(parts)
+
         def _admin_page(gkey, saved=False, bad=False):
             gname, gicon = next((n, i) for k, n, i in SETTINGS_GROUPS if k == gkey)
             msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
             msg += "<div class='err'>部分数值超出范围或非法，已跳过这些项</div>" if bad else ""
-            if gkey == "security":
+            if gkey == "members":
+                body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body()
+            elif gkey == "security":
                 is_default = _web_password == WEB_DEFAULT_PASSWORD
                 warn = "<div class='err'>⚠️ 当前还在用初始密码，建议立即修改（至少4位）</div>" if is_default else ""
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码</div>{msg}{warn}"
@@ -5045,6 +5357,8 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^/'), route_command))
     app.add_handler(CallbackQueryHandler(on_button)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))
+    app.add_handler(ChatMemberHandler(on_member_event))       # 退群/入群事件（bot 需群管理员）
+    app.add_handler(ChatJoinRequestHandler(on_join_request))  # 入群申请事件（群需开「申请加入」）
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__": main()

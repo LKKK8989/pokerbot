@@ -88,10 +88,12 @@ SETTINGS_GROUPS = [
     ("blackjack", "21点",      "♠️"),
     ("jinhua",    "炸金花",     "♣️"),
     ("race",      "赛车",       "🏎️"),
-    ("general",   "通用与应急", "⚙️"),
-    ("season",    "排位赛",     "🏆"),
     ("points",    "积分系统",   "💰"),
+    ("season",    "排位赛",     "🏆"),
     ("members",   "群组管理",   "👥"),
+    ("schedule",  "定时任务",   "⏰"),
+    ("commands",  "命令管理",   "⌨️"),
+    ("general",   "通用与应急", "⚙️"),
     ("admin",     "管理员中心", "🛡️"),
     ("security",  "安全",       "🔒"),
 ]
@@ -144,6 +146,11 @@ SETTINGS_FIELDS = [
     ("big_blind",               "BIG_BLIND",               "德州大盲注(0=不设盲注)",    "int",   0,   100000,  "general"),
     ("ante",                    "ANTE",                    "德州前注(每人发牌前强制投入)", "int", 0,  100000,  "general"),
     ("stale_text_command_seconds","STALE_TEXT_COMMAND_SECONDS","过期消息忽略(秒,防翻旧账命令)", "int", 5, 3600, "general"),
+    # ---------- 定时任务（时间可自行设置） ----------
+    ("daily_reset_time",        "DAILY_RESET_TIME",        "每日重置时间(时:分,排位分重置等)", "short", 0, 0, "schedule"),
+    ("leaderboard_time",        "LEADERBOARD_TIME",        "德州日榜推送时间(时:分)",   "short", 0, 0,      "schedule"),
+    ("race_hourly_minute",      "RACE_HOURLY_MINUTE",      "赛车每小时自动开赛(第几分钟)", "int", 0, 59,    "schedule"),
+    ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,重启后生效)", "int", 1, 168,   "schedule"),
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息自动删除(秒,0=不删)", "int", 0, 3600, "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "general"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "general"),
@@ -169,7 +176,7 @@ SETTINGS_FIELDS = [
     ("chat_enabled",            "CHAT_ENABLED",            "聊天积分开关(需关机器人隐私模式)", "bool", 0, 1,    "points/set"),
     ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points/set"),
     ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points/set"),
-    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "查询指令删除时间(删你的命令消息,秒,0=不删)", "int", 0, 300,     "points/set"),
+    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "命令消息删除时间(你发的命令,秒,0=不删)", "int", 0, 300,     "points/set"),
     ("reply_delete_seconds",    "REPLY_DELETE_SECONDS",    "查询回复自动删除(删bot回复,秒,0=不删)", "int", 0, 3600,     "points/set"),
     ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points/cap"),
     ("sign_cmd",                "SIGN_CMD",                "签到指令(不带斜杠)",        "cmd",   0,   0,       "points/sign"),
@@ -262,11 +269,13 @@ _bot_app = None   # 运行中的 Application（网页后台跨线程调 bot API 
 _bot_loop = None  # bot 主事件循环
 admin_logs = []                                      # [{"ts","cid","admin","action","target"}] 管理员操作记录(留300)
 
-def _write_settings_file(cfg: dict, password: str):
+def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=None):
     try:
         tmp = f"{SETTINGS_FILE}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"fields": cfg, "web_password": password}, f, ensure_ascii=False, indent=2)
+            json.dump({"fields": cfg, "web_password": password,
+                       "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or []},
+                      f, ensure_ascii=False, indent=2)
         os.replace(tmp, SETTINGS_FILE)
     except Exception:
         logger.exception("设置文件写盘失败")
@@ -418,6 +427,17 @@ def load_settings():
         pwd = str(data.get("web_password", "")).strip()
         if pwd:
             _web_password = pwd
+        # 命令管理：别名覆盖层 + Telegram / 菜单
+        ca = data.get("cmd_aliases") or {}
+        if isinstance(ca, dict):
+            CMD_ALIAS_OVERRIDES.clear()
+            CMD_ALIAS_OVERRIDES.update({str(k): str(v) for k, v in ca.items()})
+        tm = data.get("tg_menu") or []
+        if isinstance(tm, list) and tm:
+            cleaned = [list(x) for x in tm if isinstance(x, (list, tuple)) and len(x) == 2]
+            if cleaned:
+                TG_MENU.clear(); TG_MENU.extend(cleaned)
+        apply_command_aliases()
         logger.info("设置已从 %s 加载", SETTINGS_FILE)
     except FileNotFoundError:
         logger.info("无设置文件（%s），全部使用默认配置", SETTINGS_FILE)
@@ -430,14 +450,15 @@ def save_settings(cfg: dict, new_password: str = ""):
     with _settings_lock:
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                stored = json.load(f).get("fields", {})
+                raw = json.load(f)
         except Exception:
-            stored = {}
+            raw = {}
+        stored = raw.get("fields", {})
         applied = apply_settings(cfg)
         stored.update(applied)
         if new_password and len(new_password.strip()) >= 4:
             _web_password = new_password.strip()
-        _write_settings_file(stored, _web_password)
+        _write_settings_file(stored, _web_password, raw.get("cmd_aliases") or {}, raw.get("tg_menu") or [])
     return applied
 BEIJING_TZ = timezone(timedelta(hours=8))
 HAND_NAME_CN = {"High Card":"高牌", "Pair":"一对", "One Pair":"一对", "Two Pair":"两对", "Three of a Kind":"三条", "Straight":"顺子", "Flush":"同花", "Full House":"葫芦", "Four of a Kind":"四条", "Straight Flush":"同花顺", "Royal Flush":"皇家同花顺"}
@@ -2348,6 +2369,10 @@ JINHUA_ANTE = 200        # 炸金花底注
 JINHUA_BASE = 100        # 闷牌单位（看牌者跟注/加注金额为其 2 倍）
 RACE_ODDS_CAP = 10.0     # 赔率上限（倍）。0=无上限。防低胜率马一把押中爆出几万分冲垮经济
 JINHUA_SEEN_DOUBLE = 0   # 炸金花看牌者投注加倍开关（1=经典规则看牌×2；0=看牌闷牌同价，群反馈中途看牌被加倍劝退）
+DAILY_RESET_TIME = "00:00"   # 每日重置时刻（排位分重置、德州日榜翻日等）
+LEADERBOARD_TIME = "23:50"   # 德州当日榜定时推送时刻
+RACE_HOURLY_MINUTE = 0       # 赛车每小时自动开赛：整点后第几分钟
+BACKUP_INTERVAL_HOURS = 24   # 自动备份间隔（小时），启动时读取
 JINHUA_HAND_NAMES = {5: "豹子", 4: "同花顺", 3: "金花", 2: "顺子", 1: "对子", 0: "散牌"}
 
 
@@ -4970,6 +4995,16 @@ async def season_settle_scheduler(app):
         await asyncio.sleep(60)
 
 
+def parse_hm(value, def_h, def_m):
+    """解析 'HH:MM' 配置；非法回退默认。"""
+    try:
+        h, mnt = str(value).split(":")
+        h, mnt = int(h), int(mnt)
+        if 0 <= h < 24 and 0 <= mnt < 60: return h, mnt
+    except (ValueError, AttributeError): pass
+    return def_h, def_m
+
+
 async def daily_reset_scheduler(app):
     global last_business_date
     today = now_bj().strftime("%Y-%m-%d")
@@ -4977,7 +5012,10 @@ async def daily_reset_scheduler(app):
     if not last_business_date:
         last_business_date = today; save_data()
     while True:
-        now = now_bj(); target = (now + timedelta(days=1)).replace(hour=0, minute=0, second=1, microsecond=0)
+        now = now_bj()
+        rh, rm = parse_hm(DAILY_RESET_TIME, 0, 0)  # 每轮重读，网页改时间即时生效
+        target = now.replace(hour=rh, minute=rm, second=1, microsecond=0)
+        if target <= now: target += timedelta(days=1)
         await asyncio.sleep((target-now).total_seconds())
         try:
             today = now_bj().strftime("%Y-%m-%d")
@@ -5032,7 +5070,9 @@ async def daily_reset_scheduler(app):
 
 async def leaderboard_scheduler(app):
     while True:
-        now = now_bj(); target = now.replace(hour=23, minute=50, second=0, microsecond=0)
+        now = now_bj()
+        lh, lm = parse_hm(LEADERBOARD_TIME, 23, 50)  # 每轮重读，网页改时间即时生效
+        target = now.replace(hour=lh, minute=lm, second=0, microsecond=0)
         if target <= now: target += timedelta(days=1)
         await asyncio.sleep((target-now).total_seconds())
         try:
@@ -5071,7 +5111,7 @@ async def hourly_race_scheduler(app):
     while True:
         try:
             now = now_bj(); key = now.strftime("%Y%m%d%H")
-            if now.minute == 0 and key != last_key:
+            if now.minute == max(0, min(59, RACE_HOURLY_MINUTE)) and key != last_key:  # 开赛分钟数网页可配
                 last_key = key
                 for cid, enabled in list(hourly_race_enabled.items()):
                     if not enabled or cid in active_horse_races: continue
@@ -5180,6 +5220,23 @@ async def cmd_restore(update, context):
             os.remove(tmp_path)
 
 
+# Telegram 原生 / 菜单（网页「命令管理」页可改，存 bot_settings.json 的 tg_menu；命令仅限英文小写/数字/下划线）
+DEFAULT_TG_MENU = [
+    ("start", "开始 / 菜单 / 帮助"), ("dz", "德州扑克"), ("sc", "赛车"), ("21", "21点"),
+    ("jinhua", "炸金花"), ("sign", "每日签到"), ("mypoints", "我的积分"), ("mall", "积分商城"),
+    ("end", "结束当前游戏"), ("add", "加/减积分(正加负减)"), ("cx", "盈亏查询"), ("ph", "排行榜"),
+    ("sq", "授权群组"), ("qxsh", "取消授权"), ("addadmin", "添加机器人管理员"), ("deladmin", "移除机器人管理员"),
+    ("adminlist", "查看管理员列表"), ("authlist", "查看已授权群"), ("autosm", "切换整点自动赛车"),
+    ("backup", "备份数据"), ("restore", "恢复数据"), ("season", "德州排位赛"), ("seasonjoin", "排位报名"),
+    ("seasonrank", "排位榜"), ("seasonhelp", "排位赛帮助"), ("seasonstart", "排位强制开赛(管理员)"),
+    ("seasonend", "排位提前结算(管理员)"), ("god", "赌神称号/荣誉墙"), ("godgrant", "封赌神(管理员)"),
+    ("godrevoke", "撤赌神(管理员)"), ("shop", "积分商店-称号兑换"), ("redeem", "兑换称号"),
+    ("mytitles", "查看我的称号"), ("equip", "佩戴称号"), ("seasonpoints", "加减排位分(管理员)"),
+    ("ban", "拉黑玩家(管理员)"), ("unban", "解封玩家(管理员)"), ("banlist", "查看黑名单(管理员)"),
+    ("list", "管理总览(管理员/群/黑名单)"),
+]
+TG_MENU = [list(t) for t in DEFAULT_TG_MENU]
+
 async def post_init(app):
     global _bot_app, _bot_loop
     _bot_app, _bot_loop = app, asyncio.get_running_loop()  # 供网页后台跨线程调用 bot API（入群批准/拒绝等）
@@ -5197,47 +5254,9 @@ async def post_init(app):
             except Exception: pass
     # 注册 Telegram 原生命令菜单（仅支持拉丁字符命令，中文命令走自定义路由）。
     # 作用：群里打 / 能看到、能点；命令以 bot_command 实体发送，不受隐私模式影响，必定送达。
+    # 菜单内容在「命令管理」页可改，存 bot_settings.json 的 tg_menu。
     try:
-        menu = [
-            BotCommand("start", "开始 / 菜单 / 帮助"),
-            BotCommand("dz", "德州扑克"),
-            BotCommand("sc", "赛车"),
-            BotCommand("21", "21点"),
-            BotCommand("jinhua", "炸金花"),
-            BotCommand("sign", "每日签到"),
-            BotCommand("mypoints", "我的积分"),
-            BotCommand("mall", "积分商城"),
-            BotCommand("end", "结束当前游戏"),
-            BotCommand("add", "加/减积分(正加负减)"),
-            BotCommand("cx", "盈亏查询"),
-            BotCommand("ph", "排行榜"),
-            BotCommand("sq", "授权群组"),
-            BotCommand("qxsh", "取消授权"),
-            BotCommand("addadmin", "添加机器人管理员"),            BotCommand("deladmin", "移除机器人管理员"),
-            BotCommand("adminlist", "查看管理员列表"),
-            BotCommand("authlist", "查看已授权群"),
-            BotCommand("autosm", "切换整点自动赛车"),
-            BotCommand("backup", "备份数据"),
-            BotCommand("restore", "恢复数据"),
-            BotCommand("season", "德州排位赛"),
-            BotCommand("seasonjoin", "排位报名"),
-            BotCommand("seasonrank", "排位榜"),
-            BotCommand("seasonhelp", "排位赛帮助"),
-            BotCommand("seasonstart", "排位强制开赛(管理员)"),
-            BotCommand("seasonend", "排位提前结算(管理员)"),
-            BotCommand("god", "赌神称号/荣誉墙"),
-            BotCommand("godgrant", "封赌神(管理员)"),
-            BotCommand("godrevoke", "撤赌神(管理员)"),
-            BotCommand("shop", "积分商店-称号兑换"),
-            BotCommand("redeem", "兑换称号"),
-            BotCommand("mytitles", "查看我的称号"),
-            BotCommand("equip", "佩戴称号"),
-            BotCommand("seasonpoints", "加减排位分(管理员)"),
-            BotCommand("ban", "拉黑玩家(管理员)"),
-            BotCommand("unban", "解封玩家(管理员)"),
-            BotCommand("banlist", "查看黑名单(管理员)"),
-            BotCommand("list", "管理总览(管理员/群/黑名单)"),
-        ]
+        menu = [BotCommand(c, d) for c, d in TG_MENU]
         await app.bot.set_my_commands(menu)
     except Exception:
         logger.warning("注册命令菜单失败（不影响主功能）")
@@ -5312,13 +5331,41 @@ CMD_ALIASES = {
 # 动态指令接管默认名：网页改指令后，旧默认名同步失效
 _DYN_CMD_OWNED.update({"QUERY_CMD": "我的积分", "SIGN_CMD": "签到", "RANK_CMD": "积分排行"})
 
+# ---------- 命令管理：别名覆盖层（网页「命令管理」页编辑，保存立即生效） ----------
+BASE_CMD_ALIASES = dict(CMD_ALIASES)   # 出厂别名基线（只读）
+_HANDLERS_BY_NAME = {}
+for _fn in set(BASE_CMD_ALIASES.values()):
+    _HANDLERS_BY_NAME[_fn.__name__] = _fn
+CMD_ALIAS_OVERRIDES = {}               # 处理函数名 -> "别名1,别名2,..."
+
+def apply_command_aliases():
+    """重建命令分发表：出厂别名 + 网页覆盖层 + QUERY/SIGN/RANK 动态名。
+    某命令有非空覆盖时，其出厂触发词整体失效（覆盖即替换）；覆盖为空则恢复出厂。"""
+    CMD_ALIASES.clear()
+    parsed = {}
+    for fn_name, alias_str in CMD_ALIAS_OVERRIDES.items():
+        if fn_name not in _HANDLERS_BY_NAME: continue
+        aliases = [a.strip() for a in str(alias_str).replace("，", ",").split(",") if a.strip()]
+        if aliases: parsed[fn_name] = aliases
+    overridden_fns = {_HANDLERS_BY_NAME[fn_name] for fn_name in parsed}
+    for alias, fn in BASE_CMD_ALIASES.items():
+        if fn in overridden_fns: continue
+        CMD_ALIASES[alias] = fn
+    for fn_name, aliases in parsed.items():
+        fn = _HANDLERS_BY_NAME[fn_name]
+        for a in aliases: CMD_ALIASES[a] = fn
+    _sync_dyn_aliases()
+
 async def _dispatch_alias(cmd, args, update, context):
-    """根据命令别名（无论带不带 /）分发到对应处理函数，并填充 context.args。"""
+    """根据命令别名（无论带不带 /）分发到对应处理函数，并填充 context.args。
+    命中已知命令后，按 POINTS_DELETE_SECONDS 自动删除用户发的命令消息（全局，群聊限定）。"""
     handler = CMD_ALIASES.get(cmd)
     if not handler:
         await update.message.reply_text("❓ 未知命令，发送 /开始 查看可用命令")
         return
     context.args = args
+    if POINTS_DELETE_SECONDS > 0 and is_group_chat(update):
+        schedule_delete(context.application, update.effective_chat.id, update.message, POINTS_DELETE_SECONDS)
     await handler(update, context)
 
 
@@ -5423,6 +5470,7 @@ def start_health_server():
         port = int(os.environ.get("PORT", 8080))
         sessions = {}  # token -> 过期时间戳
         sess_lock = threading.Lock()
+        login_fails = {}  # ip -> [连续失败次数, 锁定截止时间戳]（防爆破：连续错 5 次锁 10 分钟）
 
         def _check_session(cookie_header):
             if not cookie_header:
@@ -5531,7 +5579,31 @@ def start_health_server():
                     ".sub a::before{display:none}}"
                     "</style></head><body><div class='wrap'>"
                     f"<nav class='side'><div class='logo'>🤖 机器人后台</div>{''.join(items)}</nav>"
-                    f"<main class='main'>{body}</main></div></body></html>").encode("utf-8")
+                    f"<main class='main'>{body}</main>{_id_picker_js()}</div></body></html>").encode("utf-8")
+
+        def _group_options():
+            """已知群下拉选项（授权群 ∪ 有积分数据的群）。"""
+            return "".join(f"<option value='{cid}'>{html.escape(chat_name_cache.get(cid) or '')} {cid}</option>"
+                           for cid in sorted(set(AUTHORIZED_GROUPS) | set(game_chips.keys())))
+
+        def _all_user_options():
+            """全部已知用户 datalist 选项（value=ID，label=昵称）。"""
+            seen = {}
+            for chips in game_chips.values():
+                for u in chips: seen[u] = user_names.get(u, str(u))
+            return "".join(f"<option value='{u}'>{html.escape(n)}</option>" for u, n in sorted(seen.items()))
+
+        def _id_picker_js():
+            """群选择联动用户 datalist 的脚本：select[data-users-for] 选中群后自动填充对应成员。"""
+            gusers = {str(cid): {str(u): user_names.get(u, str(u)) for u in chips}
+                      for cid, chips in game_chips.items()}
+            return ("<script>var GUSERS=" + json.dumps(gusers, ensure_ascii=False) + ";"
+                    "document.addEventListener('DOMContentLoaded',function(){"
+                    "function fill(){document.querySelectorAll('select[data-users-for]').forEach(function(sel){"
+                    "var dl=document.getElementById(sel.getAttribute('data-users-for'));if(!dl)return;"
+                    "var us=GUSERS[sel.value]||{};"
+                    "dl.innerHTML=Object.keys(us).map(function(u){return '<option value=\"'+u+'\">'+us[u]+'</option>';}).join('');});}"
+                    "document.querySelectorAll('select[data-users-for]').forEach(function(sel){sel.addEventListener('change',fill);});fill();});</script>")
 
         def _login_page(err=""):
             msg = "<div class='err'>密码错误，请重试</div>" if err else ""
@@ -5690,7 +5762,8 @@ def start_health_server():
                             + (rows or "<tr><td colspan='2'>暂无授权群</td></tr>") + "</table>"
                             "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
                             "<input type='hidden' name='op' value='authadd'>"
-                            "<input type='number' name='cid' placeholder='群 ID（-100 开头）' required style='flex:1'>"
+                            "<input type='number' name='cid' list='dl_groups_auth' placeholder='群 ID（-100 开头）' required style='flex:1'>"
+                            f"<datalist id='dl_groups_auth'>{_group_options()}</datalist>"
                             "<button type='submit' style='margin-top:0'>➕ 添加授权</button></form></div>")
                 elif sub == "blacklist":
                     rows = "".join(f"<tr><td><code>{u}</code></td><td>{html.escape(user_names.get(u, ''))}</td>"
@@ -5702,7 +5775,8 @@ def start_health_server():
                             + (rows or "<tr><td colspan='3'>黑名单为空</td></tr>") + "</table>"
                             "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
                             "<input type='hidden' name='op' value='black'>"
-                            "<input type='number' name='uid' placeholder='用户 ID' required style='flex:1'>"
+                            "<input type='number' name='uid' list='dl_users_black' placeholder='用户 ID' required style='flex:1'>"
+                            f"<datalist id='dl_users_black'>{_all_user_options()}</datalist>"
                             "<button type='submit' style='margin-top:0;background:#e06666'>🔨 拉黑</button></form></div>")
                 elif sub == "god":
                     god = next((u for u, ts in user_titles.items() if TITLE_GAMBLING_GOD in ts), None)
@@ -5712,15 +5786,19 @@ def start_health_server():
                             f"<tr><td>{cur}　{_btn('godrevoke', 'uid', god or 0, '撤销', '#e06666') if god else ''}</td></tr></table>"
                             "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
                             "<input type='hidden' name='op' value='godgrant'>"
-                            "<input type='number' name='uid' placeholder='用户 ID' required style='flex:1'>"
+                            "<input type='number' name='uid' list='dl_users_god' placeholder='用户 ID' required style='flex:1'>"
+                            f"<datalist id='dl_users_god'>{_all_user_options()}</datalist>"
                             "<button type='submit' style='margin-top:0'>👑 封赌神</button></form></div>")
                 elif sub == "seasonpts":
                     body = (f"<h1>{gicon} 排位分调整</h1>"
                             "<div class='sub'>给玩家加/减排位分（正加负减）；赛季未开始时需玩家已在赛季名单</div>{msg}"
                             "<div class='card'><form method='post' action='/adminops2'>"
                             "<input type='hidden' name='op' value='seasonpts'>"
-                            "<div class='row'><div class='lbl'>群 ID</div><input type='number' name='cid' required></div>"
-                            "<div class='row'><div class='lbl'>用户 ID</div><input type='number' name='uid' required></div>"
+                            "<div class='row'><div class='lbl'>群 ID<small>选群后用户 ID 自动带出该群成员</small></div>"
+                            f"<select name='cid' data-users-for='dl_season_uid' required>{_group_options()}</select></div>"
+                            "<div class='row'><div class='lbl'>用户 ID</div>"
+                            "<input type='number' name='uid' list='dl_season_uid' required>"
+                            "<datalist id='dl_season_uid'></datalist></div>"
                             "<div class='row'><div class='lbl'>排位分变动<small>正数=加，负数=减</small></div>"
                             "<input type='number' name='amount' value='100' required></div>"
                             "<button type='submit'>💾 执行调整</button></form></div>")
@@ -5736,6 +5814,26 @@ def start_health_server():
                 else:
                     first = SUBPAGES["admin"][0][0]
                     return _admin_page(gkey, sub=first, saved=saved, bad=bad, note=note, err=err)
+            elif gkey == "commands":
+                rows = []
+                for fn_name in sorted(_HANDLERS_BY_NAME):
+                    cur = CMD_ALIAS_OVERRIDES.get(fn_name)
+                    if cur is None:
+                        cur = ",".join(sorted(a for a, f in BASE_CMD_ALIASES.items() if f.__name__ == fn_name))
+                    rows.append("<tr><td style='white-space:nowrap'><code>" + fn_name + "</code></td>"
+                                "<td><input type='text' name='" + html.escape(fn_name) +
+                                "' value=\"" + html.escape(cur) + "\" style='width:100%'></td></tr>")
+                menu_txt = "\n".join(f"{c_} {d_}" for c_, d_ in TG_MENU)
+                body = (f"<h1>{gicon} 命令管理</h1>"
+                        "<div class='sub'>每个命令的触发词随意改（逗号分隔，可中文可英文）；保存后<b>立即生效</b>并持久化。"
+                        "Telegram / 菜单每行一条「命令 描述」，命令仅限英文小写/数字/下划线</div>{msg}{err}"
+                        "<div class='card'><form method='post' action='/cmdaliases'>"
+                        "<h3>⌨️ 命令触发词</h3>"
+                        "<table class='tbl'><tr><th style='width:150px'>命令</th><th>触发词（逗号分隔）</th></tr>"
+                        + "".join(rows) + "</table>"
+                        "<h3 style='margin-top:20px'>📱 Telegram / 菜单</h3>"
+                        "<textarea name='tg_menu' rows='14' style='width:100%;font-family:inherit'>" + html.escape(menu_txt) + "</textarea>"
+                        "<button type='submit' style='margin-top:12px'>💾 保存全部命令设置</button></form></div>")
             elif gkey == "security":
                 is_default = _web_password == WEB_DEFAULT_PASSWORD
                 warn = "<div class='err'>⚠️ 当前还在用初始密码，建议立即修改（至少4位）</div>" if is_default else ""
@@ -5752,16 +5850,16 @@ def start_health_server():
                     body = (f"<h1>{gicon} {sname}</h1>"
                             "<div class='sub'>直接给玩家加/减统一积分（正数加、负数减），立即生效并落盘；等效群里的 /add 命令</div>{msg}"
                             "<div class='card'><form method='post' action='/points_adj'>"
-                            "<div class='row'><div class='lbl'>群 ID<small>授权群聊的数字 ID（-100 开头）</small></div>"
-                            "<input type='number' name='cid' required></div>"
-                            "<div class='row'><div class='lbl'>用户 ID<small>玩家的数字 ID</small></div>"
-                            "<input type='number' name='uid' required></div>"
+                            "<div class='row'><div class='lbl'>群 ID<small>下拉选择；选群后用户 ID 自动带出该群成员</small></div>"
+                            f"<select name='cid' data-users-for='dl_adj_uid' required>{_group_options()}</select></div>"
+                            "<div class='row'><div class='lbl'>用户 ID<small>点输入框可从该群成员里选，也可手输</small></div>"
+                            "<input type='number' name='uid' list='dl_adj_uid' required>"
+                            "<datalist id='dl_adj_uid'></datalist></div>"
                             "<div class='row'><div class='lbl'>积分变动<small>正数=加分，负数=扣分，0 无效</small></div>"
                             "<input type='number' name='amount' value='1000' required></div>"
                             "<button type='submit'>💾 执行加减分</button></form></div>")
                 elif gkey == "points" and sub == "impexp":
-                    opts = "".join(f"<option value='{cid}'>{chat_name_cache.get(cid) or ''} {cid}</option>"
-                                   for cid in sorted(set(AUTHORIZED_GROUPS) | set(game_chips.keys())))
+                    opts = _group_options()
                     body = (f"<h1>{gicon} {sname}</h1>"
                             "<div class='sub'>按群导出/导入积分。导入会<b>覆盖</b>该群已有积分，务必先用模板核对格式</div>{msg}{err}"
                             "<div class='card'><h3>📥 导出</h3>"
@@ -5824,7 +5922,8 @@ def start_health_server():
                              f"<table class='tbl'><tr><th>ID</th><th>操作</th></tr>{admin_rows}</table>"
                              "<form method='post' action='/adminops' style='display:flex;gap:10px;margin-top:14px'>"
                              "<input type='hidden' name='action' value='add'>"
-                             "<input type='number' name='uid' placeholder='用户数字ID' required style='flex:1'>"
+                             "<input type='number' name='uid' list='dl_users_admin' placeholder='用户数字ID' required style='flex:1'>"
+                             f"<datalist id='dl_users_admin'>{_all_user_options()}</datalist>"
                              "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
             return _page(gname, gkey, body)
 
@@ -5941,14 +6040,63 @@ def start_health_server():
                 except Exception:
                     form = {}
                 if path == "/login":
+                    ip = self.client_address[0]
+                    with sess_lock:
+                        _cnt, lock_until = login_fails.get(ip, [0, 0])
+                    if time.time() < lock_until:
+                        self._send(429, b"too many failed logins, try again in 10 minutes", [("Content-Type", "text/plain")]); return
                     pwd = (form.get("password", [""])[0] or "").strip()
                     if secrets.compare_digest(pwd, _web_password):
                         token = secrets.token_urlsafe(32)
                         with sess_lock:
                             sessions[token] = time.time() + 7 * 86400
+                            login_fails.pop(ip, None)
                         self._redirect("/", cookie=f"wb_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800")
                     else:
+                        with sess_lock:
+                            new_cnt = _cnt + 1
+                            login_fails[ip] = [new_cnt, time.time() + 600 if new_cnt >= 5 else 0]
                         self._send(200, _login_page(err=1))
+                    return
+                # 其余全部 POST 操作（管理员/加减分/排位分/保存…）必须已登录，防止未授权调用
+                if not _check_session(self.headers.get("Cookie")):
+                    self._redirect("/"); return
+                if path == "/cmdaliases":
+                    def _cb_back(note="", err=""):
+                        q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
+                        self._redirect("/page/commands" + q)
+                    new_over = {}
+                    for key, vals in form.items():
+                        if key in _HANDLERS_BY_NAME:  # 字段名=处理函数名（如 cmd_ph）
+                            new_over[key] = vals[0].replace("，", ",").strip()
+                    CMD_ALIAS_OVERRIDES.clear()
+                    CMD_ALIAS_OVERRIDES.update(new_over)
+                    apply_command_aliases()
+                    menu_rows = []
+                    for line in form.get("tg_menu", [""])[0].splitlines():
+                        line = line.strip()
+                        if not line: continue
+                        parts_ = line.split(None, 1)
+                        if len(parts_) != 2 or not re.fullmatch(r"[a-z0-9_]{1,32}", parts_[0]):
+                            _cb_back(err=f"菜单行格式错误：「{line[:30]}」— 命令仅限英文小写/数字/下划线，后跟一个空格和描述"); return
+                        menu_rows.append([parts_[0], parts_[1]])
+                    if not menu_rows:
+                        _cb_back(err="/ 菜单不能为空"); return
+                    TG_MENU.clear(); TG_MENU.extend(menu_rows)
+                    with _settings_lock:
+                        try:
+                            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                                raw2 = json.load(f)
+                        except Exception:
+                            raw2 = {}
+                        _write_settings_file(raw2.get("fields", {}), _web_password,
+                                             dict(CMD_ALIAS_OVERRIDES), [list(t) for t in TG_MENU])
+                    if _bot_app and _bot_loop:  # 热更新 Telegram 菜单
+                        async def _set_menu():
+                            await _bot_app.bot.set_my_commands([BotCommand(cc, dd) for cc, dd in TG_MENU])
+                        try: asyncio.run_coroutine_threadsafe(_set_menu(), _bot_loop).result(10)
+                        except Exception: pass
+                    _cb_back(note=f"✅ 已保存并生效：{len(new_over)} 个命令触发词 + {len(TG_MENU)} 项 / 菜单")
                     return
                 if path == "/adminops":
                     action = form.get("action", [""])[0]
@@ -6111,8 +6259,8 @@ def main():
 
     # 云端持久化：每 24 小时自动把数据备份发给管理员，容器重启可用 /restore 恢复
     if getattr(app, "job_queue", None) is not None:
-        app.job_queue.run_repeating(auto_backup, interval=86400, first=60)
-        logger.info("自动备份任务已注册：每 86400 秒（24 小时）执行一次")
+        app.job_queue.run_repeating(auto_backup, interval=max(1, int(BACKUP_INTERVAL_HOURS)) * 3600, first=60)
+        logger.info("自动备份任务已注册：每 %s 小时一次", BACKUP_INTERVAL_HOURS)
     else:
         logger.warning("JobQueue 不可用，自动备份未启用（需安装 python-telegram-bot[job-queue]）")
 

@@ -309,7 +309,6 @@ SETTINGS_FIELDS = [
     ("lottery_keyword",         "LOTTERY_KEYWORD",         "参与触发词(也支持 /开奖)",   "short", 0,   0,       "lottery"),
     ("lottery_default_duration","LOTTERY_DEFAULT_DURATION","默认持续秒数",              "int",   10,  3600,    "lottery"),
     ("lottery_fee",             "LOTTERY_FEE",             "参与扣积分(0=免费)",         "int",   0,   10000,   "lottery"),
-    ("lottery_min_balance",     "LOTTERY_MIN_BALANCE",     "参与门槛(最低持有积分,0=不限)","int", 0,   1000000, "lottery"),
     ("lottery_msg_start",       "LOTTERY_MSG_START",       "活动公告模板",              "text", 0,   0,       "lottery"),
     ("lottery_msg_joined",      "LOTTERY_MSG_JOINED",      "参与成功模板",              "text", 0,   0,       "lottery"),
     ("lottery_msg_dup",         "LOTTERY_MSG_DUP",         "重复参与模板",              "text", 0,   0,       "lottery"),
@@ -372,8 +371,7 @@ WEB_BASE_URL = ""  # 后台公网地址（如 https://xxx.northflank.app），/�
 LOTTERY_ENABLED = True             # 总开关（网页 general→points/lottery 可关）
 LOTTERY_KEYWORD = "抽奖"            # 玩家参与的触发词（也支持 /开奖 命令）
 LOTTERY_DEFAULT_DURATION = 60       # 默认持续秒数（解析失败时兜底）
-LOTTERY_FEE = 0                     # 参与扣积分（0=免费）
-LOTTERY_MIN_BALANCE = 100           # 参与门槛：玩家最少持有多少积分
+LOTTERY_FEE = 0                     # 参与扣积分（0=免费）；参与门槛在每场活动创建时单独设置
 LOTTERY_MAX_PRIZES = 8              # 单次抽奖最多几档奖品
 LOTTERY_MSG_START = (
     "🧧━━━━━━━━━━━━━━━━━\n"
@@ -5774,10 +5772,13 @@ def _lottery_form_parse(form):
     keyword = (form.get("keyword", [""])[0] or "").strip() or LOTTERY_KEYWORD
     mode = form.get("mode", ["duration"])[0]
     min_bal_raw = (form.get("min_bal", [""])[0] or "").strip()
-    try:
-        min_bal = max(0, int(min_bal_raw)) if min_bal_raw else 0
-    except ValueError:
-        return None, "参与门槛（最低积分）必须是数字"
+    if min_bal_raw:
+        try:
+            min_bal = max(0, int(min_bal_raw))
+        except ValueError:
+            return None, "参与门槛（最低积分）必须是数字"
+    else:
+        min_bal = 0   # 留空=不限制（门槛只跟活动走，不再有全局默认）
     # 奖品：结构化行优先，回退 textarea
     names = [x.strip() for x in form.get("prize_name", [])]
     if names:
@@ -5863,7 +5864,8 @@ def _lottery_announce_text(lo):
                 + f"（还剩 {max(0, int(lo['end_ts'] - time.time()) // 60)} 分"
                   f"{max(0, int(lo['end_ts'] - time.time())) % 60} 秒）")
     fee_line = f"💰 参与扣 <b>{lo['fee']}</b> 积分\n" if lo["fee"] else ""
-    min_bal = int(lo.get("min_bal") or 0)
+    mb = lo.get("min_bal")
+    min_bal = int(mb or 0)   # 门槛只跟活动走：留空/0=不限，N=门槛N
     min_line = f"门槛：<b>{min_bal}</b> 积分以上可参与\n" if min_bal else ""
     desc = (lo.get("desc") or "").strip()
     desc_line = f"📖 {html.escape(desc)}\n" if desc else ""
@@ -6080,7 +6082,7 @@ async def _lottery_try_join(app, lo, uid, cid):
     if time.time() >= lo["end_ts"]:
         return False, "活动已结束"
     balance = game_chips.get(cid, {}).get(uid, 0)
-    min_bal = int(lo.get("min_bal") or 0) or LOTTERY_MIN_BALANCE  # 活动自带门槛优先，回退全局
+    min_bal = int(lo.get("min_bal") or 0)   # 门槛只跟活动走：留空/0=不限，N=门槛N
     if min_bal > 0 and balance < min_bal:
         return False, f"余额不足 {min_bal}，无法参与"
     fee = int(lo.get("fee", 0))
@@ -6918,13 +6920,23 @@ async def cmd_invite_link(update, context):
     uid = update.effective_user.id
     mine = invite_links.get(cid, {}).get(uid)
     if not mine:
-        try:
-            link_obj = await context.bot.create_chat_invite_link(chat_id=cid, name=f"inv{uid}", creates_join_request=True)
-            invite_links[cid][uid] = {"link": link_obj.invite_link, "invite_id": link_obj.invite_link.rsplit("/", 1)[-1],
-                                      "ts": now_bj().strftime("%Y-%m-%d %H:%M")}
-            save_data()
-        except Exception as e:
-            await send_reply(update, context, f"❌ 创建邀请链接失败：{e}（bot 需为群管理员）"); return
+        link_obj, last_err = None, None
+        for kw in ({"name": f"inv{uid}", "creates_join_request": True},
+                   {"creates_join_request": True},
+                   {}):   # 逐级回退：带名字+入群审核 → 仅入群审核 → 普通链接
+            try:
+                link_obj = await context.bot.create_chat_invite_link(chat_id=cid, **kw)
+                break
+            except Exception as e:
+                last_err = e
+        if not link_obj:
+            await send_reply(update, context,
+                             f"❌ 创建邀请链接失败：{last_err!r}\n请确认机器人是本群管理员，且管理员权限里勾选了「邀请用户（通过链接）」")
+            return
+        invite_links.setdefault(cid, {})[uid] = {"link": link_obj.invite_link,
+                                                 "invite_id": link_obj.invite_link.rsplit("/", 1)[-1],
+                                                 "ts": now_bj().strftime("%Y-%m-%d %H:%M")}
+        save_data()
         mine = invite_links[cid][uid]
     total = _invite_count(uid, cid)
     await send_reply(update, context, _fmt_tpl("invite_link_msg", link=mine.get("link", ""), reward=INVITE_REWARD)
@@ -7481,7 +7493,7 @@ CMD_ALIASES = {
     "开竞猜": cmd_guess_open, "guess": cmd_guess_open,
     "竞猜结算": cmd_guess_settle, "竞猜撤销": cmd_guess_cancel,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
-    "link": cmd_invite_link, "邀请链接": cmd_invite_link,
+    "link": cmd_invite_link, "邀请链接": cmd_invite_link, "邀请": cmd_invite_link,
     "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
 }
 # 动态指令接管默认名：网页改指令后，旧默认名同步失效
@@ -8290,11 +8302,12 @@ def start_health_server():
                             f"<datalist id='dl_users_admin'>{_all_user_options()}</datalist>"
                             "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
                 elif sub == "auth":
-                    rows = "".join(f"<tr><td><code>{g}</code></td><td>{_btn('authdel', 'cid', g, '取消授权', '#e06666')}</td></tr>"
+                    rows = "".join(f"<tr><td><code>{g}</code> {html.escape(chat_name_cache.get(g) or '')}</td>"
+                                   f"<td>{_btn('authdel', 'cid', g, '取消授权', '#e06666')}</td></tr>"
                                    for g in sorted(AUTHORIZED_GROUPS))
                     body = (f"<h1>{gicon} 授权群管理</h1>"
                             "<div class='sub'>授权群里的玩家才能使用游戏；也可在群里发 /授权</div>{msg}"
-                            "<div class='card'><table class='tbl'><tr><th>群 ID</th><th>操作</th></tr>"
+                            "<div class='card'><table class='tbl'><tr><th>群</th><th>操作</th></tr>"
                             + (rows or "<tr><td colspan='2'>暂无授权群</td></tr>") + "</table>"
                             "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
                             "<input type='hidden' name='op' value='authadd'>"
@@ -8445,7 +8458,7 @@ def start_health_server():
                     fee_txt = f" {int(lo.get('fee', 0))}分/人" if lo.get("fee") else " 免费"
                     cancel_btn = (f"<a class='q' href='/lottery_cancel?cid={cid}' "
                                   f"onclick=\"return confirm('取消该抽奖并退还参与费？')\">🛑 取消</a>" if active else "")
-                    return (f"<tr><td><code>{cid}</code></td>"
+                    return (f"<tr><td><code>{cid}</code> {html.escape(chat_name_cache.get(cid) or '')}</td>"
                             f"<td>{html.escape(str(lo.get('title', ''))[:24])}</td>"
                             f"<td>{badges.get(status, status)}{ends_in}</td>"
                             f"<td>{len(lo.get('participants', []))}</td>"
@@ -8491,7 +8504,7 @@ def start_health_server():
                         "<input type='text' name='prize_name' placeholder='奖品名称 *' required style='flex:2'>"
                         "<input type='number' name='prize_count' value='1' min='1' placeholder='数量' style='flex:1'></div></div>"
                         "<button type='button' onclick='add_prize()' style='margin-top:8px;background:#3b3c5c'>➕ 添加奖品</button></div>"
-                        "<div class='row'><div class='lbl'>参与条件（可选）<small>最低持有积分，留空不限制</small></div>"
+                        "<div class='row'><div class='lbl'>参与条件（可选）<small>最低持有积分；留空或填 0=不限制</small></div>"
                         "<input type='number' name='min_bal' min='0' placeholder='例：500'></div>"
                         "<button type='submit'>🎉 创建并发布到群</button></form>"
                         "<script>"
@@ -8838,7 +8851,7 @@ def start_health_server():
                             "<div class='sub' style='margin-top:8px'>网页结算/撤销立即生效并群内播报；下注积分已托管，撤销原路退回</div></div>"
                             "<div class='card' style='margin-top:18px'><h3>➕ 新增竞猜（网页直接发起，免群内敲命令）</h3>"
                             "<form method='post' action='/guess_create' style='display:flex;gap:10px;flex-wrap:wrap'>"
-                            "<input type='number' name='cid' placeholder='群ID（授权群）' required style='flex:1;min-width:140px'>"
+                            f"<select name='cid' required style='flex:1;min-width:160px'><option value=''>选择授权群</option>{_group_options()}</select>"
                             "<input type='text' name='q' placeholder='题目' required maxlength='50' style='flex:2;min-width:180px'>"
                             "<input type='text' name='a' placeholder='选项A' required maxlength='20' style='flex:1;min-width:100px'>"
                             "<input type='text' name='b' placeholder='选项B' required maxlength='20' style='flex:1;min-width:100px'>"

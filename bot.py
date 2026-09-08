@@ -143,8 +143,7 @@ SUBPAGES = {
         ("records", "邀请记录"),
         ("daily",   "统计"),
         ("summary", "汇总"),
-        ("pre",     "前置条件"),
-        ("audit",   "审核"),
+        ("qualify", "合格结算"),
     ],
     "members": [
         ("mlist",   "群组成员列表"),
@@ -327,10 +326,8 @@ SETTINGS_FIELDS = [
     # ---------- 邀请系统（群组设置 → 邀请系统，子页面制照阿福模板） ----------
     ("invite_enabled",          "INVITE_ENABLED",          "邀请系统开关",              "bool",  0,   1,       "invite/config"),
     ("invite_notify",           "INVITE_NOTIFY",           "邀请人私聊通知开关",        "bool",  0,   1,       "invite/config"),
-    ("invite_reward",           "INVITE_REWARD",           "邀请奖励(积分/人)",         "int",   0,   1000000, "invite/config"),
-    ("invite_audit_enabled",    "INVITE_AUDIT_ENABLED",    "新邀请需人工审核开关",      "bool",  0,   1,       "invite/config"),
-    ("invite_loose_match",      "INVITE_LOOSE_MATCH",      "宽松归因(申请没带链接时唯一链接兜底)", "bool", 0, 1, "invite/config"),
-    ("invite_audit_award",      "INVITE_AUDIT_AWARD",      "审核通过后补发奖励开关",    "bool",  0,   1,       "invite/config"),
+    ("invite_reward",           "INVITE_REWARD",           "邀请奖励(积分/合格1人)",     "int",   0,   1000000, "invite/config"),
+    ("invite_reward_times",     "INVITE_REWARD_TIMES",     "每人最多发放奖励次数",      "int",   1,   10000,   "invite/config"),
     ("invite_link_cmd",         "INVITE_LINK_CMD",         "邀请链接指令(不带斜杠)",    "cmd",   0,   0,       "invite/config"),
     ("invite_rank_admin_only",  "INVITE_RANK_ADMIN_ONLY",  "排行仅管理员可查开关",      "bool",  0,   1,       "invite/config"),
     ("invite_rank_today_cmd",   "INVITE_RANK_TODAY_CMD",   "今日邀请排行指令",          "cmd",   0,   0,       "invite/config"),
@@ -344,11 +341,12 @@ SETTINGS_FIELDS = [
     ("invite_rank_line_fmt",    "INVITE_RANK_LINE_FMT",    "排行行格式模板",            "text",  0,   0,       "invite/config"),
     ("invite_invalid_msg",      "INVITE_INVALID_MSG",      "无效邀请链接消息",          "text",  0,   0,       "invite/config"),
     ("invite_self_msg",         "INVITE_SELF_MSG",         "自己邀请自己消息",          "text",  0,   0,       "invite/config"),
-    ("invite_pre_enabled",      "INVITE_PRE_ENABLED",      "进群前置条件开关",          "bool",  0,   1,       "invite/pre"),
-    ("invite_pre_points",       "INVITE_PRE_POINTS",       "前置-被邀请人积分≥N(0=不限)", "int", 0,  1000000, "invite/pre"),
-    ("invite_pre_msgs",         "INVITE_PRE_MSGS",         "前置-被邀请人发言≥N条(0=不限)", "int", 0, 100000,  "invite/pre"),
-    ("invite_pre_avatar",       "INVITE_PRE_AVATAR",       "前置-被邀请人必须有头像",   "bool",  0,   1,       "invite/pre"),
-    ("invite_pre_username",     "INVITE_PRE_USERNAME",     "前置-被邀请人必须有用户名", "bool",  0,   1,       "invite/pre"),
+    # 合格邀请结算（2026-09-08 替代旧「进群前置」死字段）：被邀请人本群达标才算合格才发奖
+    ("invite_qualify_enabled",  "INVITE_QUALIFY_ENABLED",  "合格结算开关(达标才发奖)",   "bool",  0,   1,       "invite/qualify"),
+    ("invite_qualify_msgs",     "INVITE_QUALIFY_MSGS",     "质量要求-本群发言≥N条(0=不限)", "int", 0,  100000,  "invite/qualify"),
+    ("invite_qualify_points",   "INVITE_QUALIFY_POINTS",   "质量要求-本群净赚积分≥M(0=不限)", "int", 0, 1000000, "invite/qualify"),
+    ("invite_qualify_avatar",   "INVITE_QUALIFY_AVATAR",   "质量要求-进群须有头像(无则拒)", "bool", 0,   1,      "invite/qualify"),
+    ("invite_qualify_username", "INVITE_QUALIFY_USERNAME", "质量要求-进群须有用户名(无则拒)","bool",0,   1,      "invite/qualify"),
 ]
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
@@ -400,21 +398,26 @@ OBSERVE_SECONDS = 300       # 观察期时长（秒）
 # ---------- 邀请系统 ----------
 INVITE_ENABLED = 1          # 邀请系统总开关
 INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
-INVITE_REWARD = 50          # 每成功邀请 1 人奖励积分
-INVITE_AUDIT_ENABLED = 0    # 新邀请需人工审核开关（审核页一键通过/拒绝）
-INVITE_LOOSE_MATCH = 1      # 宽松归因：申请/事件都没带链接时，本群唯一专属链接直接兜底（Telegram 偶发漏字段）
-INVITE_AUTO_APPROVE = True  # 入群申请自动批准：点专属链接→秒批→进群→归因→发奖全自动，不再要管理员手动批
-INVITE_AUDIT_AWARD = 1      # 审核通过后补发奖励开关
+INVITE_REWARD = 50          # 每合格 1 人奖励积分（达到质量要求才发）
+INVITE_REWARD_TIMES = 10    # 单邀请人最多发放奖励次数（超额合格不再发，防白嫖）
+# 归因策略（2026-09-08 改）：/link 只发「直链」（不带 creates_join_request）→ 点链接直接进群，
+# chat_member 事件稳定携带 invite_link → 全串精确匹配归因。事件/申请都没带链接时一律不归因
+# （宁缺毋滥，绝不宽松猜测安错人；漏链接说明走的是申请制/直接拉人，不是 bot 专属直链）。
+# 无「自动批准」：直链进群不产生申请；申请制群的申请由管理员在 Telegram 或网页「成员/入群申请」手动批。
 INVITE_LINK_CMD = "link"    # 获取专属邀请链接指令
 INVITE_RANK_ADMIN_ONLY = 0  # 邀请排行仅管理员可查开关
 INVITE_RANK_TODAY_CMD = "今日邀请排行"
 INVITE_RANK_MONTH_CMD = "本月邀请排行"
 INVITE_RANK_ALL_CMD = "总邀请排行"
-INVITE_PRE_ENABLED = 0      # 进群前置条件开关（被邀请人需满足才发奖，否则记 unmet）
-INVITE_PRE_POINTS = 0       # 前置：被邀请人积分 ≥ N（0=不限）
-INVITE_PRE_MSGS = 0         # 前置：被邀请人累计发言 ≥ N 条（0=不限）
-INVITE_PRE_AVATAR = 0       # 前置：被邀请人必须有头像
-INVITE_PRE_USERNAME = 0     # 前置：被邀请人必须有用户名
+# 合格邀请结算（2026-09-08 改造，替代旧「进群前置」死字段——旧逻辑人没进群查本群积分/发言，
+# 新人必然 0 永远不满足=100% 死代码）：
+# 机制：被邀请人经专属直链进群只记账（待达标）；在本群真实活动（发言/净赚积分）达阈值才标合格并发奖；
+# 达标检查事件驱动（发言/签到/刷新按钮兜底重判）；单邀请人发放次数 ≤ INVITE_REWARD_TIMES。
+INVITE_QUALIFY_ENABLED = 1   # 合格结算开关（1=达标才发奖；0=进群即发，兼容老行为）
+INVITE_QUALIFY_MSGS = 10     # 质量要求：被邀请人本群累计发言 ≥ N 条（0=不限）
+INVITE_QUALIFY_POINTS = 0    # 质量要求：被邀请人本群净赚积分 ≥ M（0=不限；净赚=余额-初始分）
+INVITE_QUALIFY_AVATAR = 0    # 质量要求：进群须有头像（无则拒绝，永不发；防小号）
+INVITE_QUALIFY_USERNAME = 0  # 质量要求：进群须有用户名（无则拒绝，永不发；防小号）
 # ===== 定时刷屏识别（TG 定时消息发出后无标记，只能按行为特征抓：复读机 + 定时器节奏） =====
 ANTISPAM_ENABLED = 1        # 1=开启
 ANTISPAM_REPEAT_N = 3       # 复读命中：窗口内同内容第 N 条
@@ -558,7 +561,7 @@ buy_packages = []                                    # 购买积分套餐 [{"nam
 rp_packets = {}                                      # pid -> {"cid","from","left_amt","left_n","grabbed":{uid:amt},"ts","msg_id"}
 guesses = {}                                         # cid -> 竞猜 {"q","a","b","end_ts","locked","bets":{uid:{"A","B"}},"side_pots":{"A","B"},"msg_id","task"}
 invite_links = {}                                    # cid -> {uid: {"link","invite_id","ts"}} 每人专属邀请链接
-invite_records = {}                                  # "cid:uid" -> {"cid","inviter","invitee","invitee_name","ts","audit","left","award","link"}
+invite_records = {}                                  # "cid:uid" -> {"cid","inviter","invitee","invitee_name","ts","qualified","rejected","left","award","link"}；旧存档可能带 audit(ok/pending/unmet/rejected) 兼容读取
 invite_pending = {}                                  # "cid:uid" -> 进群申请携带的邀请链接（人审批后 join 事件常不带链接，靠这个兜底归因；内存态）
 invite_debug = defaultdict(list)                     # cid -> [最近10条邀请链路调试事件]（每环失败不再静默，/邀请调试 可查）
 
@@ -4408,46 +4411,81 @@ async def cmd_points_flow(update, context):
     await send_reply(update, context, "\n".join(lines))
 
 
+def _invite_progress_text(uid, cid, my_name, cname):
+    """合格邀请结算卡片正文（cmd_my_invite / /link / 刷新按钮共用）。
+    计入=名下全部邀请；合格=达质量要求；发放=已发奖次数(≤上限)；拒绝=进群硬门槛不满足。"""
+    recs = [r for r in invite_records.values()
+            if r.get("inviter") == uid and (cid is None or r.get("cid") == cid)]
+    counted = len(recs)
+    qualified = sum(1 for r in recs if _rec_qualified(r) and not _rec_rejected(r))
+    rejected = sum(1 for r in recs if _rec_rejected(r))
+    awarded = sum(1 for r in recs if _rec_awarded(r))
+    req = []
+    if INVITE_QUALIFY_ENABLED:
+        if INVITE_QUALIFY_MSGS > 0:
+            req.append(f"本群发言 ≥ {INVITE_QUALIFY_MSGS} 条")
+        if INVITE_QUALIFY_POINTS > 0:
+            req.append(f"本群净赚积分 ≥ {INVITE_QUALIFY_POINTS}")
+        if INVITE_QUALIFY_AVATAR:
+            req.append("进群须有头像")
+        if INVITE_QUALIFY_USERNAME:
+            req.append("进群须有用户名")
+        req_txt = "、".join(req) if req else "无（进群即合格）"
+    else:
+        req_txt = "已关闭（进群即发奖）"
+    L = [
+        f"🎟️ <b>合格邀请结算</b> · {html.escape(cname)}",
+        f"👤 邀请人：{html.escape(my_name)} <code>{uid}</code>",
+        "━━━━━━━━━━━━━━",
+        f"📥 已计入　<b>{counted}</b> 人",
+        f"✅ 合格　　<b>{qualified}</b> 人",
+        f"💰 已发放　<b>{awarded}</b> 次",
+        f"🎁 奖励：每合格 1 人 +{int(INVITE_REWARD)} 积分（每人最多发 {INVITE_REWARD_TIMES} 次）",
+        f"🎯 质量要求：{html.escape(req_txt)}",
+        "━━━━━━━━━━━━━━",
+    ]
+    if rejected:
+        L.append(f"🚫 拒绝 {rejected} 人（进群未满足头像/用户名，不发放）")
+    return "\n".join(L)
+
+async def _invite_send_progress_card(update, context, uid, cid, cname, link=None, edit_msg=None):
+    """发/刷新合格结算卡片。edit_msg 存在则编辑原消息（刷新按钮）。"""
+    my_name = await get_name(context.application, uid, cid=cid if cid else None)
+    body = _invite_progress_text(uid, cid, my_name, cname)
+    rows = []
+    if link:
+        body += f"\n🔗 <b>你的专属链接</b>（好友点开直接进群）\n<code>{link}</code>\n\n📌 好友进群先记账为「待达标」，本群达标后自动发奖；也可点下方「刷新进度」立即重判。"
+        rows.append([InlineKeyboardButton("打开链接", url=link),
+                     InlineKeyboardButton("分享给好友", url=f"https://t.me/share/url?url={link}")])
+    else:
+        body += "\n\n📌 发「" + str(INVITE_LINK_CMD) + "」领取本群专属链接。"
+    if cid is not None:
+        rows.append([InlineKeyboardButton("🔄 刷新进度", callback_data=f"invite_refresh_{uid}")])
+    kb = InlineKeyboardMarkup(rows) if rows else None
+    if edit_msg is not None:
+        try:
+            await edit_msg.edit_text(body, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+    else:
+        await send_reply(update, context, body, kb=kb, parse_mode="HTML")
+
+
 async def cmd_my_invite(update, context):
-    """我的邀请进度（对标竞品）：已计入/合格人数/累计奖励/专属链接，一眼看清到哪一步。"""
+    """我的邀请合格结算进度：已计入/合格/已发放 + 刷新。群聊=本群；私聊=全部群合计。"""
     if not await need_auth(update, context): return
     if not INVITE_ENABLED:
         await send_reply(update, context, "❌ 邀请系统未开启。"); return
     if is_group_chat(update):
-        cid, cname = update.effective_chat.id, (getattr(update.effective_chat, "title", "") or "本群")
+        cid = update.effective_chat.id
+        cname = chat_name_cache.get(cid) or (getattr(update.effective_chat, "title", "") or str(cid))
     else:
         cid, cname = None, "全部群"
     uid = update.effective_user.id
-    total = ok_n = left_n = pending_n = award_sum = 0
-    for rec in invite_records.values():
-        if rec.get("inviter") != uid: continue
-        if cid is not None and rec.get("cid") != cid: continue
-        if rec.get("audit") == "ok":
-            total += 1
-            if rec.get("left"): left_n += 1
-            else: ok_n += 1
-            award_sum += int(rec.get("award", 0) or 0)
-        elif rec.get("audit") in ("pending", "unmet"):
-            pending_n += 1
-    mine = invite_links.get(cid, {}).get(uid) if cid is not None else None
-    cname = "全部群" if cid is None else (chat_name_cache.get(cid) or str(cid))
-    my_name = await get_name(context.application, uid)
-    lines = [
-        f"<b>🌸 我的邀请进度</b>｜{html.escape(cname)}",
-        f"<b>邀请人</b>　{html.escape(my_name)} <code>{uid}</code>",
-        f"<b>已计入</b>　{ok_n} 人",
-    ]
-    if left_n: lines.append(f"<b>已退群</b>　{left_n} 人（不计排行）")
-    if pending_n: lines.append(f"<b>待审核</b>　{pending_n} 人")
-    lines.append(f"<b>累计奖励</b>　{award_sum} 分（每成功 1 位 +{INVITE_REWARD} 分）")
-    if mine:
-        lines.append("")
-        lines.append("<b>我的专属链接</b>")
-        lines.append(f"<code>{mine.get('link', '')}</code>")
-    else:
-        lines.append("")
-        lines.append("📌 本群还没有你的专属链接，发「邀请」即可领取。")
-    await send_reply(update, context, "\n".join(lines))
+    mine = None
+    if cid is not None:
+        mine = (invite_links.get(cid, {}).get(uid) or {}).get("link")
+    await _invite_send_progress_card(update, context, uid, cid, cname, link=mine)
 
 
 async def cmd_invite_debug(update, context):
@@ -4457,7 +4495,7 @@ async def cmd_invite_debug(update, context):
         await send_reply(update, context, "❌ 邀请调试仅管理员可用。"); return
     cid = update.effective_chat.id
     L = ["🔧 邀请系统体检（本群）", "━━━━━━━━━━━━━━━━━"]
-    L.append(f"开关：{'开' if INVITE_ENABLED else '关'}｜自动批准：{'开' if INVITE_AUTO_APPROVE else '关'}")
+    L.append(f"开关：{'开' if INVITE_ENABLED else '关'}｜入群申请需管理员手动批准（网页成员页可批）")
     L.append(f"本群已授权：{'是' if cid in AUTHORIZED_GROUPS else '否'}")
 
     # ① bot 在群里的权限 —— 邀请系统能工作的硬前提
@@ -4498,8 +4536,9 @@ async def cmd_invite_debug(update, context):
     L.append("━━━━━━━━━━━━━━━━━")
     if st == "administrator":
         L.append("✅ bot 是管理员，事件源就绪。请做一次真实测试：")
-        L.append("发「邀请」→ 复制链接 → 换一个号点链接 → 应自动批准并入群加分。")
-        L.append("若仍无事件，说明群里进的人不是通过 bot 专属链接（普通拉人/群链接不算邀请）。")
+        L.append("发「邀请」→ 复制链接 → 换一个号点链接 → 应直接进群并入群加分。")
+        L.append("若弹的是「申请加入」：群开着申请制，直链被转申请会丢链接、无法精确归因，去群设置关掉「需批准/申请加入」。")
+        L.append("进群后仍无事件：说明进的人不是通过 bot 专属链接（直接拉人/群链接不算邀请）。")
     else:
         L.append("❌ 结论：先到群设置把 bot 设为管理员再测，否则改代码没用。")
     await send_reply(update, context, "\n".join(L))
@@ -4922,6 +4961,29 @@ async def on_button(update, context):
         if not is_auth(cid): await q.answer("未授权", show_alert=True); return
         if uid in BLACKLISTED_USERS and not is_bot_admin(uid): await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
         if data == "noop": await q.answer(); return  # 占位按钮（售罄/页码），点了不报错
+
+        # --- 邀请合格结算：刷新进度（事件驱动兜底重判） ---
+        if data.startswith("invite_refresh"):
+            owner = int(data.split("_")[-1]) if data.split("_")[-1].isdigit() else uid
+            if uid != owner:
+                await q.answer("只能刷新自己的进度", show_alert=True); return
+            new_awd = 0
+            try:
+                new_awd = await _invite_refresh_all(context.application, cid, owner)
+            except Exception:
+                logger.exception("邀请进度刷新异常（已吞并）")
+            cname = chat_name_cache.get(cid) or (getattr(q.message.chat, "title", "") or str(cid))
+            link = (invite_links.get(cid, {}).get(owner) or {}).get("link", "")
+            try:
+                await _invite_send_progress_card(None, context, owner, cid, cname,
+                                                 link=link, edit_msg=q.message)
+            except Exception:
+                logger.exception("刷新邀请卡片失败（已吞并）")
+            try:
+                await q.answer("已刷新" + (f"：新发放 {new_awd} 次奖励 🎉" if new_awd else "：暂无新达标"))
+            except Exception:
+                pass
+            return
         
         # --- 21点 回调 ---
         if data.startswith("bj_"):
@@ -5238,32 +5300,17 @@ async def on_button(update, context):
             if data.startswith("mall_page_"):
                 try: page = int(data[len("mall_page_"):])
                 except ValueError: await q.answer(); return
-                # 在原按钮消息就地刷新为新页（编辑消息按钮）
+                # 在原按钮消息就地刷新为新页：正文小卡 + 按钮一起重建（_mall_panel 保证与首屏一致）
                 items = [x for x in MALL_ITEMS if x.get("on", True)]
-                if not items: await q.answer("商城已空"); return
-                pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
-                page = max(1, min(page, pages))
-                chunk = items[(page - 1) * MALL_PAGE_SIZE: page * MALL_PAGE_SIZE]
-                new_rows = []
-                for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
-                    sb = item.get("stock")
-                    if isinstance(sb, int) and sb <= 0:
-                        new_rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
-                    else:
-                        label = _mall_label(i, item)
-                        url = _deep_buy_url("mall", cid, i)
-                        if url:
-                            new_rows.append([InlineKeyboardButton(label, url=url)])
-                        else:
-                            new_rows.append([InlineKeyboardButton(label, callback_data=f"mall_buy_{i}")])
-                nav = []
-                if page > 1: nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
-                if pages > 1: nav.append(InlineKeyboardButton(f"📄 {page}/{pages}", callback_data="noop"))
-                if page < pages: nav.append(InlineKeyboardButton("➡ 下一页", callback_data=f"mall_page_{page+1}"))
-                if nav: new_rows.append(nav)
+                if not items:
+                    await q.answer("商城已空"); return
+                text, rows = _mall_panel(page, items, q.message.chat.id)
                 try:
-                    await q.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
-                except Exception: pass
+                    await q.message.edit_text(text, parse_mode="HTML",
+                                               reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+                except Exception:
+                    pass
+                pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
                 await q.answer(f"已切到 {page}/{pages} 页")
                 return
         # --- 积分兑换：点蓝色商品按钮直接兑换 ---
@@ -5403,13 +5450,25 @@ def _autodel_text_hit(message, text):
         return "premium_emoji"
     return None
 
+def _is_service_message(message):
+    """判断是否为系统消息（入退群/改名/换头像/删头像/置顶/建群/迁移等）。
+    系统消息的 effective_user 经常为 None（建群/迁移尤其），单独判定便于豁免 user 检查。
+    用 getattr 兜底空值，兼容测试 mock（生产 PTB Message 这些字段全有）。"""
+    if message is None:
+        return False
+    for attr in ("new_chat_members", "left_chat_member", "new_chat_title",
+                 "new_chat_photo", "delete_chat_photo", "pinned_message",
+                 "group_chat_created", "supergroup_chat_created",
+                 "migrate_to_chat_id", "migrate_from_chat_id"):
+        if getattr(message, attr, None):
+            return True
+    return False
+
 def _autodel_media_hit(message):
     """自动删除规则（媒体类）：返回规则名或 None。"""
     if message is None:
         return None
-    if (message.new_chat_members or message.left_chat_member or message.new_chat_title
-            or message.new_chat_photo or message.pinned_message or message.group_chat_created
-            or message.supergroup_chat_created or message.migrate_to_chat_id):
+    if _is_service_message(message):
         return "service" if AUTODEL_SERVICE else None
     if message.sticker is not None:
         return "sticker" if AUTODEL_STICKER else None
@@ -5438,12 +5497,17 @@ def _autodel_media_hit(message):
     return None
 
 async def _autodel_enforce(update, context):
-    """自动删除规则执行：命中即静默撤删。返回 True 表示已删（调用方应停止后续处理）。管理员豁免。"""
+    """自动删除规则执行：命中即静默撤删。返回 True 表示已删（调用方应停止后续处理）。
+    系统消息（建群/迁移等）effective_user 经常为 None，单独走路径不要求 user 在场；非系统消息仍按原规则：管理员/机器人豁免。"""
     user, message = update.effective_user, update.effective_message
-    if not user or user.is_bot or not message or not is_group_chat(update):
+    if not message or not is_group_chat(update):
         return False
-    if is_bot_admin(user.id):
-        return False
+    is_svc = _is_service_message(message)
+    if not is_svc:
+        if not user or user.is_bot:
+            return False
+        if is_bot_admin(user.id):
+            return False
     if _autodel_text_hit(message, message.text or message.caption or "") or _autodel_media_hit(message):
         try:
             await message.delete()
@@ -5538,6 +5602,12 @@ async def on_text(update, context):
             prof["msgs"] = prof.get("msgs", 0) + 1
         except Exception:
             logger.exception("成员档案记录异常（已吞并）")
+        # 合格邀请结算（事件驱动）：被邀请人在本群发言后即时判定是否达标（发奖/待达标）
+        try:
+            if INVITE_ENABLED and is_group_chat(update):
+                await _invite_ping_qualify(context.application, cid, user.id)
+        except Exception:
+            logger.exception("邀请达标判定异常（已吞并）")
         
         # 统一刷新逻辑
         if text in ["棋盘", "刷新", "看棋", "board", "qp"]:
@@ -5778,6 +5848,12 @@ async def cmd_sign(update, context):
                    streak=streak, reward=reward, bonus=bonus, balance=game_chips[cid][uid])
     await send_reply(update, context, msg)
     await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    # 合格邀请结算（事件驱动）：被邀请人签到加分后也即时判定是否达标
+    try:
+        if INVITE_ENABLED:
+            await _invite_ping_qualify(context.application, cid, uid)
+    except Exception:
+        logger.exception("邀请达标判定异常（已吞并）")
 
 async def cmd_sign_rank(update, context):
     if not await need_auth(update, context): return
@@ -5918,20 +5994,6 @@ def _deep_buy_url(kind, cid, idx):
     if not _BOT_USERNAME:
         return None
     return f"https://t.me/{_BOT_USERNAME}?start={kind}_{cid}_{idx}"
-
-
-def _redeem_label(i, x):
-    price = int(x.get("price", 0) or 0)
-    left = int(x.get("left", 0) or 0)
-    left_txt = "不限" if left <= 0 else str(left)
-    return f"{i}. {x['name']} — {price} 积分 剩余 {left_txt}  ✅ 立即兑换"
-
-
-def _mall_label(i, item):
-    stk = item.get("stock")
-    if isinstance(stk, int) and stk <= 0:
-        return f"{i}. {item['name']}（已售罄）"
-    return f"{i}. {item['name']} — {_mall_price(item)} 积分 ✅ 立即兑换"
 
 
 async def _redeem_dm_ok(context, cid, uid, idx):
@@ -6122,22 +6184,29 @@ async def cmd_points_redeem(update, context):
     if not items:
         await send_reply(update, context, "🎁 本群暂无可兑换商品，管理员可在后台「积分系统 → 积分兑换」给本群上架。"); return
     args = context.args or []
-    if not args:  # 商品按钮列表：与竞品一致——整行一个「立即兑换」按钮，点蓝色字跳转 bot 私聊确认
+    if not args:  # 货架卡(B2)：正文逐商品小卡，底部「编号 · 立即兑换」整行深链按钮（点蓝色跳私聊确认）
         _cn = chat_name_cache.get(cid) or ""
         mins = max(1, MALL_LIST_DELETE_SECONDS // 60)
-        lines = [f"🎁 积分兑换｜{_cn}" if _cn else "🎁 积分兑换",
-                 "━" * 14,
-                 f"💡 点下方蓝色「立即兑换」跳转机器人私聊确认（{mins} 分钟后消息自动删除）；也可发「{REDEEM_CMD} 编号/名称」"]
+        lines = [f"🎁 积分兑换 · {_cn}" if _cn else "🎁 积分兑换",
+                 f"💡 点下方「编号 · 立即兑换」跳转机器人私聊确认（{mins} 分钟后自动删除）；也可发「{REDEEM_CMD} 编号/名称」", ""]
         rows = []
         for i, x in enumerate(items, 1):
-            label = _redeem_label(i, x)
+            price = int(x.get("price", 0) or 0)
+            left = int(x.get("left", 0) or 0)
+            left_txt = "不限" if left <= 0 else str(left)
+            lines.append(f"<b>{i}.</b> {html.escape(x['name'])}")
+            lines.append(f"　{price} 积分 · 剩余 {left_txt}")
+            desc = str(x.get("desc", "") or "").strip()
+            if desc and len(desc) <= 60:
+                lines.append(f"　<i>{html.escape(desc)}</i>")
+            lines.append("")
             url = _deep_buy_url("redeem", cid, i)
             if url:
                 # 竞品式：URL 按钮 → Telegram 蓝色字体 → 点了打开 bot 私聊，机器人回「是否兑换/积分不足」
-                rows.append([InlineKeyboardButton(label, url=url)])
+                rows.append([InlineKeyboardButton(f"{i}. 立即兑换", url=url)])
             else:
                 # 启动早期/无用户名兜底：仍群内直兑（回调），功能不中断
-                rows.append([InlineKeyboardButton(label, callback_data=f"redeem_buy_{i}")])
+                rows.append([InlineKeyboardButton(f"{i}. 立即兑换", callback_data=f"redeem_buy_{i}")])
         msg = await safe_send(context.bot, cid, "\n".join(lines),
                               reply_markup=InlineKeyboardMarkup(rows))
         if msg and MALL_LIST_DELETE_SECONDS > 0:
@@ -6155,6 +6224,41 @@ async def cmd_points_redeem(update, context):
     if err:
         await send_reply(update, context, err)
 
+def _mall_panel(page, items, cid):
+    """商城货架卡（B2）：正文逐商品小卡 + 底部「编号 · 立即兑换」深链按钮（售罄置灰）。
+    返回 (text, rows)；cmd_mall 首屏与 mall_page_ 翻页共用，保证样式一致。"""
+    pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    chunk = items[(page - 1) * MALL_PAGE_SIZE: page * MALL_PAGE_SIZE]
+    lines = [f"🛒 积分商城（{page}/{pages} 页）",
+             f"💡 点下方「编号 · 立即兑换」跳转机器人私聊确认（{max(1, MALL_LIST_DELETE_SECONDS // 60)} 分钟后自动删除）", ""]
+    rows = []
+    for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
+        stk = item.get("stock")
+        sold_out = isinstance(stk, int) and stk <= 0
+        lines.append(f"<b>{i}.</b> {html.escape(item['name'])}")
+        meta = f"{_mall_price(item)} 积分"
+        meta += " · 已售罄" if sold_out else (" · 余量不限" if not isinstance(stk, int) else f" · 余 {stk}")
+        lines.append(f"　{meta}")
+        lines.append("")
+        if sold_out:
+            rows.append([InlineKeyboardButton(f"{i}. 已售罄", callback_data="noop")])
+        else:
+            url = _deep_buy_url("mall", cid, i)
+            rows.append([InlineKeyboardButton(f"{i}. 立即兑换", url=url)] if url
+                        else [InlineKeyboardButton(f"{i}. 立即兑换", callback_data=f"mall_buy_{i}")])
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(f"📄 {page}/{pages}", callback_data="noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("➡ 下一页", callback_data=f"mall_page_{page+1}"))
+    if nav:
+        rows.append(nav)
+    return "\n".join(lines), rows
+
+
 async def cmd_mall(update, context):
     if not await need_auth(update, context): return
     if not MALL_ENABLED:
@@ -6166,36 +6270,9 @@ async def cmd_mall(update, context):
     page = 1
     if context.args and context.args[0].isdigit():
         page = max(1, int(context.args[0]))
-    pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
-    page = min(page, pages)
-    chunk = items[(page - 1) * MALL_PAGE_SIZE: page * MALL_PAGE_SIZE]
-    lines = [f"🛒 积分商城（{page}/{pages} 页）", "━" * 14,
-             f"💡 点下方蓝色「立即兑换」跳转机器人私聊确认（{max(1, MALL_LIST_DELETE_SECONDS // 60)} 分钟后消息自动删除）"]
-    # 商品信息全在按钮里，消息正文不重复列
-    rows = []
-    for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
-        stock_btn = item.get("stock")
-        if isinstance(stock_btn, int) and stock_btn <= 0:
-            rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
-        else:
-            label = _mall_label(i, item)
-            url = _deep_buy_url("mall", cid, i)
-            if url:
-                # 竞品式：整行 URL 按钮 → 蓝色字体 → 跳转 bot 私聊确认兑换
-                rows.append([InlineKeyboardButton(label, url=url)])
-            else:
-                rows.append([InlineKeyboardButton(label, callback_data=f"mall_buy_{i}")])
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
-    if pages > 1:
-        nav.append(InlineKeyboardButton(f"📄 {page}/{pages}", callback_data="noop"))
-    if page < pages:
-        nav.append(InlineKeyboardButton("➡ 下一页", callback_data=f"mall_page_{page+1}"))
-    if nav: rows.append(nav)
+    text, rows = _mall_panel(page, items, cid)
     kb = InlineKeyboardMarkup(rows) if rows else None
-    # 列表+按钮同条消息；delete_after=MALL_LIST_DELETE_SECONDS 让按钮活到用完再清群
-    await send_reply(update, context, "\n".join(lines), kb=kb, delete_after=MALL_LIST_DELETE_SECONDS)
+    await send_reply(update, context, text, kb=kb, delete_after=MALL_LIST_DELETE_SECONDS)
 
 async def cmd_mall_buy(update, context):
     if not await need_auth(update, context): return
@@ -7342,46 +7419,113 @@ async def cmd_adminlist_tg(update, context):
         lines.append(f"{mark} {a.user.first_name or ''}（{a.user.id}）")
     await safe_send_long(context.bot, cid, "\n".join(lines))
 
-# ---------- 邀请系统：专属链接追踪进群、奖励、审核、排行 ----------
+# ---------- 邀请系统：专属链接追踪进群、合格结算、排行 ----------
+# 记录状态语义（2026-09-08 改造，替代 audit 审核层 + 前置死字段）：
+#   qualified=True = 已合格（本群达标）· rejected=True = 进群硬门槛不满足(无头像/用户名)永不计
+#   award>0 = 已发放奖励；旧存档 audit=="ok" 视为合格、audit=="rejected" 视为拒绝（兼容读取）。
+def _rec_qualified(rec):
+    if not rec: return False
+    if rec.get("qualified") is not None: return bool(rec.get("qualified"))
+    return rec.get("audit") == "ok"
+
+def _rec_rejected(rec):
+    if not rec: return False
+    if rec.get("rejected") is not None: return bool(rec.get("rejected"))
+    return rec.get("audit") == "rejected"
+
+def _rec_awarded(rec):
+    return int((rec or {}).get("award", 0) or 0) > 0
 
 def _invite_count(inviter, cid=None):
-    """邀请人有效邀请数（audit=ok 且未退群）；cid 限定群，None=全部群。"""
+    """邀请人有效邀请数（合格且未退群）；cid 限定群，None=全部群。"""
     n = 0
     for rec in invite_records.values():
-        if rec.get("inviter") != inviter or rec.get("audit") != "ok" or rec.get("left"):
+        if rec.get("inviter") != inviter or not _rec_qualified(rec) or rec.get("left") or _rec_rejected(rec):
             continue
         if cid is not None and rec.get("cid") != cid:
             continue
         n += 1
     return n
 
+def _inviter_awarded_count(cid, inviter):
+    """该邀请人在本群已发放奖励的次数（超额即不再发，防白嫖）。"""
+    return sum(1 for r in invite_records.values()
+               if r.get("inviter") == inviter and r.get("cid") == cid and _rec_awarded(r))
 
-async def _invite_pre_reasons(cid, uid, cmu):
-    """进群前置条件检查：返回未满足项名称列表（空=全部满足）。"""
-    if not INVITE_PRE_ENABLED:
-        return []
-    reasons = []
-    if INVITE_PRE_POINTS > 0 and game_chips.get(cid, {}).get(uid, 0) < INVITE_PRE_POINTS:
-        reasons.append(f"积分≥{INVITE_PRE_POINTS}")
-    if INVITE_PRE_MSGS > 0:
+def _join_user_obj(cmu):
+    """从 chat_member 事件或服务消息中取被邀请人 user 对象。"""
+    u = getattr(getattr(cmu, "new_chat_member", None), "user", None)
+    if u is None:
+        mlist = getattr(cmu, "new_chat_members", None)
+        if mlist:
+            u = mlist[0]
+    return u
+
+async def _user_has_avatar(context, uid):
+    """查询用户是否有头像（邀请质量门槛；网络异常视为有头像放行，防误伤正常进群）。"""
+    try:
+        photos = await context.bot.get_user_profile_photos(uid, limit=1)
+        return bool(getattr(photos, "total_count", 0))
+    except Exception:
+        return True
+
+async def _invite_qualify_ready(cid, uid):
+    """被邀请人在本群是否达到质量要求（发言阈值 / 净赚积分阈值）。
+    注意：game_chips 是 defaultdict(初始分)——必须用「净赚=余额-初始分」判定积分，
+    否则人人进群即自动 5W 初始分 → 积分门槛永远满足，防白嫖失效。"""
+    if INVITE_QUALIFY_MSGS > 0:
         msgs = int((member_profiles.get(cid, {}).get(uid, {}) or {}).get("msgs", 0) or 0)
-        if msgs < INVITE_PRE_MSGS:
-            reasons.append(f"发言≥{INVITE_PRE_MSGS}条")
-    user = getattr(getattr(cmu, "new_chat_member", None), "user", None)
-    if INVITE_PRE_AVATAR:
-        try:
-            photos = await _bot_app.bot.get_user_profile_photos(uid, limit=1)
-            if not getattr(photos, "total_count", 0):
-                reasons.append("有头像")
-        except Exception:
-            reasons.append("有头像")
-    if INVITE_PRE_USERNAME and not getattr(user, "username", None):
-        reasons.append("有用户名")
-    return reasons
+        if msgs < INVITE_QUALIFY_MSGS:
+            return False
+    if INVITE_QUALIFY_POINTS > 0:
+        bal = int(game_chips.get(cid, {}).get(uid, GAME_STARTING_CHIPS) or 0)
+        if abs(bal - GAME_STARTING_CHIPS) < INVITE_QUALIFY_POINTS:
+            return False
+    return True
+
+async def _invite_try_award(app, rec):
+    """合格后发奖（不超每人上限 INVITE_REWARD_TIMES；award>0 防重入）。"""
+    if _rec_awarded(rec):
+        return
+    cid, inviter = rec["cid"], rec["inviter"]
+    if _inviter_awarded_count(cid, inviter) >= max(1, int(INVITE_REWARD_TIMES)):
+        return  # 超上限：仍合格（计入合格数），但不再发奖
+    await _invite_award(app, rec)
+
+async def _invite_ping_qualify(app, cid, uid):
+    """被邀请人在本群有动静（发言/签到/刷新按钮）后调用：达标则标合格并发奖。幂等、异常吞并。"""
+    try:
+        rec = invite_records.get(f"{cid}:{uid}")
+        if not rec or rec.get("left") or _rec_rejected(rec) or _rec_qualified(rec):
+            return
+        if not INVITE_QUALIFY_ENABLED:
+            return  # 开关关 = 进群已即时结算，不重复判
+        if not await _invite_qualify_ready(cid, uid):
+            return
+        rec["qualified"] = True
+        await _invite_try_award(app, rec)
+        save_data()
+    except Exception:
+        logger.exception("邀请达标判定异常（已吞并）")
+
+async def _invite_refresh_all(app, cid, inviter):
+    """刷新进度：重判某邀请人在本群全部待达标记录（事件驱动兜底）。返回新发奖数。"""
+    n = 0
+    for key, rec in list(invite_records.items()):
+        if rec.get("inviter") != inviter or rec.get("cid") != cid:
+            continue
+        if rec.get("left") or _rec_rejected(rec) or _rec_qualified(rec):
+            continue
+        before = _rec_awarded(rec)
+        await _invite_ping_qualify(app, cid, rec.get("invitee"))
+        after = _rec_awarded(invite_records.get(key))
+        if after and not before:
+            n += 1
+    return n
 
 
 async def _invite_award(app, rec):
-    """给邀请人发奖并通知（群内 + 私聊）。rec 需含 cid/inviter/invitee_name/audit。"""
+    """给邀请人发合格奖励并通知（群内 + 私聊）。rec 需含 cid/inviter/invitee_name；qualified 由调用方先置位。"""
     inviter, cid = rec["inviter"], rec["cid"]
     reward = max(0, int(INVITE_REWARD))
     if reward:
@@ -7393,7 +7537,7 @@ async def _invite_award(app, rec):
     if INVITE_NOTIFY:
         try:
             await app.bot.send_message(chat_id=inviter,
-                text=f"🎟️ 邀请成功！{rec.get('invitee_name', '')} 通过你的邀请进群，奖励 {reward} 积分已到账。")
+                text=f"🎟️ 你邀请的 {rec.get('invitee_name', '')} 已达标合格，奖励 {reward} 积分已到账。发「{INVITE_LINK_CMD}」看进度。")
         except Exception:
             pass
     if str(INVITE_OK_GROUP).strip():
@@ -7420,24 +7564,13 @@ async def _invite_track_join(cmu, cid, uid, name, context):
             _inv_dbg(cid, f"进群 uid={uid} 重复（已有记录，视为回归）")
             return
         link = (getattr(getattr(cmu, "invite_link", None), "link", "")
-                or invite_pending.pop(f"{cid}:{uid}", ""))   # 入群申请兜底：审批后的 join 事件常不带链接
+                or invite_pending.pop(f"{cid}:{uid}", ""))   # 申请制兜底：审批后的 join 事件常不带链接
         _inv_dbg(cid, f"进群 uid={uid} 事件链接：{link or '（无）'}")
         inviter = 0
         for i_uid, info in invite_links.get(cid, {}).items():
             if info.get("link") == link and i_uid != uid:
                 inviter = i_uid
                 break
-        if not inviter and not link and INVITE_LOOSE_MATCH:
-            # 宽松归因：Telegram 实测会漏掉 chat_join_request 的 invite_link 字段（申请明明点了专属链接）。
-            # 申请/事件都没带链接时，若本群只有一条机器人专属链接，直接归因给它；多条则无法判定。
-            cands = [i_uid for i_uid, info in invite_links.get(cid, {}).items()
-                     if str(info.get("link", "")).startswith("http") and i_uid != uid]
-            if len(cands) == 1:
-                inviter = cands[0]
-                link = f"宽松归因(唯一链接…{str(invite_links[cid][inviter].get('link',''))[-8:]})"
-                _inv_dbg(cid, f"宽松归因命中：申请未带链接，本群唯一专属链接 → 邀请人 {inviter}")
-            elif len(cands) > 1:
-                _inv_dbg(cid, f"⚠️ 申请未带链接且本群有 {len(cands)} 条专属链接，宽松归因无法判定")
         if not inviter:
             if link:
                 _inv_dbg(cid, f"⚠️ 归因失败：链接不在已存表（已存：{[i.get('link','')[-12:] for i in invite_links.get(cid, {}).values()]}）")
@@ -7447,7 +7580,9 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                     except Exception:
                         pass
             else:
-                _inv_dbg(cid, "⚠️ 归因失败：事件和申请都没带链接（普通群无法归因，需超级群）")
+                # 2026-09-08 起：事件/申请都没带链接 → 一律不归因（宁缺毋滥，绝不猜测安错人）。
+                # /link 发的是直链，正常进群事件必带链接；漏链接说明走的是申请制或直接拉人。
+                _inv_dbg(cid, "⚠️ 事件与申请均无链接 → 不归因（宁缺毋滥）：直链进群才带链接，群开「申请加入」会丢链接")
             return
         if inviter == uid:
             _inv_dbg(cid, f"uid={uid} 自己邀自己，跳过")
@@ -7459,16 +7594,23 @@ async def _invite_track_join(cmu, cid, uid, name, context):
             return
         _inv_dbg(cid, f"✅ 归因成功 uid={uid} → 邀请人 {inviter}")
         rec = {"cid": cid, "inviter": inviter, "invitee": uid, "invitee_name": name,
-               "ts": now_bj().strftime("%Y-%m-%d %H:%M"), "audit": "ok", "left": False,
-               "award": 0, "link": link}
-        unmet = await _invite_pre_reasons(cid, uid, cmu)
-        if unmet:
-            rec["audit"], rec["note"] = "unmet", "、".join(unmet)
-        elif INVITE_AUDIT_ENABLED:
-            rec["audit"] = "pending"
+               "ts": now_bj().strftime("%Y-%m-%d %H:%M"), "qualified": False,
+               "rejected": False, "left": False, "award": 0, "link": link}
+        # 进群硬门槛（头像/用户名，进群瞬间检查一次；不满足直接拒绝，永不发奖）
+        ju = _join_user_obj(cmu)
+        if INVITE_QUALIFY_USERNAME and not getattr(ju, "username", None):
+            rec["rejected"] = True; rec["note"] = "无用户名"
+            _inv_dbg(cid, f"进群 uid={uid} 无用户名 → 拒绝（永不发奖）")
+        elif INVITE_QUALIFY_AVATAR and not await _user_has_avatar(context, uid):
+            rec["rejected"] = True; rec["note"] = "无头像"
+            _inv_dbg(cid, f"进群 uid={uid} 无头像 → 拒绝（永不发奖）")
         invite_records[key] = rec
-        if rec["audit"] == "ok":
-            await _invite_award(context.application, rec)
+        if not INVITE_QUALIFY_ENABLED and not rec["rejected"]:
+            # 合格结算关 → 兼容老行为：进群即合格发奖
+            rec["qualified"] = True
+            await _invite_try_award(context.application, rec)
+        else:
+            _inv_dbg(cid, f"进群 uid={uid} 记待达标（达标后事件驱动发奖）")
         save_data()
     except Exception:
         logger.exception("邀请追踪异常（已吞并）")
@@ -7480,7 +7622,7 @@ def _invite_rank_rows(scope):
     month = today[:7]
     counts = defaultdict(int)
     for rec in invite_records.values():
-        if rec.get("audit") != "ok" or rec.get("left"):
+        if not _rec_qualified(rec) or _rec_rejected(rec) or rec.get("left"):
             continue
         ts = str(rec.get("ts", ""))
         if scope == "today" and not ts.startswith(today):
@@ -7535,11 +7677,18 @@ async def cmd_invite_link(update, context):
     cid = update.effective_chat.id
     uid = update.effective_user.id
     mine = invite_links.get(cid, {}).get(uid)
-    if not mine:
+    if not mine or mine.get("mode") != "direct":
+        # 直链（creates_join_request 缺省 = False）：点链接直接进群，chat_member 事件稳定携带
+        # invite_link → 全串精确匹配，无需再猜测。旧「申请制」链接升级时先吊销再换新，
+        # 防止旧链接继续把人带进申请流程（申请/审批事件会丢链接，无法精确归因）。
+        old_link = mine.get("link") if mine else None
+        if old_link:
+            try:
+                await context.bot.revoke_chat_invite_link(chat_id=cid, invite_link=old_link)
+            except Exception:
+                pass
         link_obj, last_err = None, None
-        for kw in ({"name": f"inv{uid}", "creates_join_request": True},
-                   {"creates_join_request": True},
-                   {}):   # 逐级回退：带名字+入群审核 → 仅入群审核 → 普通链接
+        for kw in ({"name": f"inv{uid}"}, {}):   # 直链逐级回退：带名字 → 不带名字
             try:
                 link_obj = await context.bot.create_chat_invite_link(chat_id=cid, **kw)
                 break
@@ -7551,34 +7700,20 @@ async def cmd_invite_link(update, context):
             return
         invite_links.setdefault(cid, {})[uid] = {"link": link_obj.invite_link,
                                                  "invite_id": link_obj.invite_link.rsplit("/", 1)[-1],
-                                                 "ts": now_bj().strftime("%Y-%m-%d %H:%M")}
-        _inv_dbg(cid, f"创建专属链接 inviter={uid}：…{link_obj.invite_link[-12:]}")
+                                                 "ts": now_bj().strftime("%Y-%m-%d %H:%M"),
+                                                 "mode": "direct"}
+        _inv_dbg(cid, f"创建直链 inviter={uid}：…{link_obj.invite_link[-12:]}")
         save_data()
         mine = invite_links[cid][uid]
-    total = _invite_count(uid, cid)
-    my_name = await get_name(context.application, uid, cid=cid)
-    cname = getattr(update.effective_chat, "title", "") or "本群"
     link = mine.get("link", "")
-    text = (
-        f"<b>🎟️ 我的专属邀请链接</b>\n"
-        f"<b>邀请人</b>　{html.escape(my_name)} <code>{uid}</code>\n"
-        f"<b>群组</b>　　{html.escape(cname)}\n"
-        f"<b>已邀请</b>　{total} 人（每成功 +{INVITE_REWARD} 分）\n\n"
-        f"<b>你的专属链接</b>\n"
-        f"<code>{link}</code>\n\n"
-        f"📋 <b>使用说明</b>\n"
-        f"1. 把链接发给好友\n"
-        f"2. 好友点链接 → 申请加入\n"
-        f"3. 管理员批准 → 自动到账 +{INVITE_REWARD} 积分\n"
-        f"4. 退群自动失效，奖励已发不追回"
-    )
-    await send_reply(update, context, text)
+    cname = chat_name_cache.get(cid) or (getattr(update.effective_chat, "title", "") or str(cid))
+    await _invite_send_progress_card(update, context, uid, cid, cname, link=link)
 
 
 async def cmd_invite_test(update, context):
     """邀请归因预演（管理员）：只读模拟，不改任何数据、不发奖励。
-    演示两种真实场景会归因给谁：①事件带链接 ②事件漏链接(Telegram 常见)→宽松归因。
-    用于定位「进人不加分」到底是事件源断了，还是归因判定断了。"""
+    演示归因判定：①事件带链接 → 精确匹配 ②事件漏链接 → 一律不归因（宁缺毋滥）。
+    用于定位「进人不加分」：/link 直链进群事件必带链接；若事件常漏链接，多半是群开了「申请加入」。"""
     if not await need_auth(update, context): return
     cid = update.effective_chat.id
     uid = update.effective_user.id
@@ -7598,29 +7733,23 @@ async def cmd_invite_test(update, context):
                 if info.get("link") == evt_link and i_uid != fake_uid:
                     return i_uid, "命中：事件携带的链接与" + ("你的" if i_uid == uid else "别人的") + "专属链接一致"
             return 0, "⚠️ 链接不在已存表（进的人用的是别处链接？）"
-        cands = [i_uid for i_uid, info in invite_links.get(cid, {}).items()
-                 if str(info.get("link", "")).startswith("http") and i_uid != fake_uid]
-        if len(cands) == 1:
-            return cands[0], "宽松归因命中：事件漏链接，本群恰只有一条专属链接"
-        if len(cands) > 1:
-            return 0, f"⚠️ 宽松归因失效：本群有 {len(cands)} 条专属链接，事件漏链接时无法判定"
-        return 0, "⚠️ 事件漏链接且本群没有专属链接，无从归因"
+        return 0, "事件漏链接 → 一律不归因（宁缺毋滥）：直链进群必带链接，漏链接说明走的是申请制或直接拉人"
 
     L = ["🧪 邀请归因预演（只读，不改数据）", "━━━━━━━━━━━━━━━━━"]
     L.append(f"你的专属链接：…{link[-12:]}")
     L.append(f"本群专属链接数（含你的）：{n_links + 1} 条")
     L.append("")
-    L.append("<b>场景① 事件带链接</b>（Telegram 正常提供时）")
+    L.append("<b>场景① 事件带链接</b>（/link 直链进群，正常都带）")
     a, b = _judge(link)
     L.append(f"　→ 归因：{'✅ ' + str(a) if a else '❌ 失败'}")
     L.append(f"　　{b}")
     L.append("")
-    L.append("<b>场景② 事件漏链接</b>（Telegram 对部分 bot 不提供 invite_link）")
+    L.append("<b>场景② 事件漏链接</b>（直链不会发生；申请制/直接拉人会出现）")
     c_, d = _judge("")
-    L.append(f"　→ 归因：{'✅ ' + str(c_) if c_ else '❌ 失败'}")
+    L.append(f"　→ 归因：{'✅ ' + str(c_) if c_ else '❌ 不归因'}")
     L.append(f"　　{d}")
     L.append("")
-    L.append("判定失败 ≠ 系统坏了：先发 /邀请调试 看 bot 是不是管理员、有没有真进群事件。")
+    L.append("判定失败 ≠ 系统坏了：先发 /邀请调试 看 bot 是不是管理员、群有没有开「申请加入」。")
     await send_reply(update, context, "\n".join(L))
 
 
@@ -7677,7 +7806,8 @@ async def on_member_event(update, context):
         logger.exception("成员事件处理异常（已吞并）")
 
 async def on_join_request(update, context):
-    """入群申请：记录 + 存归因链接 + **自动批准**（bot 为管理员时秒批，人进群→service 事件→归因→发奖全自动）。"""
+    """入群申请（申请制群才有）：记录 + 存归因链接。不自动批准——直链进群不产生申请；
+    申请制群的新人需管理员在 Telegram 客户端或网页「成员/入群申请」页手动批准（权限交给管理员）。"""
     try:
         req = update.chat_join_request
         if not req:
@@ -7693,13 +7823,7 @@ async def on_join_request(update, context):
         else:
             _inv_dbg(cid, f"入群申请 uid={uid}，⚠️ 申请未携带链接")
         save_data()
-        # 自动批准：不批准人永远进不了群，归因/发奖链路就断在这（此前靠管理员去 Telegram 手动点，没人点=数据一直空）
-        if INVITE_AUTO_APPROVE and is_auth(cid) and uid not in BLACKLISTED_USERS:
-            try:
-                await context.bot.approve_chat_join_request(cid, uid)
-                _inv_dbg(cid, f"✅ 已自动批准 uid={uid}（{name}），等进群事件触发归因发奖")
-            except TelegramError as exc:
-                _inv_dbg(cid, f"⚠️ 自动批准 uid={uid} 失败：{exc}（bot 需为群管理员且有人审批权限；可去 Telegram 手动批准）")
+        # 不自动批准（2026-09-08 用户拍板）：放行权交给管理员——网页「成员/入群申请」页有 批准/拒绝 按钮。
     except Exception:
         logger.exception("入群申请处理异常（已吞并）")
 
@@ -8914,7 +9038,7 @@ def start_health_server():
                     for uid in d.get(today, {}).get(cid, {}))
                 # 今日有效邀请
                 g_invites = sum(1 for r in invite_records.values()
-                                if r.get("cid") == cid and r.get("audit") == "ok"
+                                if r.get("cid") == cid and _rec_qualified(r)
                                 and not r.get("left") and str(r.get("ts", "")).startswith(today))
                 g_race = "⏰ 开启" if hourly_race_enabled.get(cid, True) else "⏸ 关闭"
                 g_rows.append(
@@ -9406,11 +9530,12 @@ def start_health_server():
                 if sub == "config":
                     warn_html = ("<div class='err'>⚠️ 邀请系统当前已关闭</div>" if not INVITE_ENABLED else "")
                     body = (f"<h1>{gicon} {gname}</h1>"
-                            f"<div class='sub'>群里发「<code>{html.escape(str(INVITE_LINK_CMD))}</code>」领专属邀请链接 → 新朋友经链接进群 → 邀请人得奖励"
+                            f"<div class='sub'>群里发「<code>{html.escape(str(INVITE_LINK_CMD))}</code>」领专属邀请链接 → 新朋友经链接进群 → 本群达标后邀请人得奖励"
                             f"（群内发「{html.escape(str(INVITE_RANK_ALL_CMD))}」看排行）</div>{msg}{warn_html}"
                             "<div class='card'><h3>🎟️ 使用说明</h3>"
-                            "<div class='sub'>链接经 Telegram 官方 invite_link 事件追踪，进群即记账；被邀请人退群自动失效不计排行；"
-                            "开启人工审核后进群只入册不发奖，到「审核」子页一键通过/拒绝</div></div>"
+                            "<div class='sub'>链接经 Telegram 官方 invite_link 事件追踪，进群先记账为「待达标」；"
+                            "被邀请人在本群发言/净赚积分达到「合格结算」页的质量要求后自动发奖（也可点群里的「刷新进度」立即重判）；"
+                            "每人最多发放次数见下方「每人最多发放奖励次数」；被邀请人退群后不计排行。</div></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='invite/config'>"
                             + _field_rows("invite/config") +
@@ -9420,23 +9545,29 @@ def start_health_server():
                 elif sub == "records":
                     _recs = [(k, r) for k, r in invite_records.items()
                              if not sel_icid or _inv_icid(r.get("cid")) == sel_icid]
+                    def _rec_badge(r):
+                        if _rec_rejected(r):
+                            return "<span style='color:#f09595'>拒绝</span>"
+                        if _rec_qualified(r):
+                            return ("<span style='color:#6fd08c'>合格·已发放</span>" if _rec_awarded(r)
+                                    else "<span style='color:#f0c060'>合格·超额未发</span>")
+                        return "<span style='color:#8a89a0'>待达标</span>"
                     rows_html = ""
                     for k, r in sorted(_recs, key=lambda kv: kv[1].get("ts", ""), reverse=True)[:100]:
-                        audit_badge = {"ok": "<span style='color:#6fd08c'>有效</span>",
-                                       "pending": "<span style='color:#f0c060'>待审核</span>",
-                                       "unmet": "<span style='color:#f09595'>未满足</span>",
-                                       "rejected": "<span style='color:#8a89a0'>已拒绝</span>"}.get(r.get("audit", ""), r.get("audit", ""))
+                        badge = _rec_badge(r)
                         if r.get("left"):
-                            audit_badge += " <span style='color:#8a89a0'>(已退群)</span>"
+                            badge += " <span style='color:#8a89a0'>(已退群)</span>"
+                        if r.get("note") and _rec_rejected(r):
+                            badge += f" <span style='color:#f09595'>{html.escape(str(r.get('note', '')))}</span>"
                         rows_html += (f"<tr><td><code>{k}</code></td>"
                                       f"<td><code>{r.get('inviter', '')}</code></td>"
                                       f"<td><code>{r.get('invitee', '')}</code> {html.escape(str(r.get('invitee_name', '')))}</td>"
-                                      f"<td>{r.get('ts', '')}</td><td>{audit_badge}</td>"
+                                      f"<td>{r.get('ts', '')}</td><td>{badge}</td>"
                                       f"<td>{r.get('award', 0)}</td>"
                                       f"<td><a class='q' href='/invite_del/{k}' onclick=\"return confirm('删除该邀请记录？')\">🗑 删除</a></td></tr>")
                     if not rows_html:
                         rows_html = "<tr><td colspan='7' style='text-align:center;color:#6a6982'>暂无邀请记录</td></tr>"
-                    body = (f"<h1>{gicon} 邀请记录</h1><div class='sub'>最近 100 条邀请记录；退群自动标失效（不计排行）</div>{msg}"
+                    body = (f"<h1>{gicon} 邀请记录</h1><div class='sub'>最近 100 条邀请记录；待达标=进群未达质量要求，达标后自动转合格；退群自动标失效</div>{msg}"
                             "<div class='card'>" + _inv_bar("/page/invite/records") +
                             "<form method='post' action='/invite_clear' style='margin-bottom:10px' "
                             "onsubmit=\"return confirm('确认清空全部邀请记录与邀请链接？此操作不可恢复！')\">"
@@ -9450,62 +9581,46 @@ def start_health_server():
                 elif sub == "daily":
                     daily_counts = defaultdict(int)
                     for r in invite_records.values():
-                        if r.get("audit") == "ok" and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
+                        if _rec_qualified(r) and not _rec_rejected(r) and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
                             daily_counts[str(r.get("ts", ""))[:10]] += 1
                     rows_html = "".join(f"<tr><td>{d}</td><td>{n}</td></tr>"
                                         for d, n in sorted(daily_counts.items(), reverse=True)[:60])
                     if not rows_html:
                         rows_html = "<tr><td colspan='2' style='text-align:center;color:#6a6982'>暂无数据</td></tr>"
-                    body = (f"<h1>{gicon} 统计</h1><div class='sub'>每日有效邀请数（最近 60 天）</div>{msg}"
+                    body = (f"<h1>{gicon} 统计</h1><div class='sub'>每日合格邀请数（最近 60 天，按进群日计）</div>{msg}"
                             "<div class='card'>" + _inv_bar("/page/invite/daily") +
-                            "<table class='tbl'><tr><th>日期</th><th>有效邀请</th></tr>"
+                            "<table class='tbl'><tr><th>日期</th><th>合格邀请</th></tr>"
                             + rows_html + "</table></div>")
                 elif sub == "summary":
-                    sums = defaultdict(lambda: {"ok": 0, "award": 0})
+                    sums = defaultdict(lambda: {"ok": 0, "award": 0, "pend": 0})
                     for r in invite_records.values():
-                        if r.get("audit") == "ok" and not r.get("left") and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
-                            sums[r.get("inviter")]["ok"] += 1
-                            sums[r.get("inviter")]["award"] += int(r.get("award", 0) or 0)
+                        if (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
+                            if _rec_rejected(r) or r.get("left"):
+                                continue
+                            if _rec_qualified(r):
+                                sums[r.get("inviter")]["ok"] += 1
+                                sums[r.get("inviter")]["award"] += int(r.get("award", 0) or 0)
+                            else:
+                                sums[r.get("inviter")]["pend"] += 1
                     rows_html = ""
                     for uid, s in sorted(sums.items(), key=lambda kv: -kv[1]["ok"])[:50]:
                         rows_html += (f"<tr><td><code>{uid}</code> {html.escape(user_names.get(uid, ''))}</td>"
-                                      f"<td>{s['ok']}</td><td>{s['award']}</td></tr>")
+                                      f"<td>{s['ok']}</td><td>{s['pend']}</td><td>{s['award']}</td></tr>")
                     if not rows_html:
-                        rows_html = "<tr><td colspan='3' style='text-align:center;color:#6a6982'>暂无数据</td></tr>"
-                    body = (f"<h1>{gicon} 汇总</h1><div class='sub'>按邀请人汇总（有效且未退群，前 50）</div>{msg}"
+                        rows_html = "<tr><td colspan='4' style='text-align:center;color:#6a6982'>暂无数据</td></tr>"
+                    body = (f"<h1>{gicon} 汇总</h1><div class='sub'>按邀请人汇总（未退群，前 50）：合格=已达标人数，待达标=进群未达标，累计奖励</div>{msg}"
                             "<div class='card'>" + _inv_bar("/page/invite/summary") +
-                            "<table class='tbl'><tr><th>邀请人</th><th>有效邀请</th><th>累计奖励</th></tr>"
+                            "<table class='tbl'><tr><th>邀请人</th><th>合格</th><th>待达标</th><th>累计奖励</th></tr>"
                             + rows_html + "</table></div>")
-                elif sub == "pre":
-                    body = (f"<h1>{gicon} 前置条件</h1>"
-                            f"<div class='sub'>被邀请人进群时需满足的条件；不满足记「未满足」且不发奖（防小号白嫖邀请奖励）</div>{msg}"
+                elif sub == "qualify":
+                    body = (f"<h1>{gicon} 合格结算</h1>"
+                            f"<div class='sub'>被邀请人进群先记账，<b>在本群</b>达到下列质量要求才算「合格」并发放邀请奖励"
+                            f"（{INVITE_REWARD} 积分/人，每人上限 {INVITE_REWARD_TIMES} 次）；发言/积分达标事件驱动自动结算，超额只计合格不再发；"
+                            f"头像/用户名要求进群时检查，不满足直接拒绝永不发（防小号白嫖）。</div>{msg}"
                             "<div class='card'><form method='post' action='/save'>"
-                            "<input type='hidden' name='group' value='invite/pre'>"
-                            + _field_rows("invite/pre") +
-                            "<button type='submit' style='margin-top:8px'>💾 保存前置条件</button></form></div>")
-                elif sub == "audit":
-                    pend = {k: r for k, r in invite_records.items()
-                            if r.get("audit") in ("pending", "unmet") and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid)}
-                    rows_html = ""
-                    for k, r in sorted(pend.items(), key=lambda kv: kv[1].get("ts", ""), reverse=True):
-                        tag = "待审核" if r.get("audit") == "pending" else f"未满足（{html.escape(str(r.get('note', '')))}）"
-                        rows_html += (f"<tr><td><code>{k}</code></td>"
-                                      f"<td><code>{r.get('inviter', '')}</code></td>"
-                                      f"<td><code>{r.get('invitee', '')}</code> {html.escape(str(r.get('invitee_name', '')))}</td>"
-                                      f"<td>{r.get('ts', '')}</td><td>{tag}</td>"
-                                      f"<td><form style='display:inline;margin:0' method='post' action='/invite_audit'>"
-                                      f"<input type='hidden' name='op' value='approve'><input type='hidden' name='sel' value='{k}'>"
-                                      f"<button style='padding:2px 10px;cursor:pointer;background:#3d6b4f;color:#fff;border:none;border-radius:6px'>✅ 通过</button></form> "
-                                      f"<form style='display:inline;margin:0' method='post' action='/invite_audit'>"
-                                      f"<input type='hidden' name='op' value='reject'><input type='hidden' name='sel' value='{k}'>"
-                                      f"<button style='padding:2px 10px;cursor:pointer;background:#8a3b3b;color:#fff;border:none;border-radius:6px'>❌ 拒绝</button></form></td></tr>")
-                    if not rows_html:
-                        rows_html = "<tr><td colspan='6' style='text-align:center;color:#6a6982'>暂无待审核记录</td></tr>"
-                    body = (f"<h1>{gicon} 审核</h1><div class='sub'>开启「新邀请需人工审核」后，进群邀请在此通过/拒绝；"
-                            f"「审核通过后补发奖励」开关决定通过时是否补发 {INVITE_REWARD} 积分</div>{msg}"
-                            "<div class='card'>" + _inv_bar("/page/invite/audit") +
-                            "<table class='tbl'><tr><th>记录ID</th><th>邀请人</th><th>被邀请人</th><th>时间</th><th>状态</th><th>操作</th></tr>"
-                            + rows_html + "</table></div>")
+                            "<input type='hidden' name='group' value='invite/qualify'>"
+                            + _field_rows("invite/qualify") +
+                            "<button type='submit' style='margin-top:8px'>💾 保存合格结算设置</button></form></div>")
                 else:
                     body = f"<h1>{gicon} {gname}</h1><div class='sub'>该子页暂未开通</div>{msg}"
             elif sub:
@@ -10412,25 +10527,6 @@ def start_health_server():
                     if err:
                         self._send(400, ("err=" + err).encode("utf-8")); return
                     self._redirect("/page/points/guess?note=" + quote("🎯 竞猜已发起并群内播报")); return
-                if path == "/invite_audit":
-                    # 邀请审核：approve（可补发奖励）/ reject
-                    op = form.get("op", [""])[0]
-                    sel = form.get("sel", [""])[0]
-                    rec = invite_records.get(sel)
-                    if rec and op in ("approve", "reject"):
-                        if op == "approve" and rec.get("audit") in ("pending", "unmet"):
-                            rec["audit"] = "ok"
-                            if INVITE_AUDIT_AWARD and not rec.get("award") and _bot_app and _bot_loop:
-                                async def _ia(app=_bot_app, r=rec):
-                                    await _invite_award(app, r)
-                                try:
-                                    asyncio.run_coroutine_threadsafe(_ia(), _bot_loop).result(20)
-                                except Exception:
-                                    logger.exception("邀请审核补发奖励失败")
-                        elif op == "reject":
-                            rec["audit"] = "rejected"
-                        save_data()
-                    self._redirect("/page/invite/audit"); return
                 if path == "/invite_clear":
                     invite_records.clear(); invite_links.clear()
                     save_data()

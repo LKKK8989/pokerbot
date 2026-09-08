@@ -4359,16 +4359,24 @@ async def cmd_my_invite(update, context):
         elif rec.get("audit") in ("pending", "unmet"):
             pending_n += 1
     mine = invite_links.get(cid, {}).get(uid) if cid is not None else None
-    lines = [f"🌸 我的邀请进度｜{cname}", "━━━━━━━━━━━━━━━━━"]
-    lines.append(f"✅ 已计入（未退群）：{ok_n} 人")
-    if left_n: lines.append(f"💀 已退群失效：{left_n} 人（不计排行）")
-    if pending_n: lines.append(f"⏳ 待审核/待达标：{pending_n} 人")
-    lines.append(f"🎁 累计邀请奖励：{award_sum} 分（每成功邀请 1 位得 {INVITE_REWARD} 分）")
+    cname = "全部群" if cid is None else (chat_name_cache.get(cid) or str(cid))
+    my_name = await get_name(context.application, uid)
+    lines = [
+        f"🌸 <b>我的邀请进度</b>｜{html.escape(cname)}",
+        "━━━━━━━━━━━━━━━",
+        f"👤 邀请人：<b>{html.escape(my_name)}</b> <code>{uid}</code>",
+        f"✅ 已计入（未退群）：<b>{ok_n}</b> 人",
+    ]
+    if left_n: lines.append(f"💀 已退群失效：<b>{left_n}</b> 人（不计排行）")
+    if pending_n: lines.append(f"⏳ 待审核/待达标：<b>{pending_n}</b> 人")
+    lines.append(f"🎁 累计邀请奖励：<b>{award_sum}</b> 分（每成功 1 位 +{INVITE_REWARD} 分）")
     if mine:
-        lines.append(f"\n🔗 专属链接：\n{mine.get('link', '')}")
-        lines.append("新朋友点链接→申请加入→管理员批准，即自动记账；退群自动失效。")
+        lines.append("")
+        lines.append(f"🔗 <b>我的专属链接：</b>\n{mine.get('link', '')}")
+        lines.append("💡 新朋友点链接 → 申请加入 → 管理员批准，即自动记账；退群自动失效。")
     else:
-        lines.append("\n本群还没有你的专属链接，发「邀请」领取。")
+        lines.append("")
+        lines.append("📌 本群还没有你的专属链接，发「邀请」即可领取。")
     await send_reply(update, context, "\n".join(lines))
 
 
@@ -7082,8 +7090,23 @@ async def cmd_invite_link(update, context):
         save_data()
         mine = invite_links[cid][uid]
     total = _invite_count(uid, cid)
-    await send_reply(update, context, _fmt_tpl("invite_link_msg", link=mine.get("link", ""), reward=INVITE_REWARD)
-                     + f"\n📊 你在本群已成功邀请 {total} 人")
+    my_name = await get_name(context.application, uid, cid=cid)
+    cname = getattr(update.effective_chat, "title", "") or "本群"
+    link = mine.get("link", "")
+    text = (
+        f"🎟️ <b>我的专属邀请链接</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👤 邀请人：<b>{html.escape(my_name)}</b> <code>{uid}</code>\n"
+        f"🏘️ 群组：<b>{html.escape(cname)}</b>\n\n"
+        f"🔗 你的专属链接：\n{link}\n\n"
+        f"💎 每成功邀请 <b>1</b> 位新朋友进群，奖励 <b>{INVITE_REWARD}</b> 积分\n"
+        f"📊 你在本群已成功邀请 <b>{total}</b> 人\n\n"
+        f"📌 <b>使用说明</b>\n"
+        f"新朋友点链接 → 申请加入 → 管理员批准，即自动记账\n"
+        f"被邀请人退群自动失效，奖励已发不追回\n"
+        f"审核模式开启时进群只入册不发奖，到「邀请审核」通过才发"
+    )
+    await send_reply(update, context, text)
 
 
 async def on_new_members_msg(update, context):
@@ -8267,6 +8290,33 @@ def start_health_server():
                 stat("🏆 赛季", season_txt, f"ID {season_id}" if season_id else "")
             )
             quick = "".join(f"<a class='q' href='/page/{g}'>{i} {n}</a>" for g, n, i in SETTINGS_GROUPS if g != "dashboard")
+            # 每群活动详情：你说的"分开的活跃度"——每群一行，玩了多少局/邀了多少人/赛车开关一眼看完
+            g_rows = []
+            for cid in sorted(AUTHORIZED_GROUPS, key=lambda c: (chat_name_cache.get(c) or str(c))):
+                gname = chat_name_cache.get(cid) or str(cid)
+                g_players = len(game_chips.get(cid, {}))
+                g_chips = sum(game_chips.get(cid, {}).values())
+                # 今日四游戏局数（按 profit dict 中今日该 cid 的玩家数近似）
+                g_bets = sum(
+                    1 for d in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date)
+                    for uid in d.get(today, {}).get(cid, {}))
+                # 今日有效邀请
+                g_invites = sum(1 for r in invite_records.values()
+                                if r.get("cid") == cid and r.get("audit") == "ok"
+                                and not r.get("left") and str(r.get("ts", "")).startswith(today))
+                g_race = "⏰ 开启" if hourly_race_enabled.get(cid, True) else "⏸ 关闭"
+                g_rows.append(
+                    f"<tr><td><code>{cid}</code> {html.escape(gname)}</td>"
+                    f"<td>{g_players}</td><td>{g_chips:,}</td>"
+                    f"<td>{g_bets}</td><td>{g_invites}</td>"
+                    f"<td>{g_race}</td></tr>")
+            if not g_rows:
+                g_rows = "<tr><td colspan='6' style='text-align:center;color:#6a6982'>还没授权群，群里发 /授权</td></tr>"
+            group_detail = ("<div class='card' style='margin-top:18px'>"
+                            "<h3>🏘️ 各群活动详情（你要的分开的活跃度）</h3>"
+                            "<div class='sub'>玩家/积分为当前余额；今日局数=德州+赛车+21点+炸金花官方局；今日有效邀请=未退群且审核通过；整点赛车=群内默认状态</div>"
+                            "<table class='tbl'><tr><th>群</th><th>玩家</th><th>积分余额</th><th>今日局数</th><th>今日有效邀请</th><th>整点赛车</th></tr>"
+                            + "".join(g_rows) + "</table></div>")
             # 菜单排序：▲▼ 调整侧边栏顺序（群体总览固定第一），保存进设置
             nav = [g for g in SETTINGS_GROUPS if g[0] != "dashboard"]
             keys_now = [g[0] for g in nav]
@@ -8286,6 +8336,7 @@ def start_health_server():
                 "<h1><span class='ico'>📊</span>群体总览</h1>"
                 "<div class='sub'>实时数据快照 · 改设置去左侧菜单 · 数据修改去 Telegram 群用 /命令</div>"
                 f"<div class='cards'>{cards}</div>"
+                + group_detail +
                 "<div class='card' style='margin-top:18px'>"
                 "<h3>⚡ 快捷入口</h3>" + quick + "</div>"
                 "<div class='card' style='margin-top:18px'>"
@@ -8305,12 +8356,13 @@ def start_health_server():
             parts = []
             if mode == "records":
                 # 1. 退群/入群记录
-                lv_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                lv_rows = [[r.get("ts", ""), html.escape(chat_name_cache.get(cid) or str(cid)),
+                            html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
                             "🟢 入群" if r.get("join") else "🔴 退群"]
                            for cid, lst in leave_records.items() for r in reversed(lst[-30:])]
                 parts.append("<div class='card'><h1>进出记录（最近 30 条）</h1>"
                              "<div class='sub'>bot 需为群管理员才能收到成员进出事件</div>"
-                             + tbl(["时间", "成员", "ID", "类型"], lv_rows[-30:]) + "</div>")
+                             + tbl(["时间", "群", "成员", "ID", "类型"], lv_rows[-30:]) + "</div>")
                 # 2. 入群申请（可直接网页批准/拒绝）
                 def _jr_btn(op, c, u, label):
                     return ("<form style='display:inline;margin:0' method='post' action='/adminops2'>"
@@ -8318,12 +8370,13 @@ def start_health_server():
                             f"<input type='hidden' name='cid' value='{c}'>"
                             f"<input type='hidden' name='uid' value='{u}'>"
                             f"<button type='submit' style='padding:2px 10px;cursor:pointer'>{label}</button></form>")
-                jq_rows = [[r.get("ts", ""), html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                jq_rows = [[r.get("ts", ""), html.escape(chat_name_cache.get(cid) or str(cid)),
+                            html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
                             _jr_btn("join_approve", cid, r.get("uid", ""), "✅ 批准") + " " + _jr_btn("join_decline", cid, r.get("uid", ""), "🚫 拒绝")]
                            for cid, lst in join_requests.items() for r in reversed(lst[-30:])]
                 parts.append("<div class='card'><h1>📨 入群申请（最近 30 条）</h1>"
                              "<div class='sub'>群需开启「申请加入」；可直接在此批准或拒绝，无需去 Telegram 客户端</div>"
-                             + tbl(["时间", "申请人", "ID", "操作"], jq_rows[-30:]) + "</div>")
+                             + tbl(["时间", "群", "申请人", "ID", "操作"], jq_rows[-30:]) + "</div>")
             else:
                 # 白名单
                 wl_rows = [[cid, html.escape(user_names.get(u, str(u))), f"<code>{u}</code>"]
@@ -9001,13 +9054,16 @@ def start_health_server():
                                    "暂无兑换商品，先新增商品</td></tr>")
                     ro_rows = ""
                     for o in reversed(redeem_orders[-50:]):
+                        _oc = int(o.get("cid", 0) or 0)
+                        _oc_txt = f"{html.escape(chat_name_cache.get(_oc) or str(_oc or '—'))}"
                         ro_rows += (f"<tr><td>{html.escape(str(o.get('no', '')))}</td>"
                                     f"<td>{html.escape(str(o.get('ts', '')))}</td>"
+                                    f"<td>{_oc_txt}</td>"
                                     f"<td>{html.escape(str(o.get('uid', '')))}</td>"
                                     f"<td>{html.escape(str(o.get('item', '')))}</td>"
                                     f"<td>{int(o.get('price', 0) or 0)}</td></tr>")
                     if not ro_rows:
-                        ro_rows = ("<tr><td colspan='5' style='text-align:center;color:#6a6982'>暂无兑换订单</td></tr>")
+                        ro_rows = ("<tr><td colspan='6' style='text-align:center;color:#6a6982'>暂无兑换订单</td></tr>")
                     cmd_esc = html.escape(str(REDEEM_CMD))
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>群内发「{cmd_esc}」看商品列表，发「{cmd_esc} 编号」立即兑换；剩余 0=不限，限量商品兑完自动下架</div>{msg}"
                             "<div class='card'><h3>🛒 兑换商品</h3>"
@@ -9020,7 +9076,7 @@ def start_health_server():
                             "<input type='text' name='desc' placeholder='说明(可选)' style='flex:2'>"
                             "<button style='margin:0'>➕ 新增商品</button></form></div>"
                             "<div class='card' style='margin-top:18px'><h3>🧾 最近兑换订单（防伪核对）</h3>"
-                            "<table class='tbl'><tr><th>单号</th><th>时间</th><th>用户ID</th><th>商品</th><th>积分</th></tr>"
+                            "<table class='tbl'><tr><th>单号</th><th>时间</th><th>群</th><th>用户ID</th><th>商品</th><th>积分</th></tr>"
                             + ro_rows + "</table></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/redeem'>"

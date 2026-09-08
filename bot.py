@@ -775,7 +775,8 @@ def _cross_keys(group):
     if group == "tpls":
         return {k for k, _g, _l, t, _lo, _hi, _grp in SETTINGS_FIELDS if t == "text"}
     if group == "mod":
-        return set(MOD_PAGE_FIELDS)
+        return ({k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == "mod"}
+                | set(MOD_PAGE_FIELDS))
     return None
 
 
@@ -1329,6 +1330,8 @@ def force_save_now():
                 "invite_records": {k: dict(v) for k, v in invite_records.items() if isinstance(v, dict)},
                 "invite_pending": {k: v for k, v in invite_pending.items()},  # 待归因：容器重启也不丢
                 "invite_confirmed": {k: int(v) for k, v in invite_confirmed.items()},  # deep-link/主动问 锁定的归因
+                "join_verify_pending": {k: dict(v) for k, v in join_verify_pending.items() if isinstance(v, dict)},
+                "observe_checked": sorted(observe_checked),
                 "invite_debug": {str(cid): list(v) for cid, v in invite_debug.items()},
                 "invite_links": {str(cid): {str(uid): dict(v) for uid, v in users.items()}
                                  for cid, users in invite_links.items()},
@@ -1537,6 +1540,9 @@ def load_data():
         invite_pending.update(data.get("invite_pending", {}))
         invite_confirmed.update({str(k): int(v) for k, v in (data.get("invite_confirmed", {}) or {}).items()
                                  if str(v).lstrip("-").isdigit()})
+        for k, v in (data.get("join_verify_pending", {}) or {}).items():   # 入群验证待处理（重启不丢）
+            if isinstance(v, dict): join_verify_pending[str(k)] = dict(v)
+        observe_checked.update(str(x) for x in (data.get("observe_checked", []) or []))
         invite_debug.clear()
         for cid, lst in data.get("invite_debug", {}).items():
             invite_debug[int(cid)] = list(lst)[-10:]
@@ -8445,6 +8451,10 @@ async def on_new_members_msg(update, context):
             name = member.first_name or f"用户{uid}"
             _inv_dbg(message.chat_id, f"服务消息进群 uid={uid}（new_chat_members 兜底）")
             await _invite_track_join(message, cid, uid, name, context)
+            if JOIN_VERIFY_ENABLED and not member.is_bot and not is_bot_admin(uid) \
+                    and f"{cid}:{uid}" not in join_verify_pending:
+                member_joined_at[cid][uid] = time.time()   # 普通群无 chat_member 事件，这里补观察期起点
+                await _join_verify_start(context, cid, uid, name)
     except Exception:
         logger.exception("message 入群事件处理异常（已吞并）")
 
@@ -8506,6 +8516,8 @@ async def on_member_event(update, context):
             member_joined_at[cid][uid] = time.time()  # 观察期起点
             _inv_dbg(cid, f"chat_member 进群事件 uid={uid}，事件链接：{(getattr(getattr(cmu, 'invite_link', None), 'link', '') or '（无）')}")
             await _invite_track_join(cmu, cid, uid, name, context)  # 邀请系统追踪（内部自吞异常）
+            if JOIN_VERIFY_ENABLED and not new.user.is_bot and not is_bot_admin(uid):
+                await _join_verify_start(context, cid, uid, name)   # 入群验证（默认关）
             if WELCOME_ENABLED:
                 try:
                     text = WELCOME_TPL.replace("{name}", name).replace("{group}", getattr(cmu.chat, "title", "") or "").replace("{id}", str(uid))
@@ -10804,6 +10816,21 @@ def start_health_server():
                                  "改完点底部保存，各页面同步生效（原页面里的同一项也已移除，不会两处打架）。"
                                  "点右侧「🔍 预览」看填充后的效果。</div></div>"
                                  "<div class='card' style='margin-top:18px'>")
+                if gkey == "mod":
+                    _mod_on = [n for k, n in (("JOIN_VERIFY_ENABLED", "入群验证"), ("SENSITIVE_ENABLED", "敏感词"),
+                                              ("LINK_WHITELIST_ENABLED", "域名白名单"),
+                                              ("OBSERVE_CHECK_ENABLED", "观察期巡检")) if globals().get(k)]
+                    _mod_txt = ("、".join(_mod_on) + " 已开启") if _mod_on else \
+                        "以下功能全部默认关闭，打开开关即生效；不想用了关掉开关即可，互不影响"
+                    form_open = ("<div class='card' style='border-color:#3a3b5a'>"
+                                 "<div class='sub' style='margin:0 0 4px'>🛡️ 群管中心："
+                                 f"{html.escape(_mod_txt)}。</div>"
+                                 "<div class='sub' style='margin:0'>相关页面："
+                                 "<a class='q' href='/page/autodel'>🗑️ 自动删除</a>"
+                                 "<a class='q' href='/page/members/join'>👥 入群与观察</a>"
+                                 "<a class='q' href='/page/members/ops'>🔒 白名单</a>"
+                                 "<a class='q' href='/page/admin/blacklist'>🚫 拉黑管理</a></div></div>"
+                                 "<div class='card' style='margin-top:18px'>")
                 if gkey == "schedule":
                     def _sched_card(title, task, items, selected, subtitle, path):
                         """通用作用对象切换卡：items=(id, 显示名) 列表，selected=当前开启 id 集合。"""
@@ -11723,6 +11750,10 @@ def main():
     if getattr(app, "job_queue", None) is not None:
         app.job_queue.run_repeating(auto_backup, interval=max(1, int(BACKUP_INTERVAL_HOURS)) * 3600, first=60)
         logger.info("自动备份任务已注册：每 %s 小时一次", BACKUP_INTERVAL_HOURS)
+        # 群管中心：入群验证超时巡检（60s）+ 观察期到期巡检（10 分钟）
+        app.job_queue.run_repeating(join_verify_sweep, interval=60, first=90)
+        app.job_queue.run_repeating(observe_check_sweep, interval=600, first=180)
+        logger.info("群管巡检任务已注册：入群验证超时(60s) / 观察期到期(10min)")
     else:
         logger.warning("JobQueue 不可用，自动备份未启用（需安装 python-telegram-bot[job-queue]）")
 

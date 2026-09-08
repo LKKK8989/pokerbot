@@ -105,9 +105,11 @@ SETTINGS_GROUPS = [
     ("invite",    "邀请系统",   "🎟️"),
     ("season",    "排位赛",     "🏆"),
     ("members",   "群组管理",   "👥"),
+    ("mod",       "群管中心",   "🛡️"),
     ("autodel",   "自动删除",   "🗑️"),
     ("schedule",  "定时任务",   "⏰"),
     ("commands",  "命令管理",   "⌨️"),
+    ("tpls",      "话术库",     "💬"),
     ("general",   "通用与应急", "⚙️"),
     ("admin",     "管理员中心", "🛡️"),
     ("security",  "安全",       "🔒"),
@@ -115,10 +117,12 @@ SETTINGS_GROUPS = [
 # 子页面制：有子页的分组在侧边栏折叠展开（照阿福模板）。None=未开通占位页
 SIDEBAR_ORDER = []   # 侧边栏自定义排序（组键列表，网页「群体总览」可 ▲▼ 调整，随设置持久化）
 SIDEBAR_CHILDREN = {"texas": ["season"]}  # 把某些独立组折叠进父组显示（路由不变）：排位赛归入德州
+# 群管中心（跨组聚合页）直接内嵌的高频开关；新增群管功能时往这里加键即可
+MOD_PAGE_FIELDS = []
 # 侧边栏三大节（照阿福：节标题 + 节内菜单项）。不在任何节里的组保持原样渲染在最后。
 SIDEBAR_SECTIONS = [
-    ("🤖 机器人设置", ["dashboard", "schedule", "commands", "general", "admin", "security"]),
-    ("👥 群组设置",   ["members", "autodel", "points", "lottery", "invite"]),
+    ("🤖 机器人设置", ["dashboard", "schedule", "commands", "tpls", "general", "admin", "security"]),
+    ("👥 群组设置",   ["members", "mod", "autodel", "points", "lottery", "invite"]),
     ("🎲 娱乐功能",   ["texas", "blackjack", "jinhua", "race", "rake"]),
 ]
 SUBPAGES = {
@@ -160,6 +164,27 @@ SUBPAGES = {
         ("seasonpts", "排位分调整"),
         ("orders",    "商城订单"),
         ("fundflow",  "资金流审查"),
+    ],
+}
+# ===== 多选字段（类型 "multi"）的可选项：settings键 -> [(值, 显示名), ...] =====
+# 值只允许英文小写+下划线，渲染成一组勾选框，保存为逗号分隔字符串（顺序按这里定义）。
+MULTI_OPTIONS = {
+    "autodel_text_rules": [
+        ("link", "链接消息(http/t.me/链接实体)"),
+        ("long", "超长消息"),
+        ("premium_emoji", "会员表情(自定义表情)"),
+    ],
+    "autodel_media_types": [
+        ("photo", "图片"),
+        ("video", "视频"),
+        ("sticker", "贴纸"),
+        ("gif", "动图(GIF)"),
+        ("voice", "语音/视频圆"),
+        ("document", "文档文件"),
+        ("archive", "压缩包(zip/rar/7z)"),
+        ("executable", "可执行文件(exe/apk)"),
+        ("contact", "分享联系人"),
+        ("service", "系统消息(入退群/改群名)"),
     ],
 }
 SETTINGS_FIELDS = [
@@ -213,10 +238,16 @@ SETTINGS_FIELDS = [
     ("backup_enabled",          "BACKUP_ENABLED",          "自动备份开关(保存即时生效)", "bool",  0,   1,       "schedule"),
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
     ("admin_report_enabled",    "ADMIN_REPORT_ENABLED",    "经营日报推送开关",          "bool",  0,   1,       "schedule"),
+    ("sep_ad_botmsg",           None,                       "① 机器人自身消息自动回收(秒,0=不删)", "sep", 0, 0, "autodel"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "你发的命令消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("reply_delete_seconds",    "REPLY_DELETE_SECONDS",    "查询类回复删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("race_notice_delete_seconds", "RACE_NOTICE_DELETE_SECONDS", "赛车倒计时提示删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("web_base_url",            "WEB_BASE_URL",            "后台公网地址(/后台一键登录用)",          "text", 0,   0,    "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "members/join"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "members/join"),
+    ("sep_ad_spam",             None,                       "② 刷屏识别（复读/定时脚本）", "sep", 0, 0, "autodel"),
     ("antispam_enabled",        "ANTISPAM_ENABLED",        "定时刷屏识别开关(复读+定时器特征)", "bool", 0,   1,    "autodel"),
     ("antispam_repeat_n",       "ANTISPAM_REPEAT_N",       "复读命中条数(窗口内同内容)", "int",  2,   10,   "autodel"),
     ("antispam_window",         "ANTISPAM_WINDOW",         "复读检测窗口(秒)", "int",  10,  3600, "autodel"),
@@ -224,28 +255,33 @@ SETTINGS_FIELDS = [
     ("antispam_timer_tol",      "ANTISPAM_TIMER_TOL",      "定时器间隔偏差容忍(%)", "int",  5,   90,   "autodel"),
     ("antispam_mute_seconds",   "ANTISPAM_MUTE_SECONDS",   "命中禁言基础时长(秒,0=只删不禁)", "int",  0,   86400,"autodel"),
     ("antispam_mute_escalate",  "ANTISPAM_MUTE_ESCALATE",  "累犯禁言翻倍", "bool", 0,   1,    "autodel"),
-    # ===== 自动回收时长（全部集中在这个菜单，用户自己调数值） =====
-    ("points_delete_seconds",  "POINTS_DELETE_SECONDS",  "你发的命令消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
-    ("reply_delete_seconds",   "REPLY_DELETE_SECONDS",   "查询类回复删除(秒,0=不删)", "int", 0, 86400, "autodel"),
-    ("settle_delete_seconds",  "SETTLE_DELETE_SECONDS",  "游戏结算消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
-    ("race_notice_delete_seconds", "RACE_NOTICE_DELETE_SECONDS", "赛车倒计时提示删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("antispam_notice_seconds", "ANTISPAM_NOTICE_SECONDS", "刷屏命中通告删除(秒,0=不删)", "int", 0, 86400, "autodel"),
-    # ===== 自动删除规则中心（照阿福：按消息类型开关，命中即静默撤删，管理员豁免） =====
-    ("autodel_links",         "AUTODEL_LINKS",         "链接消息(http/t.me/链接实体)", "bool", 0, 1, "autodel"),
-    ("autodel_long_enabled",  "AUTODEL_LONG_ENABLED",  "超长消息", "bool", 0, 1, "autodel"),
-    ("autodel_long_len",      "AUTODEL_LONG_LEN",      "超长消息长度阈值", "int", 50, 4096, "autodel"),
-    ("autodel_photo",         "AUTODEL_PHOTO",         "图片消息", "bool", 0, 1, "autodel"),
-    ("autodel_video",         "AUTODEL_VIDEO",         "视频消息", "bool", 0, 1, "autodel"),
-    ("autodel_sticker",       "AUTODEL_STICKER",       "贴纸消息", "bool", 0, 1, "autodel"),
-    ("autodel_gif",           "AUTODEL_GIF",           "动图消息", "bool", 0, 1, "autodel"),
-    ("autodel_voice",         "AUTODEL_VOICE",         "语音/视频圆消息", "bool", 0, 1, "autodel"),
-    ("autodel_document",      "AUTODEL_DOCUMENT",      "文档文件", "bool", 0, 1, "autodel"),
-    ("autodel_archive",       "AUTODEL_ARCHIVE",       "压缩文件(zip/rar/7z等)", "bool", 0, 1, "autodel"),
-    ("autodel_executable",    "AUTODEL_EXECUTABLE",    "可执行文件(exe/apk/bat等)", "bool", 0, 1, "autodel"),
-    ("autodel_contact",       "AUTODEL_CONTACT",       "删除分享联系人", "bool", 0, 1, "autodel"),
-    ("autodel_service",       "AUTODEL_SERVICE",       "删除系统消息(入退群/改群名等)", "bool", 0, 1, "autodel"),
-    ("autodel_service_seconds", "AUTODEL_SERVICE_SECONDS", "系统消息删除延迟(秒,0=立即删)", "int", 0, 86400, "autodel"),
-    ("autodel_premium_emoji", "AUTODEL_PREMIUM_EMOJI", "删除会员表情(自定义表情)", "bool", 0, 1, "autodel"),
+    # ===== 内容规则（合并后的两个多选，替代原先 12 个单开关） =====
+    ("sep_ad_rule", None, "③ 内容规则（勾选即删，管理员豁免）", "sep", 0, 0, "autodel"),
+    ("autodel_text_rules",     "AUTODEL_TEXT_RULES",     "文本类规则",          "multi", 0, 0, "autodel"),
+    ("autodel_long_len",       "AUTODEL_LONG_LEN",       "超长消息长度阈值(选了「超长」才生效)", "int", 50, 4096, "autodel"),
+    ("autodel_text_seconds",   "AUTODEL_TEXT_SECONDS",   "文本类删除延迟(秒,0=立即删)", "int", 0, 86400, "autodel"),
+    ("autodel_media_types",    "AUTODEL_MEDIA_TYPES",    "媒体/系统类规则",     "multi", 0, 0, "autodel"),
+    ("autodel_media_seconds",  "AUTODEL_MEDIA_SECONDS",  "媒体类删除延迟(秒,0=立即删)", "int", 0, 86400, "autodel"),
+    # ===== 群管中心（新功能全部默认关闭，网页手动开启） =====
+    ("sep_mod_verify",        None, "① 入群验证（新人点按钮才放行）", "sep", 0, 0, "mod"),
+    ("join_verify_enabled",   "JOIN_VERIFY_ENABLED",   "入群验证开关",            "bool", 0, 1, "mod"),
+    ("join_verify_seconds",   "JOIN_VERIFY_SECONDS",   "验证超时(秒)",            "int",  10, 3600, "mod"),
+    ("join_verify_action",    "JOIN_VERIFY_ACTION",    "超时处理(0=只提醒 1=禁言 2=踢出)", "int", 0, 2, "mod"),
+    ("join_verify_msg",       "JOIN_VERIFY_MSG",       "验证提示({name} {seconds})", "text", 0, 0, "mod"),
+    ("join_verify_ok_msg",    "JOIN_VERIFY_OK_MSG",    "验证通过提示({name})",    "text", 0, 0, "mod"),
+    ("sep_mod_word",          None, "② 敏感词与域名白名单", "sep", 0, 0, "mod"),
+    ("sensitive_enabled",     "SENSITIVE_ENABLED",     "敏感词过滤开关",          "bool", 0, 1, "mod"),
+    ("sensitive_words",       "SENSITIVE_WORDS",       "敏感词(逗号分隔；/正则/ 形式支持正则)", "names", 0, 0, "mod"),
+    ("sensitive_action",      "SENSITIVE_ACTION",      "命中处理(0=删除 1=删+禁言 2=删+踢出)", "int", 0, 2, "mod"),
+    ("sensitive_mute_seconds", "SENSITIVE_MUTE_SECONDS", "敏感词禁言时长(秒)",    "int",  0, 86400, "mod"),
+    ("link_whitelist_enabled", "LINK_WHITELIST_ENABLED", "域名白名单开关(名单内链接不删)", "bool", 0, 1, "mod"),
+    ("link_whitelist",        "LINK_WHITELIST",        "白名单域名(逗号分隔，子域名自动放行)", "names", 0, 0, "mod"),
+    ("sep_mod_observe",       None, "③ 观察期到期巡检", "sep", 0, 0, "mod"),
+    ("observe_check_enabled", "OBSERVE_CHECK_ENABLED", "到期巡检开关(需先开观察期)", "bool", 0, 1, "mod"),
+    ("observe_check_msgs",    "OBSERVE_CHECK_MSGS",    "发言少于N条视为不活跃",   "int",  0, 1000, "mod"),
+    ("observe_check_avatar",  "OBSERVE_CHECK_AVATAR",  "无头像也算不活跃(查API，仅零发言者)", "bool", 0, 1, "mod"),
+    ("observe_check_action",  "OBSERVE_CHECK_ACTION",  "处理方式(0=提醒管理员 1=禁言 2=踢出)", "int", 0, 2, "mod"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "members/join"),
     ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "members/join"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
@@ -257,8 +293,6 @@ SETTINGS_FIELDS = [
     ("season_rebuy_count",      "SEASON_REBUY_COUNT",      "每日重买次数上限",          "int",   0,   20,      "season"),
     ("season_rebuy_amount",     "SEASON_REBUY_AMOUNT",     "每次重买金额",              "int",   0,   1000000, "season"),
     # ---------- 积分系统（子页面制：points/子页键，照阿福模板） ----------
-    ("query_cmd",               "QUERY_CMD",               "查询积分指令(不带斜杠)",    "cmd",   0,   0,       "points/set"),
-    ("rank_cmd",                "RANK_CMD",                "积分排行指令(不带斜杠)",    "cmd",   0,   0,       "points/set"),
     ("admin_adjust",            "ADMIN_ADJUST_ENABLED",    "管理员可增减积分",          "bool",  0,   1,       "points/set"),
     ("rank_1_emoji",            "RANK_1_EMOJI",            "积分排行第一名表情",        "short", 0,   0,       "points/set"),
     ("rank_2_emoji",            "RANK_2_EMOJI",            "积分排行第二名表情",        "short", 0,   0,       "points/set"),
@@ -269,7 +303,6 @@ SETTINGS_FIELDS = [
     ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points/set"),
     ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points/set"),
     ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points/cap"),
-    ("sign_cmd",                "SIGN_CMD",                "签到指令(不带斜杠)",        "cmd",   0,   0,       "points/sign"),
     ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points/sign"),
     ("sign_base_reward",        "SIGN_BASE_REWARD",        "签到基础奖励",              "int",   0,   1000000, "points/sign"),
     ("sign_streak_bonus",       "SIGN_STREAK_BONUS",       "连续签到满7天额外奖励",     "int",   0,   1000000, "points/sign"),
@@ -285,7 +318,6 @@ SETTINGS_FIELDS = [
     ("rp_msg_target",           "RP_MSG_TARGET",           "专属红包非目标提示",        "text",  0,   0,       "points/rp"),
     ("rp_msg_log",              "RP_MSG_LOG",              "拼手气日志(每行,{rank}=名次)", "text", 0, 0,       "points/rp"),
     ("level_notify_enabled",    "LEVEL_NOTIFY_ENABLED",    "等级升降群内通知开关",      "bool",  0,   1,       "points/level"),
-    ("level_cmd",               "LEVEL_CMD",               "查询等级指令(不带斜杠)",    "cmd",   0,   0,       "points/level"),
     ("level_up_msg_tpl",        "LEVEL_UP_MSG_TPL",        "用户升级通知",              "text",  0,   0,       "points/level"),
     ("level_down_msg_tpl",      "LEVEL_DOWN_MSG_TPL",      "用户降级通知",              "text",  0,   0,       "points/level"),
     ("point_levels",            "POINT_LEVELS",            "积分等级表",               "levels", 0, 0,      "points/level_hidden"),
@@ -318,7 +350,6 @@ SETTINGS_FIELDS = [
     ("buy_enabled",             "BUY_ENABLED",             "购买积分开关(管理员人工确认)", "bool", 0, 1,     "points/buy"),
     ("buy_min",                 "BUY_MIN",                 "单次最低购买数量",          "int",   100, 1000000, "points/buy"),
     ("buy_max",                 "BUY_MAX",                 "单次最高购买数量",          "int",   100, 10000000,"points/buy"),
-    ("redeem_cmd",              "REDEEM_CMD",              "兑换触发词(不带斜杠)",      "cmd",   0,   0,       "points/redeem"),
     ("redeem_max_per_user",     "REDEEM_MAX_PER_USER",     "每人最大兑换数量(0=不限)",  "int",   0,   9999,    "points/redeem"),
     ("redeem_start",            "REDEEM_START",            "兑换开始时间(YYYY-MM-DD HH:MM,留空不限)", "short", 0, 0, "points/redeem"),
     ("redeem_end",              "REDEEM_END",              "兑换结束时间(同上,留空不限)", "short", 0,  0,       "points/redeem"),
@@ -330,7 +361,6 @@ SETTINGS_FIELDS = [
     ("invite_notify",           "INVITE_NOTIFY",           "邀请人私聊通知开关",        "bool",  0,   1,       "invite/config"),
     ("invite_reward",           "INVITE_REWARD",           "邀请奖励(积分/合格1人)",     "int",   0,   1000000, "invite/config"),
     ("invite_reward_times",     "INVITE_REWARD_TIMES",     "每人最多发放奖励次数",      "int",   1,   10000,   "invite/config"),
-    ("invite_link_cmd",         "INVITE_LINK_CMD",         "邀请链接指令(不带斜杠)",    "cmd",   0,   0,       "invite/config"),
     ("invite_rank_admin_only",  "INVITE_RANK_ADMIN_ONLY",  "排行仅管理员可查开关",      "bool",  0,   1,       "invite/config"),
     # （2026-09-08 去重移除：今日/本月/总邀请排行指令三字段与「命令管理」页重复，
     #   触发词改由别名层统一管理：今日邀请排行/本月邀请排行/总邀请排行 照常可用）
@@ -435,6 +465,25 @@ LOTTERY_MSG_RESULT = (
 )
 OBSERVE_ENABLED = 0         # 新成员观察期开关（1=开启：入群未满时长的成员发言即删并禁言到期满）
 OBSERVE_SECONDS = 300       # 观察期时长（秒）
+# ===== 群管中心（mod 组）：入群验证 / 敏感词 / 域名白名单 / 观察期巡检 =====
+# 全部默认关闭，网页「🛡️ 群管中心」手动开启（用户要求：新功能先关，自己开）
+JOIN_VERIFY_ENABLED = 0     # 入群验证：新人进群先限制发言，点按钮才放行
+JOIN_VERIFY_SECONDS = 120   # 验证超时（秒）
+JOIN_VERIFY_ACTION = 0      # 超时处理：0=只提醒 1=禁言 2=踢出
+JOIN_VERIFY_MSG = "👋 {name} 欢迎进群！请在 {seconds} 秒内点下方按钮完成验证，超时将按群规处理。"
+JOIN_VERIFY_OK_MSG = "✅ {name} 验证通过，已解除限制，畅聊吧！"
+SENSITIVE_ENABLED = 0       # 敏感词过滤
+SENSITIVE_WORDS = []        # 敏感词表（明文子串，或 /正则/ 形式）
+SENSITIVE_ACTION = 0        # 命中处理：0=删除 1=删除+禁言 2=删除+踢出
+SENSITIVE_MUTE_SECONDS = 600
+LINK_WHITELIST_ENABLED = 0  # 域名白名单：名单内链接不按「链接消息」规则删
+LINK_WHITELIST = []         # 白名单域名（t.me、example.com；子域名自动放行）
+OBSERVE_CHECK_ENABLED = 0   # 观察期到期巡检
+OBSERVE_CHECK_MSGS = 1      # 到期时本群发言少于 N 条视为不活跃
+OBSERVE_CHECK_AVATAR = 0    # 无头像也算不活跃（需额外 API 查询，仅在发言为 0 时才查）
+OBSERVE_CHECK_ACTION = 0    # 0=私聊提醒管理员 1=禁言 2=踢出
+join_verify_pending = {}    # "cid:uid" -> {"ts":秒级时间戳, "msg_id":验证消息ID}
+observe_checked = set()     # 已完成观察期复核的 "cid:uid"（防重复处理）
 # ---------- 邀请系统 ----------
 INVITE_ENABLED = 1          # 邀请系统总开关
 INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
@@ -475,21 +524,12 @@ ANTISPAM_MIN_LEN = 5        # 参与统计的最短内容长度（防误伤"哈�
 antispam_hist = {}          # (cid, uid, 内容归一化) -> [ts,...] 最多保留 12 条
 antispam_offense = {}       # (cid, uid) -> [命中 ts,...] 用于累犯加重
 # ===== 自动删除规则中心默认值（网页「自动删除」页可改，保存立即生效） =====
-AUTODEL_LINKS = 1           # 链接消息
-AUTODEL_LONG_ENABLED = 1    # 超长消息开关
-AUTODEL_LONG_LEN = 200      # 超长阈值
-AUTODEL_PHOTO = 0
-AUTODEL_VIDEO = 0
-AUTODEL_STICKER = 0
-AUTODEL_GIF = 0
-AUTODEL_VOICE = 0
-AUTODEL_DOCUMENT = 0
-AUTODEL_ARCHIVE = 0
-AUTODEL_EXECUTABLE = 1
-AUTODEL_CONTACT = 1
-AUTODEL_SERVICE = 1
-AUTODEL_SERVICE_SECONDS = 0  # 系统消息删除延迟秒数（0=立即删；N=命中后 N 秒再删）
-AUTODEL_PREMIUM_EMOJI = 0
+# ===== 自动删除：合并后的多选规则（旧的单开关已由 _migrate_legacy_autodel 自动换算） =====
+AUTODEL_TEXT_RULES = "link,long"          # 文本类规则：link=链接 long=超长 premium_emoji=会员表情
+AUTODEL_TEXT_SECONDS = 0                  # 文本类命中后延迟删除秒数（0=立即删）
+AUTODEL_MEDIA_TYPES = "executable,contact,service"   # 媒体/系统类规则（见 MULTI_OPTIONS）
+AUTODEL_MEDIA_SECONDS = 0                 # 媒体/系统类命中后延迟删除秒数（0=立即删）
+AUTODEL_LONG_LEN = 200                    # 超长阈值（仅在选中 long 时生效）
 WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
 WELCOME_TPL = "🎉 欢迎 {name} 加入本群！\n积分游戏请在群内发送 /start 查看玩法。"
 REDPACKET_ENABLED = 1
@@ -727,13 +767,86 @@ def _sync_dyn_aliases():
             aliases[name] = fn
             _DYN_CMD_OWNED[gname] = name
 
+def _cross_keys(group):
+    """跨分组聚合页（话术库等）可编辑的字段集合；普通分组返回 None（维持按组过滤）。
+
+    话术模板散落在 11 个分组里，以前改一句欢迎语要先想清楚它在哪个菜单。
+    """
+    if group == "tpls":
+        return {k for k, _g, _l, t, _lo, _hi, _grp in SETTINGS_FIELDS if t == "text"}
+    if group == "mod":
+        return set(MOD_PAGE_FIELDS)
+    return None
+
+
+def _grp_title(grp):
+    """把分组键（points/sign）翻成人类可读标题（积分系统 · 每日签到）。"""
+    base, _, sub = str(grp).partition("/")
+    gnames = {k: n for k, n, _i in SETTINGS_GROUPS}
+    name = gnames.get(base, base)
+    if sub:
+        subname = dict(SUBPAGES.get(base, [])).get(sub, sub)
+        name = f"{name} · {subname}"
+    return name
+
+
+def _multi_set(raw, key):
+    """把多选字段的原始值（list 或逗号分隔字符串）规整成逗号分隔字符串，只保留合法选项。"""
+    allowed = [v for v, _l in MULTI_OPTIONS.get(key, [])]
+    if isinstance(raw, (list, tuple)):
+        parts = [str(p).strip() for p in raw]
+    else:
+        parts = [p.strip() for p in re.split(r"[,，]", str(raw)) if p.strip()]
+    return ",".join([p for p in parts if p in allowed])
+
+
+def _multi_has(raw, opt):
+    """判断多选字符串里是否含某项（自动删除规则判定用）。"""
+    return opt in {p.strip() for p in str(raw or "").split(",") if p.strip()}
+
+
+def _migrate_legacy_autodel(cfg: dict):
+    """旧版「每类型一个开关」的自动删除配置 → 新版两个多选。
+
+    老的 bot_settings.json 里还是 autodel_photo / autodel_links / autodel_service_seconds
+    这类键，直接套用会全部丢失（用户已开的开关莫名关掉），所以先折算成新字段。
+    只有新版字段没给值时才迁移，避免覆盖用户刚在网页上的新选择。
+    """
+    legacy_media = {
+        "autodel_photo": "photo", "autodel_video": "video", "autodel_sticker": "sticker",
+        "autodel_gif": "gif", "autodel_voice": "voice", "autodel_document": "document",
+        "autodel_archive": "archive", "autodel_executable": "executable",
+        "autodel_contact": "contact", "autodel_service": "service",
+    }
+    legacy_text = {"autodel_links": "link", "autodel_long_enabled": "long",
+                   "autodel_premium_emoji": "premium_emoji"}
+    def _on(v):
+        return str(v).strip().lower() in ("1", "on", "true", "yes", "是")
+    if any(k in cfg for k in legacy_media) and "autodel_media_types" not in cfg:
+        picked = [opt for k, opt in legacy_media.items() if _on(cfg.get(k, 0))]
+        cfg["autodel_media_types"] = ",".join([o for o, _l in MULTI_OPTIONS["autodel_media_types"]
+                                               if o in picked])
+    if any(k in cfg for k in legacy_text) and "autodel_text_rules" not in cfg:
+        picked = [opt for k, opt in legacy_text.items() if _on(cfg.get(k, 0))]
+        cfg["autodel_text_rules"] = ",".join([o for o, _l in MULTI_OPTIONS["autodel_text_rules"]
+                                              if o in picked])
+    if "autodel_service_seconds" in cfg and "autodel_media_seconds" not in cfg:
+        try:
+            cfg["autodel_media_seconds"] = int(float(cfg["autodel_service_seconds"]))
+        except (ValueError, TypeError):
+            pass
+    return cfg
+
+
 def apply_settings(cfg: dict):
     """把设置字典套用到内存全局常量（带类型与范围校验，非法值跳过）。
 
     数字字段先套用（HORSE_COUNT 先生效，名称/表情才好做数量联动校验）；
     names/emoji 要求拆分后条数 == 当前 HORSE_COUNT，否则整条跳过；
     bets 要求 1~6 个 1~100000 的正整数，自动去重升序。
+    multi 为多选项，只保留 MULTI_OPTIONS 里登记的合法值，存为逗号分隔字符串。
     """
+    cfg = _migrate_legacy_autodel(dict(cfg))
     applied = {}
     # 数字字段先套用；赛马三件套（count/names/emoji）抽出单独联动处理
     for key, gname, _label, ftype, lo, hi, _grp in SETTINGS_FIELDS:
@@ -755,6 +868,13 @@ def apply_settings(cfg: dict):
             v = 1 if str(cfg[key]).strip().lower() in ("1", "on", "true", "yes", "是") else 0
             globals()[gname] = v
             applied[key] = v
+    # 多选字段（勾选组）：非法选项直接丢弃，顺序按 MULTI_OPTIONS 定义
+    for key, gname, _label, ftype, _lo, _hi, _grp in SETTINGS_FIELDS:
+        if key not in cfg or ftype != "multi":
+            continue
+        v = _multi_set(cfg[key], key)
+        globals()[gname] = v
+        applied[key] = v
     # 等级表 / 商品表：每行 "名称:数值"（支持中英文冒号），按数值升序
     for key, gname, ftype in (("point_levels", "POINT_LEVELS", "levels"), ("mall_items", "MALL_ITEMS", "items")):
         if key not in cfg:
@@ -5215,6 +5335,22 @@ async def on_button(update, context):
                 _inv_dbg(rcid, f"[主动问] 自动批准失败 uid={uid}：{e!r}（转人工，归因已锁定）")
                 await q.answer("✅ 邀请已记录，等管理员批准进群。", show_alert=False)
             return
+        # --- 入群验证：新人点「✅ 点击完成验证」解除限制（群授权前处理，未验证者也得能点） ---
+        if data.startswith("jv_"):
+            body = data[len("jv_"):]
+            cid_s, _, uid_s = body.partition("_")     # 首段=群 id（负数），末段=待验证用户 id
+            try:
+                cid_v, uid_v = int(cid_s), int(uid_s)
+            except ValueError:
+                await q.answer("按钮已过期", show_alert=True); return
+            if uid != uid_v and not is_bot_admin(uid):
+                await q.answer("❌ 这不是你的验证按钮", show_alert=True); return
+            if f"{cid_v}:{uid_v}" not in join_verify_pending:
+                await q.answer("✅ 你已通过验证", show_alert=False); return
+            await _join_verify_pass(context, cid_v, uid_v, q.from_user.first_name or f"用户{uid_v}",
+                                    getattr(q.message, "message_id", 0))
+            await q.answer("✅ 验证通过，可以发言了", show_alert=False)
+            return
         if not is_auth(cid): await q.answer("未授权", show_alert=True); return
         if uid in BLACKLISTED_USERS and not is_bot_admin(uid): await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
         if data == "noop": await q.answer(); return  # 占位按钮（售罄/页码），点了不报错
@@ -5713,12 +5849,17 @@ async def _antispam_hit(update, context, cid, uid, reason):
 
 def _autodel_text_hit(message, text):
     """自动删除规则（文本类）：返回规则名或 None。开关即法律，网页「自动删除」页可改。"""
-    if AUTODEL_LINKS and text and ("http://" in text or "https://" in text or "t.me/" in text
+    if _multi_has(AUTODEL_TEXT_RULES, "link") and text and ("http://" in text or "https://" in text or "t.me/" in text
             or any(getattr(e, "type", None) in ("url", "text_link") for e in (message.entities or []))):
-        return "links"
-    if AUTODEL_LONG_ENABLED and text and len(text) > max(50, int(AUTODEL_LONG_LEN)):
+        # 域名白名单：名单内（含子域名）的链接放行，不再一律删
+        if LINK_WHITELIST_ENABLED and _link_whitelisted(text):
+            pass
+        else:
+            return "link"
+    if _multi_has(AUTODEL_TEXT_RULES, "long") and text and len(text) > max(50, int(AUTODEL_LONG_LEN)):
         return "long"
-    if AUTODEL_PREMIUM_EMOJI and any(getattr(e, "type", None) == "custom_emoji" for e in (message.entities or [])):
+    if _multi_has(AUTODEL_TEXT_RULES, "premium_emoji") and any(
+            getattr(e, "type", None) == "custom_emoji" for e in (message.entities or [])):
         return "premium_emoji"
     return None
 
@@ -5741,31 +5882,31 @@ def _autodel_media_hit(message):
     if message is None:
         return None
     if _is_service_message(message):
-        return "service" if AUTODEL_SERVICE else None
+        return "service" if _multi_has(AUTODEL_MEDIA_TYPES, "service") else None
     if message.sticker is not None:
-        return "sticker" if AUTODEL_STICKER else None
+        return "sticker" if _multi_has(AUTODEL_MEDIA_TYPES, "sticker") else None
     if message.animation is not None:
-        return "gif" if AUTODEL_GIF else None
+        return "gif" if _multi_has(AUTODEL_MEDIA_TYPES, "gif") else None
     if message.voice is not None or message.video_note is not None:
-        return "voice" if AUTODEL_VOICE else None
+        return "voice" if _multi_has(AUTODEL_MEDIA_TYPES, "voice") else None
     if message.contact is not None:
-        return "contact" if AUTODEL_CONTACT else None
+        return "contact" if _multi_has(AUTODEL_MEDIA_TYPES, "contact") else None
     if message.document is not None:
         name = (message.document.file_name or "").lower()
         mt = message.document.mime_type or ""
-        if AUTODEL_ARCHIVE and (mt in ("application/zip", "application/x-rar-compressed",
+        if _multi_has(AUTODEL_MEDIA_TYPES, "archive") and (mt in ("application/zip", "application/x-rar-compressed",
                                        "application/x-7z-compressed", "application/gzip", "application/x-tar")
                 or name.endswith((".zip", ".rar", ".7z", ".tar", ".gz"))):
             return "archive"
-        if AUTODEL_EXECUTABLE and (mt in ("application/x-msdownload", "application/vnd.android.package-archive",
+        if _multi_has(AUTODEL_MEDIA_TYPES, "executable") and (mt in ("application/x-msdownload", "application/vnd.android.package-archive",
                                           "application/x-dosexec")
                 or name.endswith((".exe", ".msi", ".bat", ".cmd", ".scr", ".apk", ".com"))):
             return "executable"
-        return "document" if AUTODEL_DOCUMENT else None
+        return "document" if _multi_has(AUTODEL_MEDIA_TYPES, "document") else None
     if message.photo:
-        return "photo" if AUTODEL_PHOTO else None
+        return "photo" if _multi_has(AUTODEL_MEDIA_TYPES, "photo") else None
     if message.video is not None:
-        return "video" if AUTODEL_VIDEO else None
+        return "video" if _multi_has(AUTODEL_MEDIA_TYPES, "video") else None
     return None
 
 async def _autodel_enforce(update, context):
@@ -5782,9 +5923,12 @@ async def _autodel_enforce(update, context):
             return False
     hit = _autodel_text_hit(message, message.text or message.caption or "") or _autodel_media_hit(message)
     if hit:
-        if is_svc and AUTODEL_SERVICE_SECONDS > 0:
-            # 系统消息延迟删除：命中后 N 秒再撤（0=立即删）
-            schedule_delete(context.application, update.effective_chat.id, message, int(AUTODEL_SERVICE_SECONDS))
+        delay = int(AUTODEL_MEDIA_SECONDS if is_svc or hit in (
+            "photo", "video", "sticker", "gif", "voice", "contact", "document", "archive", "executable", "service"
+        ) else AUTODEL_TEXT_SECONDS)
+        if delay > 0:
+            # 延迟删除：命中后 N 秒再撤（0=立即删），给管理员留查看时间
+            schedule_delete(context.application, update.effective_chat.id, message, delay)
         else:
             try:
                 await message.delete()
@@ -5792,6 +5936,193 @@ async def _autodel_enforce(update, context):
                 pass
         return True
     return False
+
+# ==================== 群管中心：敏感词 / 域名白名单 / 入群验证 / 观察期巡检 ====================
+_URL_HOST_RE = re.compile(r"(?:https?://)?([a-z0-9][a-z0-9\-]*(?:\.[a-z0-9\-]+)+)(?:[:/]|\s|$)", re.I)
+
+def _link_domains():
+    """白名单域名（归一：去协议、去路径、去点前缀、小写）。"""
+    out = []
+    for d in (LINK_WHITELIST or []):
+        d = str(d).strip().lower()
+        if not d:
+            continue
+        d = re.sub(r"^https?://", "", d).split("/")[0].lstrip(".")
+        if d:
+            out.append(d)
+    return out
+
+def _link_whitelisted(text):
+    """文本里出现的每一个域名都在白名单里才放行；解析不出域名或有域名不在名单 → 不放行。"""
+    hosts = [h.lower().rstrip(".") for h in _URL_HOST_RE.findall(str(text or ""))]
+    if not hosts:
+        return False
+    domains = _link_domains()
+    if not domains:
+        return False
+    for h in hosts:
+        if not any(h == d or h.endswith("." + d) for d in domains):
+            return False
+    return True
+
+def _sensitive_hit(text):
+    """敏感词判定：明文按子串（忽略大小写），/xxx/ 形式按正则。返回命中的词条或 None。"""
+    t = str(text or "")
+    if not t or not SENSITIVE_WORDS:
+        return None
+    for w in SENSITIVE_WORDS:
+        w = str(w).strip()
+        if not w:
+            continue
+        if len(w) > 2 and w.startswith("/") and w.endswith("/"):
+            try:
+                if re.search(w[1:-1], t, re.I):
+                    return w
+            except re.error:
+                logger.warning("敏感词正则非法，已跳过：%s", w)
+                continue
+        elif w.lower() in t.lower():
+            return w
+    return None
+
+async def _mod_punish(context, cid, uid, action, mute_seconds, name, reason):
+    """群管统一处罚：1=禁言 2=踢出（踢出用 ban+立即 unban，成员可自行回来）。异常全吞。"""
+    try:
+        if action == 1:
+            await context.bot.restrict_chat_member(
+                cid, uid, permissions=ChatPermissions(can_send_messages=False),
+                until_date=datetime.now(timezone.utc) + timedelta(seconds=max(30, int(mute_seconds))))
+        elif action == 2:
+            await context.bot.ban_chat_member(cid, uid)
+            await context.bot.unban_chat_member(cid, uid)
+    except Exception:
+        logger.exception("群管处罚失败 cid=%s uid=%s action=%s（已吞并）", cid, uid, action)
+
+async def _join_verify_start(context, cid, uid, name):
+    """入群验证：先限制发言 → 发「点按钮验证」消息 → 登记待验证（超时由巡检兜底）。"""
+    key = f"{cid}:{uid}"
+    try:
+        await context.bot.restrict_chat_member(
+            cid, uid, permissions=ChatPermissions(can_send_messages=False))
+    except Exception:
+        logger.exception("入群验证：限制发言失败 cid=%s uid=%s（继续发验证消息）", cid, uid)
+    txt = (str(JOIN_VERIFY_MSG).replace("{name}", html.escape(str(name)))
+           .replace("{seconds}", str(int(JOIN_VERIFY_SECONDS))))
+    mid = 0
+    try:
+        msg = await context.bot.send_message(
+            cid, txt,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "✅ 点击完成验证", callback_data=f"jv_{cid}_{uid}")]]))
+        mid = getattr(msg, "message_id", 0) or 0
+    except Exception:
+        logger.exception("入群验证：发送验证消息失败 cid=%s uid=%s", cid, uid)
+    join_verify_pending[key] = {"ts": time.time(), "msg_id": mid, "name": str(name)}
+
+async def _join_verify_pass(context, cid, uid, name, msg_id=0):
+    """验证通过：解除限制 → 删掉验证消息 → 发通过提示。"""
+    key = f"{cid}:{uid}"
+    join_verify_pending.pop(key, None)
+    try:
+        await context.bot.restrict_chat_member(
+            cid, uid,
+            permissions=ChatPermissions(can_send_messages=True, can_send_other_messages=True,
+                                        can_add_web_page_previews=True, can_send_polls=True,
+                                        can_invite_users=True))
+    except Exception:
+        logger.exception("入群验证：解除限制失败 cid=%s uid=%s", cid, uid)
+    if msg_id:
+        try:
+            await context.bot.delete_message(cid, msg_id)
+        except Exception:
+            pass
+    try:
+        await context.bot.send_message(cid, str(JOIN_VERIFY_OK_MSG).replace("{name}", html.escape(str(name))))
+    except Exception:
+        pass
+
+async def join_verify_sweep(context):
+    """入群验证超时巡检（每 60 秒）：超时未点按钮 → 按配置提醒/禁言/踢出，并清掉验证消息。"""
+    if not JOIN_VERIFY_ENABLED:
+        return
+    now = time.time()
+    for key in list(join_verify_pending):
+        rec = join_verify_pending.get(key) or {}
+        if now - float(rec.get("ts", now)) < int(JOIN_VERIFY_SECONDS):
+            continue
+        try:
+            cid_s, _, uid_s = str(key).partition(":")
+            cid, uid = int(cid_s), int(uid_s)
+        except ValueError:
+            join_verify_pending.pop(key, None); continue
+        join_verify_pending.pop(key, None)
+        name = rec.get("name") or f"用户{uid}"
+        if JOIN_VERIFY_ACTION == 0:
+            try:
+                await context.bot.send_message(
+                    cid, f"⏰ {html.escape(str(name))} 入群后未在 {int(JOIN_VERIFY_SECONDS)} 秒内完成验证，请管理员留意。")
+            except Exception:
+                pass
+        else:
+            await _mod_punish(context, cid, uid, JOIN_VERIFY_ACTION, SENSITIVE_MUTE_SECONDS, name, "入群验证超时")
+            try:
+                await context.bot.send_message(
+                    cid, f"⏰ {html.escape(str(name))} 入群验证超时，已{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群'}。")
+            except Exception:
+                pass
+        if rec.get("msg_id"):
+            try:
+                await context.bot.delete_message(cid, int(rec["msg_id"]))
+            except Exception:
+                pass
+
+async def observe_check_sweep(context):
+    """观察期到期巡检：观察期走完的人复核一次，发言不达标（可选：无头像）→ 提醒/禁言/踢出。
+
+    只在 OBSERVE_CHECK_ENABLED 打开时干活；处理过的人记进 observe_checked，不会反复骚扰。
+    """
+    if not OBSERVE_CHECK_ENABLED or OBSERVE_SECONDS <= 0:
+        return
+    now = time.time()
+    for cid, joined in list(member_joined_at.items()):
+        for uid, jt in list(joined.items()):
+            key = f"{cid}:{uid}"
+            if key in observe_checked:
+                continue
+            if not jt or now - float(jt) < OBSERVE_SECONDS:
+                continue
+            observe_checked.add(key)          # 先标记，避免异常导致反复处理
+            if is_bot_admin(uid):
+                continue
+            prof = member_profiles.get(cid, {}).get(uid, {}) or {}
+            name = prof.get("name") or f"用户{uid}"
+            msgs = int(prof.get("msgs", 0) or 0)
+            if msgs >= OBSERVE_CHECK_MSGS:
+                continue
+            if OBSERVE_CHECK_AVATAR and msgs == 0:
+                try:
+                    ch = await context.bot.get_chat(uid)
+                    if getattr(ch, "photo", None):
+                        continue            # 有头像就不算小号
+                except Exception:
+                    pass
+            if OBSERVE_CHECK_ACTION == 0:
+                try:
+                    await context.bot.send_message(
+                        ADMIN_USER_ID,
+                        f"🔎 观察期巡检：群 <code>{cid}</code> 的 {html.escape(str(name))}（{uid}）"
+                        f"观察期已满但本群发言仅 {msgs} 条，请留意（可在「群管中心」配置为自动禁言/移出）。")
+                except Exception:
+                    pass
+            else:
+                await _mod_punish(context, cid, uid, OBSERVE_CHECK_ACTION, SENSITIVE_MUTE_SECONDS, name, "观察期巡检")
+                try:
+                    await context.bot.send_message(
+                        ADMIN_USER_ID,
+                        f"🔎 观察期巡检：{html.escape(str(name))}（{uid}）已"
+                        f"{'禁言' if OBSERVE_CHECK_ACTION == 1 else '移出群'}。")
+                except Exception:
+                    pass
 
 async def on_media(update, context):
     """自动删除规则中心：非文本消息（图/视频/贴纸/文件/联系人/系统消息等）按开关静默撤删。"""
@@ -5841,6 +6172,19 @@ async def on_text(update, context):
         # 自动删除规则中心：链接/超长/会员表情（媒体消息走 on_media；管理员豁免）
         if await _autodel_enforce(update, context):
             return
+
+        # 敏感词过滤（默认关；管理员豁免）：命中即删，可叠加禁言/踢出
+        if SENSITIVE_ENABLED and is_group_chat(update) and not is_bot_admin(user.id):
+            _sw = _sensitive_hit(text)
+            if _sw:
+                try:
+                    await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
+                except TelegramError:
+                    pass
+                if SENSITIVE_ACTION:
+                    await _mod_punish(context, cid, user.id, SENSITIVE_ACTION, SENSITIVE_MUTE_SECONDS,
+                                      user.first_name or f"用户{user.id}", "敏感词")
+                return
 
         # 定时刷屏识别：复读机 + 定时器特征（管理员豁免；内容太短不参与统计防误伤闲聊）
         if (ANTISPAM_ENABLED and is_group_chat(update) and not is_bot_admin(user.id)
@@ -8872,6 +9216,54 @@ for _fn in set(BASE_CMD_ALIASES.values()):
     _HANDLERS_BY_NAME[_fn.__name__] = _fn
 CMD_ALIAS_OVERRIDES = {}               # 处理函数名 -> "别名1,别名2,..."
 
+_CMD_FACTORY_DEFAULTS = {"QUERY_CMD": "我的积分", "SIGN_CMD": "签到", "RANK_CMD": "积分排行",
+                         "LEVEL_CMD": "我的等级", "REDEEM_CMD": "积分兑换",
+                         "INVITE_LINK_CMD": "link", "INVITE_RANK_TODAY_CMD": "今日邀请排行",
+                         "INVITE_RANK_MONTH_CMD": "本月邀请排行", "INVITE_RANK_ALL_CMD": "总邀请排行"}
+
+def _sync_cmd_globals_from_aliases():
+    """指令名单一真源：网页「命令管理」改了触发词，帮助文案里的指令名同步跟着变。
+
+    之前 QUERY_CMD/SIGN_CMD 等既是设置项又在命令管理页可改，两处各说各话，
+    改了页面里显示的还是旧词。现在设置项已下线，统一以命令管理的别名为准。
+    """
+    for gname, fn in (("QUERY_CMD", cmd_my_points), ("SIGN_CMD", cmd_sign), ("RANK_CMD", cmd_points_rank),
+                      ("LEVEL_CMD", cmd_my_level), ("REDEEM_CMD", cmd_points_redeem),
+                      ("INVITE_LINK_CMD", cmd_invite_link), ("INVITE_RANK_TODAY_CMD", cmd_invite_rank_today),
+                      ("INVITE_RANK_MONTH_CMD", cmd_invite_rank_month), ("INVITE_RANK_ALL_CMD", cmd_invite_rank_all)):
+        override = CMD_ALIAS_OVERRIDES.get(fn.__name__)
+        names = [a.strip() for a in str(override or "").replace("，", ",").split(",") if a.strip()]
+        if not names:
+            base_names = sorted(a for a, f in BASE_CMD_ALIASES.items() if f is fn)
+            d = _CMD_FACTORY_DEFAULTS.get(gname)   # 出厂默认优先（中文指令比英文别名更贴近用户认知）
+            names = [d] if d in base_names else base_names[:1]
+        if names:
+            globals()[gname] = names[0]
+
+
+def cmd_conflicts():
+    """触发词冲突体检：同一个触发词被多个命令占用时，后注册者会顶掉前者（表现为某命令莫名失效）。
+
+    返回 [(触发词, [命令函数, ...])]，按触发词排序；无冲突返回空列表。命令管理页顶部展示。
+    """
+    parsed = {}
+    for fn_name, alias_str in CMD_ALIAS_OVERRIDES.items():
+        if fn_name not in _HANDLERS_BY_NAME:
+            continue
+        aliases = [a.strip() for a in str(alias_str).replace("，", ",").split(",") if a.strip()]
+        if aliases:
+            parsed[fn_name] = aliases
+    owner = {}
+    for alias, fn in BASE_CMD_ALIASES.items():
+        if fn.__name__ in parsed:
+            continue                      # 被覆盖的命令其出厂触发词已整体失效
+        owner.setdefault(alias, set()).add(fn.__name__)
+    for fn_name, aliases in parsed.items():
+        for a in aliases:
+            owner.setdefault(a, set()).add(fn_name)
+    return sorted((a, sorted(fns)) for a, fns in owner.items() if len(fns) > 1)
+
+
 def apply_command_aliases():
     """重建命令分发表：出厂别名 + 网页覆盖层 + QUERY/SIGN/RANK 动态名。
     某命令有非空覆盖时，其出厂触发词整体失效（覆盖即替换）；覆盖为空则恢复出厂。"""
@@ -8888,6 +9280,7 @@ def apply_command_aliases():
     for fn_name, aliases in parsed.items():
         fn = _HANDLERS_BY_NAME[fn_name]
         for a in aliases: CMD_ALIASES[a] = fn
+    _sync_cmd_globals_from_aliases()   # 帮助文案里的指令名跟随网页改动（单一真源）
     _sync_dyn_aliases()
 
 async def _dispatch_alias(cmd, args, update, context):
@@ -9083,27 +9476,27 @@ def start_health_server():
                     "*{box-sizing:border-box}"
                     "html,body{height:100%}"
                     "body{background:#1c1d2e;color:#e6e5f0;font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;"
-                    "margin:0;font-size:14px;-webkit-font-smoothing:antialiased}"
+                    "margin:0;font-size:16px;-webkit-font-smoothing:antialiased}"
                     "a{color:inherit;text-decoration:none}"
-                    "code{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#d6d2f5;"
+                    "code{font-family:ui-monospace,Consolas,monospace;font-size:14px;color:#d6d2f5;"
                     "background:#151621;padding:1px 6px;border-radius:6px}"
                     # 顶部 header
                     ".hd{position:sticky;top:0;z-index:50;height:52px;background:#151621;"
                     "border-bottom:1px solid #26273a;display:flex;align-items:center;padding:0 18px;gap:14px}"
-                    ".hd .logo{font-size:15px;font-weight:500;color:#fff;display:flex;align-items:center;gap:8px}"
-                    ".hd .crumb{color:#8a89a0;font-size:13px}"
-                    ".hd .right{margin-left:auto;display:flex;align-items:center;gap:14px;color:#8a89a0;font-size:12px}"
+                    ".hd .logo{font-size:16px;font-weight:500;color:#fff;display:flex;align-items:center;gap:8px}"
+                    ".hd .crumb{color:#8a89a0;font-size:14px}"
+                    ".hd .right{margin-left:auto;display:flex;align-items:center;gap:14px;color:#8a89a0;font-size:13px}"
                     ".hd .burger{display:none;background:transparent;border:1px solid #2b2c40;color:#e6e5f0;"
                     "border-radius:8px;padding:6px 10px;cursor:pointer}"
                     # 整体布局
                     ".wrap{display:flex;min-height:calc(100vh - 52px)}"
                     # 侧栏
-                    ".side{width:224px;background:#151621;border-right:1px solid #26273a;padding:14px 10px;"
+                    ".side{width:242px;background:#151621;border-right:1px solid #26273a;padding:14px 10px;"
                     "flex-shrink:0;overflow-y:auto;transition:transform .2s ease}"
-                    ".side .grp-title{padding:14px 12px 6px;font-size:11px;color:#6a6982;letter-spacing:1px;"
+                    ".side .grp-title{padding:14px 12px 6px;font-size:12px;color:#6a6982;letter-spacing:1px;"
                     "text-transform:uppercase;font-weight:500}"
                     ".side .grp-title:first-child{padding-top:4px}"
-                    ".side a{display:flex;align-items:center;gap:10px;color:#a9a8bd;font-size:14px;"
+                    ".side a{display:flex;align-items:center;gap:10px;color:#a9a8bd;font-size:15px;"
                     "padding:9px 12px;border-radius:8px;margin-bottom:1px;transition:background .12s,color .12s}"
                     ".side a:hover{background:#1d1e2e;color:#fff}"
                     ".side a.active{background:linear-gradient(135deg,#7c6cf0 0%,#5d4dd6 100%);color:#fff;"
@@ -9111,44 +9504,44 @@ def start_health_server():
                     ".side a.active .badge{background:rgba(255,255,255,.18);color:#fff}"
                     ".side details{margin-bottom:1px}"
                     ".side summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;"
-                    "font-size:14px;color:#a9a8bd;padding:9px 12px;border-radius:8px;user-select:none;"
+                    "font-size:15px;color:#a9a8bd;padding:10px 12px;border-radius:8px;user-select:none;"
                     "transition:background .12s,color .12s}"
                     ".side summary::-webkit-details-marker{display:none}"
                     ".side summary:hover{background:#1d1e2e;color:#fff}"
                     ".side summary.active{background:#2b2854;color:#fff}"
                     ".side summary::after{content:'⌄';margin-left:auto;color:#6a6982;font-size:11px;transition:transform .15s}"
                     ".side details[open] summary::after{transform:rotate(180deg)}"
-                    ".side .sub a{padding:7px 12px 7px 36px;font-size:13px;position:relative}"
-                    ".side .sub a::before{content:'○';position:absolute;left:18px;font-size:8px;color:#6a6982}"
+                    ".side .sub a{padding:9px 12px 9px 36px;font-size:14px;position:relative}"
+                    ".side .sub a::before{content:'○';position:absolute;left:18px;font-size:9px;color:#6a6982}"
                     ".side .sub a.active::before{content:'●';color:#fff}"
-                    ".badge{margin-left:auto;font-size:10px;background:#2b2c40;color:#a9a8bd;"
+                    ".badge{margin-left:auto;font-size:11px;background:#2b2c40;color:#a9a8bd;"
                     "border-radius:6px;padding:1px 6px;font-weight:500}"
                     # 主区
-                    ".main{flex:1;padding:24px 28px;max-width:920px;min-width:0}"
-                    ".main h1{font-size:20px;font-weight:500;margin:0 0 4px;color:#fff}"
+                    ".main{flex:1;padding:24px 28px;max-width:980px;min-width:0}"
+                    ".main h1{font-size:25px;font-weight:500;margin:0 0 6px;color:#fff}"
                     ".main h1 .ico{margin-right:6px}"
-                    ".main .sub{font-size:13px;color:#8a89a0;margin-bottom:18px}"
+                    ".main .sub{font-size:14px;color:#8a89a0;margin-bottom:18px}"
                     # 卡片
                     ".card{background:#1d1e2e;border:1px solid #2b2c40;border-radius:12px;padding:20px 22px;margin-bottom:16px}"
-                    ".card h3{font-size:14px;font-weight:500;margin:0 0 12px;color:#c9c8da}"
+                    ".card h3{font-size:16px;font-weight:500;margin:0 0 14px;color:#c9c8da}"
                     # 表单
-                    "label{display:block;font-size:13px;color:#a9a8bd;margin:14px 0 5px}"
+                    "label{display:block;font-size:14px;color:#a9a8bd;margin:14px 0 6px}"
                     "input,select,textarea{width:100%;background:#151621;border:1px solid #2b2c40;color:#e6e5f0;"
-                    "border-radius:8px;padding:9px 12px;font-size:14px;font-family:inherit;transition:border-color .12s}"
+                    "border-radius:8px;padding:10px 13px;font-size:15px;font-family:inherit;transition:border-color .12s}"
                     "input:focus,select:focus,textarea:focus{outline:none;border-color:#7c6cf0;"
                     "box-shadow:0 0 0 3px rgba(124,108,240,.12)}"
                     "textarea{font-family:ui-monospace,Consolas,monospace;line-height:1.5}"
                     "button{background:linear-gradient(135deg,#7c6cf0 0%,#5d4dd6 100%);color:#fff;border:none;"
-                    "border-radius:8px;padding:9px 22px;font-size:14px;cursor:pointer;font-weight:500;"
+                    "border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer;font-weight:500;"
                     "transition:transform .1s,box-shadow .12s;box-shadow:0 2px 8px rgba(124,108,240,.2)}"
                     "button:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(124,108,240,.35)}"
                     "button:active{transform:translateY(0)}"
                     "button.danger{background:linear-gradient(135deg,#e06666 0%,#b94545 100%);"
                     "box-shadow:0 2px 8px rgba(224,102,102,.2)}"
                     # 提示
-                    ".ok{color:#6fd08c;font-size:13px;padding:10px 14px;background:rgba(111,208,140,.08);"
+                    ".ok{color:#6fd08c;font-size:14px;padding:10px 14px;background:rgba(111,208,140,.08);"
                     "border:1px solid rgba(111,208,140,.2);border-radius:8px;margin-bottom:14px}"
-                    ".err{color:#f09595;font-size:13px;padding:10px 14px;background:rgba(240,149,149,.08);"
+                    ".err{color:#f09595;font-size:14px;padding:10px 14px;background:rgba(240,149,149,.08);"
                     "border:1px solid rgba(240,149,149,.2);border-radius:8px;margin-bottom:14px}"
                     # 统计卡片
                     ".cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}"
@@ -9156,17 +9549,17 @@ def start_health_server():
                     "border-radius:12px;padding:16px 18px;transition:transform .15s,border-color .15s}"
                     ".stat:hover{transform:translateY(-2px);border-color:#3a3b5a}"
                     ".stat .v{font-size:24px;font-weight:500;margin-top:6px;color:#fff}"
-                    ".stat .t{font-size:12px;color:#8a89a0;display:flex;align-items:center;gap:6px}"
+                    ".stat .t{font-size:13px;color:#8a89a0;display:flex;align-items:center;gap:6px}"
                     # 快捷入口
                     ".q{display:inline-flex;align-items:center;gap:5px;margin:5px 5px 0 0;background:#2b2854;color:#d6d2f5;"
-                    "font-size:13px;padding:8px 13px;border-radius:8px;transition:background .12s,color .12s}"
+                    "font-size:14px;padding:9px 15px;border-radius:8px;transition:background .12s,color .12s}"
                     ".q:hover{background:#7c6cf0;color:#fff}"
                     # 行
                     ".row{display:flex;align-items:center;justify-content:space-between;gap:16px;"
                     "padding:12px 0;border-bottom:1px solid #26273a}"
                     ".row:last-child{border-bottom:none}"
-                    ".row .lbl{font-size:14px;color:#d6d2f5;flex:1;min-width:0}"
-                    ".row .lbl small{display:block;color:#8a89a0;font-size:12px;margin-top:2px;font-weight:400}"
+                    ".row .lbl{font-size:16px;color:#d6d2f5;flex:1;min-width:0;line-height:1.45}"
+                    ".row .lbl small{display:block;color:#8a89a0;font-size:13px;margin-top:3px;font-weight:400;line-height:1.5}"
                     ".row input[type=number],.row input[type=text],.row select{width:240px;flex-shrink:0}"
                     ".row textarea{width:100%;margin-top:8px}"
                     # 开关
@@ -9177,16 +9570,28 @@ def start_health_server():
                     "background:#fff;border-radius:50%;transition:.2s}"
                     ".tg input:checked+.sl{background:#7c6cf0}"
                     ".tg input:checked+.sl:before{transform:translateX(20px)}"
+# 分组标题行（sep 字段）
+                    ".sec{margin:20px 0 6px;padding:9px 13px;font-size:14px;font-weight:500;color:#cfcbea;"
+                    "background:#232438;border-left:3px solid #7c6cf0;border-radius:0 8px 8px 0;letter-spacing:.3px}"
+                    ".sec:first-child{margin-top:2px}"
+                    # 多选勾选组（multi 字段）
+                    ".cbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:10px}"
+                    ".cb{display:flex;align-items:center;gap:9px;margin:0;padding:9px 11px;background:#151621;"
+                    "border:1px solid #2b2c40;border-radius:8px;cursor:pointer;transition:border-color .12s,background .12s}"
+                    ".cb:hover{border-color:#4a4a6a;background:#1a1b28}"
+                    ".cb input{width:16px;height:16px;flex-shrink:0;accent-color:#7c6cf0;cursor:pointer}"
+                    ".cb span{font-size:14px;color:#d6d2f5;line-height:1.3}"
+                    ".cb:has(input:checked){border-color:#7c6cf0;background:rgba(124,108,240,.1)}"
                     # 表格
-                    ".tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}"
-                    ".tbl td,.tbl th{padding:9px 8px;border-bottom:1px solid #26273a;text-align:left}"
-                    ".tbl th{color:#8a89a0;font-weight:500;font-size:12px}"
+                    ".tbl{width:100%;border-collapse:collapse;font-size:14px;margin-top:6px}"
+                    ".tbl td,.tbl th{padding:11px 9px;border-bottom:1px solid #26273a;text-align:left}"
+                    ".tbl th{color:#8a89a0;font-weight:500;font-size:13px}"
                     ".tbl tr:last-child td{border-bottom:none}"
                     ".tbl tr:hover td{background:rgba(124,108,240,.04)}"
                     # 内部表单行（季节/授权等用 div 套 input 而不是 .row）
                     "[style*='padding:13px 2px']{padding:12px 0 !important;border-bottom:1px solid #26273a !important}"
                     # footer
-                    ".ft{padding:16px 28px;text-align:center;color:#6a6982;font-size:12px;border-top:1px solid #26273a}"
+                    ".ft{padding:16px 28px;text-align:center;color:#6a6982;font-size:13px;border-top:1px solid #26273a}"
                     ".ft a{color:#7c6cf0}"
                     # 移动端
                     "@media(max-width:768px){"
@@ -9395,11 +9800,41 @@ def start_health_server():
 
         def _field_rows(gkey):
             rows = []
+            if gkey == "tpls":
+                # 跨组聚合：全部话术模板按所属模块分区，一次改完
+                last = None
+                for key, _g, label, ftype, lo, hi, grp in SETTINGS_FIELDS:
+                    if ftype != "text" or key not in (_cross_keys("tpls") or set()):
+                        continue
+                    if grp != last:
+                        rows.append(f"<div class='sec'>{html.escape(_grp_title(grp))}</div>")
+                        last = grp
+                    cur = globals().get(_g)
+                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                                f"<div class='lbl' style='display:flex;align-items:center;justify-content:space-between'>"
+                                f"<span>{html.escape(label)}<small>可用占位符见默认值；支持换行</small></span>"
+                                f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
+                                f"<textarea name='{key}' rows='4' style='margin-top:8px'>{html.escape(cur or '')}</textarea></div>")
+                return "".join(rows)
             for key, _g, label, ftype, lo, hi, grp in SETTINGS_FIELDS:
                 if grp != gkey:
                     continue
                 cur = globals().get(_g)
-                if ftype == "bool":
+                if ftype == "sep":
+                    rows.append(f"<div class='sec'>{html.escape(label)}</div>")
+                elif ftype == "multi":
+                    picked = {p.strip() for p in str(cur or "").split(",") if p.strip()}
+                    boxes = []
+                    for val, vlabel in MULTI_OPTIONS.get(key, []):
+                        ck = " checked" if val in picked else ""
+                        boxes.append(f"<label class='cb'><input type='checkbox' name='{key}' "
+                                     f"value='{html.escape(val, quote=True)}'{ck}>"
+                                     f"<span>{html.escape(vlabel)}</span></label>")
+                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                                f"<div class='lbl'>{html.escape(label)}"
+                                f"<small>勾选即生效；未勾选的类型一律放行</small></div>"
+                                f"<div class='cbs'>{''.join(boxes)}</div></div>")
+                elif ftype == "bool":
                     checked = " checked" if cur else ""
                     rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
                                 f"<label class='tg'><input type='checkbox' name='{key}'{checked}>"
@@ -9829,14 +10264,26 @@ def start_health_server():
                                 "<td><input type='text' name='" + html.escape(fn_name) +
                                 "' value=\"" + html.escape(cur) + "\" style='width:100%'></td></tr>")
                 menu_txt = "\n".join(f"{c_} {d_}" for c_, d_ in TG_MENU)
+                _cf = cmd_conflicts()
+                _cf_html = ""
+                if _cf:
+                    _li = "".join(f"<tr><td><code>{html.escape(a)}</code></td>"
+                                  f"<td>{html.escape('、'.join(fns))}</td></tr>" for a, fns in _cf)
+                    _cf_html = ("<div class='err' style='margin-top:14px'>⚠️ 有 %d 个触发词被多个命令占用，"
+                                "排在后面的会顶掉前面的（表现为某命令在群里没反应）：</div>"
+                                "<table class='tbl'><tr><th style='width:180px'>触发词</th><th>被这些命令占用</th></tr>"
+                                % len(_cf) + _li + "</table>")
+                else:
+                    _cf_html = ("<div class='ok' style='margin-top:14px'>✅ 触发词体检通过：没有重复占用</div>")
                 body = (f"<h1>{gicon} 命令管理</h1>"
                         "<div class='sub'>每个命令的触发词随意改（逗号分隔，可中文可英文）；保存后<b>立即生效</b>并持久化。"
+                        "这里是触发词的<b>唯一入口</b>，帮助文案里显示的指令名会自动跟着改。"
                         f"Telegram / 菜单每行一条「命令 描述」，命令仅限英文小写/数字/下划线</div>{msg}{err}"
                         "<div class='card'><form method='post' action='/cmdaliases'>"
                         "<h3>⌨️ 命令触发词</h3>"
                         "<table class='tbl'><tr><th style='width:150px'>命令</th><th>触发词（逗号分隔）</th></tr>"
-                        + "".join(rows) + "</table>"
-                        "<h3 style='margin-top:20px'>📱 Telegram / 菜单</h3>"
+                        + "".join(rows) + "</table>" + _cf_html
+                        + "<h3 style='margin-top:20px'>📱 Telegram / 菜单</h3>"
                         "<textarea name='tg_menu' rows='14' style='width:100%;font-family:inherit'>" + html.escape(menu_txt) + "</textarea>"
                         "<button type='submit' style='margin-top:12px'>💾 保存全部命令设置</button></form></div>")
             elif gkey == "security":
@@ -10349,6 +10796,14 @@ def start_health_server():
                     first = SUBPAGES[gkey][0][0]
                     return _admin_page(gkey, sub=first, saved=saved, bad=bad)
                 form_open = "<div class='card'>"
+                if gkey == "tpls":
+                    n_tpl = len(_cross_keys("tpls") or ())
+                    form_open = ("<div class='card' style='border-color:#3a3b5a'>"
+                                 "<div class='sub' style='margin:0 0 4px'>"
+                                 f"全部 <b>{n_tpl}</b> 条话术集中在这里改，按所属模块分区；"
+                                 "改完点底部保存，各页面同步生效（原页面里的同一项也已移除，不会两处打架）。"
+                                 "点右侧「🔍 预览」看填充后的效果。</div></div>"
+                                 "<div class='card' style='margin-top:18px'>")
                 if gkey == "schedule":
                     def _sched_card(title, task, items, selected, subtitle, path):
                         """通用作用对象切换卡：items=(id, 显示名) 列表，selected=当前开启 id 集合。"""
@@ -11141,11 +11596,20 @@ def start_health_server():
                         except Exception:
                             pass
                         self._redirect("/page/security?saved=1"); return
-                    valid_keys = {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
-                    cfg = {k: v[0] for k, v in form.items() if k in valid_keys}
+                    valid_keys = _cross_keys(group) or {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
+                    cfg = {}
+                    for k, v in form.items():
+                        if k not in valid_keys:
+                            continue
+                        ft = next((t for kk, _g, _l, t, _lo, _hi, _grp in SETTINGS_FIELDS if kk == k), "")
+                        if ft == "sep":
+                            continue          # 分组标题行不落盘
+                        cfg[k] = ",".join(v) if ft == "multi" else v[0]
                     for k, _g, _l, ft, _lo, _hi, _grp in SETTINGS_FIELDS:  # checkbox 未勾选时表单不含该键 → 显式补 0（仅 bool）
                         if k in valid_keys and ft == "bool":
                             cfg.setdefault(k, "0")
+                        if k in valid_keys and ft == "multi":
+                            cfg.setdefault(k, "")   # 全不勾 = 关闭全部规则
                     applied = save_settings(cfg)
                     skipped = [k for k in cfg if k not in applied]
                     self._redirect(f"/page/{group}?saved=1" + ("&bad=1" if skipped else ""))

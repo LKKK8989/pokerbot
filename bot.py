@@ -585,6 +585,7 @@ join_requests = defaultdict(list)                    # join_requests[cid] = [{"t
 member_joined_at = defaultdict(lambda: defaultdict(float))  # member_joined_at[cid][uid] = 入群时间戳（新成员观察期用，运行时态）
 _bot_app = None   # 运行中的 Application（网页后台跨线程调 bot API 用，post_init 里赋值）
 _bot_loop = None  # bot 主事件循环
+_BOT_USERNAME = ""  # bot 用户名缓存（兑换按钮跳私聊深链 https://t.me/<用户名>?start=... 用）
 admin_logs = []                                      # [{"ts","cid","admin","action","target"}] 管理员操作记录(留300)
 
 # ---------- 防小号资金监管 ----------
@@ -2782,6 +2783,15 @@ async def require_group_chat(update, game_name, cmd, context=None):
 
 async def cmd_start(update, context):
     if not await need_auth(update, context): return
+    # 私聊深链：群列表点「立即兑换」蓝色按钮 → t.me/<bot>?start=redeem_<cid>_<idx>
+    # 到这里 payload 形如 redeem_<cid>_<idx> / mall_<cid>_<idx>，走「是否兑换/积分不足」确认流
+    _args = context.args or []
+    if _args:
+        _a0 = _args[0]
+        if _a0.startswith("redeem_"):
+            await _deep_redeem_start(update, context, _a0); return
+        if _a0.startswith("mall_"):
+            await _deep_mall_start(update, context, _a0); return
     text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n🎟️ 邀请有礼：\n/link - 领取本群专属邀请链接\n今日邀请排行 / 本月邀请排行 / 总邀请排行 - 查看邀请榜\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n流水 - 查自己的积分来源明细（红包/抽水/邀请奖励等；回复他人消息查对方仅限管理员）\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
     if is_bot_admin(update.effective_user.id):
         text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
@@ -4902,6 +4912,13 @@ async def on_button(update, context):
             return
         cid, uid, data = q.message.chat.id, q.from_user.id, q.data or ""
         _remember_name(update)
+        # 私聊兑换确认回调（redeem/mall ok|no_<cid>_<idx>）：在 bot 私聊里点「确认/取消」触发，
+        # 聊天是私聊（cid=用户id），不能用群授权拦截；真实目标群 id 内嵌在 data 里。
+        if data.startswith(("redeem_ok_", "redeem_no_", "mall_ok_", "mall_no_")):
+            if uid in BLACKLISTED_USERS and not is_bot_admin(uid):
+                await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
+            await _deep_start_confirm(q, data, context)
+            return
         if not is_auth(cid): await q.answer("未授权", show_alert=True); return
         if uid in BLACKLISTED_USERS and not is_bot_admin(uid): await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
         if data == "noop": await q.answer(); return  # 占位按钮（售罄/页码），点了不报错
@@ -5233,7 +5250,12 @@ async def on_button(update, context):
                     if isinstance(sb, int) and sb <= 0:
                         new_rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
                     else:
-                        new_rows.append([InlineKeyboardButton(f"{i}. {item['name']} — {_mall_price(item)} 积分 ✅ 立即兑换", callback_data=f"mall_buy_{i}")])
+                        label = _mall_label(i, item)
+                        url = _deep_buy_url("mall", cid, i)
+                        if url:
+                            new_rows.append([InlineKeyboardButton(label, url=url)])
+                        else:
+                            new_rows.append([InlineKeyboardButton(label, callback_data=f"mall_buy_{i}")])
                 nav = []
                 if page > 1: nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
                 if pages > 1: nav.append(InlineKeyboardButton(f"📄 {page}/{pages}", callback_data="noop"))
@@ -5868,8 +5890,7 @@ async def _redeem_buy_cb(q, idx, context):
     """蓝色按钮点一下直接兑换：idx=上架商品编号（与列表消息一致）。"""
     cid, uid = q.message.chat.id, q.from_user.id
     gate = _redeem_gate()
-    if gate:
-        await q.answer(gate, show_alert=True); return
+    if gate:        await q.answer(gate, show_alert=True); return
     items = [x for x in redeem_goods if x.get("on", True)
              and (not x.get("target_groups") or cid in x["target_groups"])]
     if not (1 <= idx <= len(items)):
@@ -5879,6 +5900,212 @@ async def _redeem_buy_cb(q, idx, context):
         await q.answer(err, show_alert=True)
     else:
         await q.answer("🎉 兑换成功！")
+
+
+def _redeem_items_for(cid):
+    """本群可见的兑换商品（上架 + target_groups 命中本群）。"""
+    return [x for x in redeem_goods if x.get("on", True)
+            and (not x.get("target_groups") or cid in x["target_groups"])]
+
+
+def _mall_items_on():
+    return [x for x in MALL_ITEMS if x.get("on", True)]
+
+
+def _deep_buy_url(kind, cid, idx):
+    """竞品式兑换按钮：https://t.me/<bot>?start=<kind>_<cid>_<idx>，点了跳转 bot 私聊。
+    _BOT_USERNAME 为空（启动早期/测试桩）时返回 None → 调用方退回群内 callback 直兑。"""
+    if not _BOT_USERNAME:
+        return None
+    return f"https://t.me/{_BOT_USERNAME}?start={kind}_{cid}_{idx}"
+
+
+def _redeem_label(i, x):
+    price = int(x.get("price", 0) or 0)
+    left = int(x.get("left", 0) or 0)
+    left_txt = "不限" if left <= 0 else str(left)
+    return f"{i}. {x['name']} — {price} 积分 剩余 {left_txt}  ✅ 立即兑换"
+
+
+def _mall_label(i, item):
+    stk = item.get("stock")
+    if isinstance(stk, int) and stk <= 0:
+        return f"{i}. {item['name']}（已售罄）"
+    return f"{i}. {item['name']} — {_mall_price(item)} 积分 ✅ 立即兑换"
+
+
+async def _redeem_dm_ok(context, cid, uid, idx):
+    """私聊「是否兑换 → 确认」：二次校验（时间窗/商品/余额）后执行兑换。
+    返回 (ok, 提示文本)。群通知+私聊单号+管理员对账全部走 _redeem_execute。"""
+    if not is_auth(cid):
+        return False, "❌ 该群未授权使用本机器人。"
+    gate = _redeem_gate()
+    if gate:
+        return False, gate
+    items = _redeem_items_for(cid)
+    if not (1 <= idx <= len(items)):
+        return False, "❌ 商品不存在或已下架，请回群重新打开列表。"
+    err = await _redeem_execute(context, cid, uid, items[idx - 1])
+    if err:
+        return False, err
+    return True, f"🎉 兑换成功：{items[idx - 1]['name']}"
+
+
+async def _mall_dm_ok(context, cid, uid, idx):
+    """私聊「是否兑换 → 确认」：商城商品二次校验后执行购买（与群内购买同口径：库存/门槛/扣款/台账/管理员）。"""
+    if not is_auth(cid):
+        return False, "❌ 该群未授权使用本机器人。"
+    if not MALL_ENABLED:
+        return False, "ℹ️ 积分商城未开启。"
+    items = _mall_items_on()
+    if not (1 <= idx <= len(items)):
+        return False, "❌ 商品不存在或已下架，请回群重新打开列表。"
+    item = items[idx - 1]
+    stk = item.get("stock")
+    if isinstance(stk, int) and stk <= 0:
+        return False, "❌ 该商品已售罄。"
+    price = _mall_price(item)
+    if MALL_MIN_AGE_DAYS > 0:  # 兑换门槛1：与 bot 首次互动满 N 天
+        seen = user_first_seen.get(uid)
+        days = (now_bj().timestamp() - seen) / 86400 if seen else 0.0
+        if days < MALL_MIN_AGE_DAYS:
+            return False, f"❌ 兑换门槛：使用满 {MALL_MIN_AGE_DAYS} 天才能兑换（当前 {days:.0f} 天）。"
+    if MALL_MIN_ACTIVE_DAYS > 0:  # 兑换门槛2：有游戏盈亏记录的天数 ≥N
+        active_days = set()
+        for prof in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date):
+            for d, chats in prof.items():
+                if uid in (chats.get(cid) or {}): active_days.add(d)
+        if len(active_days) < MALL_MIN_ACTIVE_DAYS:
+            return False, f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"
+    old_bal = game_chips[cid][uid]
+    async with wallet_locks[uid]:
+        if game_chips[cid][uid] < price:
+            return False, f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"
+        game_chips[cid][uid] -= price
+        if isinstance(stk, int):
+            item["stock"] = stk - 1
+        mall_orders.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "uid": uid,
+                            "name": await get_name(context.application, uid), "item": item["name"], "price": price})
+        save_data()
+    await send_settle(context.application, cid, _fmt_tpl("mall_msg_buy",
+        name=await get_name(context.application, uid), item=item["name"], price=price, balance=game_chips[cid][uid]))
+    await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    try:
+        await context.bot.send_message(ADMIN_USER_ID,
+            f"🛒 积分商城订单\n群：{chat_name_cache.get(cid, cid)}\n"
+            f"玩家：{await get_name(context.application, uid)}（{uid}）\n商品：{item['name']}（{price} 积分）")
+    except Exception:
+        logger.exception("商城订单通知管理员失败")
+    return True, f"🎉 兑换成功：{item['name']}"
+
+
+def _parse_dm_redeem_data(data):
+    """私聊确认回调数据 redeem_ok_<cid>_<idx> / redeem_no_<cid>_<idx> / mall_*。
+    返回 (kind, action, cid, idx)；cid 为负数时整段不含下划线，可直接按 '_' 切。"""
+    try:
+        kind, action, cid_s, idx_s = data.split("_", 3)
+        return kind, action, int(cid_s), int(idx_s)
+    except (ValueError, AttributeError):
+        return None, None, None, None
+
+
+async def _deep_start_confirm(q, data, context):
+    """群内点「立即兑换」蓝色按钮 → 跳转 bot 私聊 → 机器人显示 是否兑换/积分不足。
+    本函数处理私聊里确认/取消按钮回调（callback_data=redeem_ok_*/redeem_no_*/mall_*）。"""
+    kind, action, cid, idx = _parse_dm_redeem_data(data)
+    uid = q.from_user.id
+    if kind not in ("redeem", "mall") or action not in ("ok", "no") or cid is None:
+        await q.answer("无效操作", show_alert=True); return
+    if uid in BLACKLISTED_USERS and not is_bot_admin(uid):
+        await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
+    if action == "no":
+        try: await q.message.edit_text("🚫 已取消兑换。")
+        except Exception: pass
+        await q.answer("已取消"); return
+    if kind == "redeem":
+        ok, txt = await _redeem_dm_ok(context, cid, uid, idx)
+    else:
+        ok, txt = await _mall_dm_ok(context, cid, uid, idx)
+    try:
+        await q.message.edit_text(txt)
+    except Exception:
+        pass
+    await q.answer(txt if not ok else "🎉 兑换成功！", show_alert=not ok)
+
+
+async def _deep_redeem_start(update, context, payload):
+    """私聊里收到 /start redeem_<cid>_<idx>：按竞品流程显示 是否兑换 / 积分不足。"""
+    if not update.effective_chat or update.effective_chat.type != "private":
+        await send_reply(update, context, "⚠️ 请到机器人私聊完成兑换确认。"); return
+    try:
+        _, cid_s, idx_s = payload.split("_", 2)
+        cid, idx = int(cid_s), int(idx_s)
+    except (ValueError, AttributeError):
+        await send_reply(update, context, "❌ 兑换链接无效，请回群重新打开列表。"); return
+    uid = update.effective_user.id
+    if not is_auth(cid):
+        await send_reply(update, context, "❌ 该群未授权使用本机器人。"); return
+    items = _redeem_items_for(cid)
+    if not items:
+        await send_reply(update, context, "🎁 本群暂无可兑换商品。"); return
+    if not (1 <= idx <= len(items)):
+        await send_reply(update, context, "❌ 商品不存在或已下架，请回群重新打开列表。"); return
+    item = items[idx - 1]
+    price = int(item.get("price", 0) or 0)
+    bal = game_chips[cid][uid]
+    if bal < price:
+        await send_reply(update, context, f"❌ 积分不足：需要 {price}，当前 {bal}。\n去群聊赢积分后再来兑换吧～")
+        return
+    left = int(item.get("left", 0) or 0)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 确认兑换", callback_data=f"redeem_ok_{cid}_{idx}"),
+        InlineKeyboardButton("❌ 取消", callback_data=f"redeem_no_{cid}_{idx}"),
+    ]])
+    txt = (f"🎁 <b>{item['name']}</b>\n"
+           f"价格：{price} 积分｜剩余 {'不限' if left <= 0 else left}\n"
+           f"━━━━━━━━━\n"
+           f"当前积分：{bal}\n\n是否兑换？")
+    # 确认弹窗不清除（等用户点确认/取消后再编辑）；不走 REPLY_DELETE_SECONDS
+    await send_reply(update, context, txt, kb=kb, parse_mode="HTML", delete_after=0)
+
+
+async def _deep_mall_start(update, context, payload):
+    """私聊里收到 /start mall_<cid>_<idx>：商城商品显示 是否兑换 / 积分不足。"""
+    if not update.effective_chat or update.effective_chat.type != "private":
+        await send_reply(update, context, "⚠️ 请到机器人私聊完成兑换确认。"); return
+    try:
+        _, cid_s, idx_s = payload.split("_", 2)
+        cid, idx = int(cid_s), int(idx_s)
+    except (ValueError, AttributeError):
+        await send_reply(update, context, "❌ 兑换链接无效，请回群重新打开列表。"); return
+    uid = update.effective_user.id
+    if not is_auth(cid):
+        await send_reply(update, context, "❌ 该群未授权使用本机器人。"); return
+    if not MALL_ENABLED:
+        await send_reply(update, context, "ℹ️ 积分商城未开启。"); return
+    items = _mall_items_on()
+    if not (1 <= idx <= len(items)):
+        await send_reply(update, context, "❌ 商品不存在或已下架，请回群重新打开列表。"); return
+    item = items[idx - 1]
+    stk = item.get("stock")
+    if isinstance(stk, int) and stk <= 0:
+        await send_reply(update, context, "❌ 该商品已售罄。"); return
+    price = _mall_price(item)
+    bal = game_chips[cid][uid]
+    if bal < price:
+        await send_reply(update, context, f"❌ 积分不足：需要 {price}，当前 {bal}。\n去群聊赢积分后再来兑换吧～")
+        return
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 确认兑换", callback_data=f"mall_ok_{cid}_{idx}"),
+        InlineKeyboardButton("❌ 取消", callback_data=f"mall_no_{cid}_{idx}"),
+    ]])
+    txt = (f"🛒 <b>{item['name']}</b>\n"
+           f"价格：{price} 积分\n"
+           f"━━━━━━━━━\n"
+           f"当前积分：{bal}\n\n是否兑换？")
+    # 确认弹窗不清除（等用户点确认/取消后再编辑）；不走 REPLY_DELETE_SECONDS
+    await send_reply(update, context, txt, kb=kb, parse_mode="HTML", delete_after=0)
+
 
 async def cmd_points_redeem(update, context):
     """积分兑换（阿福式活动）：发触发词看商品按钮列表，点蓝色按钮立即兑换；
@@ -5895,19 +6122,22 @@ async def cmd_points_redeem(update, context):
     if not items:
         await send_reply(update, context, "🎁 本群暂无可兑换商品，管理员可在后台「积分系统 → 积分兑换」给本群上架。"); return
     args = context.args or []
-    if not args:  # 商品按钮列表：与竞品一致——商品信息全在按钮里，消息正文不重复列
+    if not args:  # 商品按钮列表：与竞品一致——整行一个「立即兑换」按钮，点蓝色字跳转 bot 私聊确认
         _cn = chat_name_cache.get(cid) or ""
         mins = max(1, MALL_LIST_DELETE_SECONDS // 60)
         lines = [f"🎁 积分兑换｜{_cn}" if _cn else "🎁 积分兑换",
                  "━" * 14,
-                 f"💡 点下方蓝色按钮直接兑换（{mins} 分钟后消息自动删除）；也可发「{REDEEM_CMD} 编号/名称」"]
+                 f"💡 点下方蓝色「立即兑换」跳转机器人私聊确认（{mins} 分钟后消息自动删除）；也可发「{REDEEM_CMD} 编号/名称」"]
         rows = []
         for i, x in enumerate(items, 1):
-            price = int(x.get("price", 0) or 0)
-            left = int(x.get("left", 0) or 0)
-            left_txt = "不限" if left <= 0 else str(left)
-            # 整行一个 button：与竞品一致——点商品行任何位置都直接兑换
-            rows.append([InlineKeyboardButton(f"{i}. {x['name']} — {price} 积分 剩余 {left_txt}  ✅ 立即兑换", callback_data=f"redeem_buy_{i}")])
+            label = _redeem_label(i, x)
+            url = _deep_buy_url("redeem", cid, i)
+            if url:
+                # 竞品式：URL 按钮 → Telegram 蓝色字体 → 点了打开 bot 私聊，机器人回「是否兑换/积分不足」
+                rows.append([InlineKeyboardButton(label, url=url)])
+            else:
+                # 启动早期/无用户名兜底：仍群内直兑（回调），功能不中断
+                rows.append([InlineKeyboardButton(label, callback_data=f"redeem_buy_{i}")])
         msg = await safe_send(context.bot, cid, "\n".join(lines),
                               reply_markup=InlineKeyboardMarkup(rows))
         if msg and MALL_LIST_DELETE_SECONDS > 0:
@@ -5932,6 +6162,7 @@ async def cmd_mall(update, context):
     items = [x for x in MALL_ITEMS if x.get("on", True)]
     if not items:
         await send_reply(update, context, _fmt_tpl("mall_msg_empty")); return
+    cid = update.effective_chat.id
     page = 1
     if context.args and context.args[0].isdigit():
         page = max(1, int(context.args[0]))
@@ -5939,7 +6170,7 @@ async def cmd_mall(update, context):
     page = min(page, pages)
     chunk = items[(page - 1) * MALL_PAGE_SIZE: page * MALL_PAGE_SIZE]
     lines = [f"🛒 积分商城（{page}/{pages} 页）", "━" * 14,
-             f"💡 点下方蓝色按钮兑换（{max(1, MALL_LIST_DELETE_SECONDS // 60)} 分钟后消息自动删除）"]
+             f"💡 点下方蓝色「立即兑换」跳转机器人私聊确认（{max(1, MALL_LIST_DELETE_SECONDS // 60)} 分钟后消息自动删除）"]
     # 商品信息全在按钮里，消息正文不重复列
     rows = []
     for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
@@ -5947,8 +6178,13 @@ async def cmd_mall(update, context):
         if isinstance(stock_btn, int) and stock_btn <= 0:
             rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
         else:
-            # 整行一个 button：与竞品一致——点商品行任何位置都直接兑换
-            rows.append([InlineKeyboardButton(f"{i}. {item['name']} — {_mall_price(item)} 积分 ✅ 立即兑换", callback_data=f"mall_buy_{i}")])
+            label = _mall_label(i, item)
+            url = _deep_buy_url("mall", cid, i)
+            if url:
+                # 竞品式：整行 URL 按钮 → 蓝色字体 → 跳转 bot 私聊确认兑换
+                rows.append([InlineKeyboardButton(label, url=url)])
+            else:
+                rows.append([InlineKeyboardButton(label, callback_data=f"mall_buy_{i}")])
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
@@ -7949,8 +8185,14 @@ DEFAULT_TG_MENU = [
 TG_MENU = [list(t) for t in DEFAULT_TG_MENU]
 
 async def post_init(app):
-    global _bot_app, _bot_loop
+    global _bot_app, _bot_loop, _BOT_USERNAME
     _bot_app, _bot_loop = app, asyncio.get_running_loop()  # 供网页后台跨线程调用 bot API（入群批准/拒绝等）
+    # 兑换按钮深链需要 bot 用户名（https://t.me/<用户名>?start=...）；启动时缓存
+    try:
+        _me = await app.bot.get_me()
+        _BOT_USERNAME = (_me.username or "").lstrip("@")
+    except Exception:
+        _BOT_USERNAME = ""
     background_tasks.update({
         asyncio.create_task(daily_reset_scheduler(app)),
         asyncio.create_task(leaderboard_scheduler(app)),

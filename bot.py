@@ -335,7 +335,6 @@ SETTINGS_FIELDS = [
     # （2026-09-08 去重移除：今日/本月/总邀请排行指令三字段与「命令管理」页重复，
     #   触发词改由别名层统一管理：今日邀请排行/本月邀请排行/总邀请排行 照常可用）
     ("invite_ok_group",         "INVITE_OK_GROUP",         "邀请成功群内通知模板",      "text",  0,   0,       "invite/config"),
-    ("invite_link_msg",         "INVITE_LINK_MSG",         "邀请链接消息模板",          "text",  0,   0,       "invite/config"),
     ("invite_rank_today_msg",   "INVITE_RANK_TODAY_MSG",   "今日邀请排行标题模板",      "text",  0,   0,       "invite/config"),
     ("invite_rank_month_msg",   "INVITE_RANK_MONTH_MSG",   "本月邀请排行标题模板",      "text",  0,   0,       "invite/config"),
     ("invite_rank_all_msg",     "INVITE_RANK_ALL_MSG",     "总邀请排行标题模板",        "text",  0,   0,       "invite/config"),
@@ -345,7 +344,7 @@ SETTINGS_FIELDS = [
     # 合格邀请结算（2026-09-08 替代旧「进群前置」死字段）：被邀请人本群达标才算合格才发奖
     ("invite_qualify_enabled",  "INVITE_QUALIFY_ENABLED",  "合格结算开关(达标才发奖)",   "bool",  0,   1,       "invite/qualify"),
     ("invite_manual_count",     "INVITE_MANUAL_COUNT",     "手动拉人计入邀请(添加人=邀请人)", "bool", 0, 1,  "invite/qualify"),
-    ("invite_auto_approve",     "INVITE_AUTO_APPROVE",     "申请制链接自动批准(可归因申请)",  "bool", 0, 1,  "invite/qualify"),
+    ("invite_auto_approve",     "INVITE_AUTO_APPROVE",     "带链接申请自动批准(确认制归因不受此限)", "bool", 0, 1,  "invite/qualify"),
     ("invite_qualify_msgs",     "INVITE_QUALIFY_MSGS",     "质量要求-本群发言≥N条(0=不限)", "int", 0,  100000,  "invite/qualify"),
     ("invite_qualify_points",   "INVITE_QUALIFY_POINTS",   "质量要求-本群净赚积分≥M(0=不限)", "int", 0, 1000000, "invite/qualify"),
     ("invite_qualify_avatar",   "INVITE_QUALIFY_AVATAR",   "质量要求-进群须有头像(无则拒)", "bool", 0,   1,      "invite/qualify"),
@@ -555,7 +554,6 @@ MSG_TPL_DEFAULTS = {
     "redeem_msg_ok_group": "🎉 {name} 兑换成功：{goodsName}（-{pointNum} 积分）\n💰 余额 {balance}",
     "redeem_msg_ok_dm": "🎉 你已成功兑换「{goodsName}」（{pointNum} 积分），请联系管理员发货。",
     "invite_ok_group": "🎉 {invitee} 通过 {inviter} 的邀请加入本群！\n💰 {inviter} 获得邀请奖励 {reward} 积分",
-    "invite_link_msg": "🎟️ 你的专属邀请链接：\n{link}\n\n每成功邀请 1 位新朋友进群，奖励 {reward} 积分！",
     "invite_rank_today_msg": "📈 <b>今日邀请排行</b>",
     "invite_rank_month_msg": "📅 <b>本月邀请排行</b>",
     "invite_rank_all_msg": "🏆 <b>总邀请排行</b>",
@@ -564,7 +562,6 @@ MSG_TPL_DEFAULTS = {
     "invite_self_msg": "😅 不能邀请自己哦",
 }
 INVITE_OK_GROUP = MSG_TPL_DEFAULTS["invite_ok_group"]
-INVITE_LINK_MSG = MSG_TPL_DEFAULTS["invite_link_msg"]
 INVITE_RANK_TODAY_MSG = MSG_TPL_DEFAULTS["invite_rank_today_msg"]
 INVITE_RANK_MONTH_MSG = MSG_TPL_DEFAULTS["invite_rank_month_msg"]
 INVITE_RANK_ALL_MSG = MSG_TPL_DEFAULTS["invite_rank_all_msg"]

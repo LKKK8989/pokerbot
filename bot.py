@@ -329,6 +329,7 @@ SETTINGS_FIELDS = [
     ("invite_notify",           "INVITE_NOTIFY",           "邀请人私聊通知开关",        "bool",  0,   1,       "invite/config"),
     ("invite_reward",           "INVITE_REWARD",           "邀请奖励(积分/人)",         "int",   0,   1000000, "invite/config"),
     ("invite_audit_enabled",    "INVITE_AUDIT_ENABLED",    "新邀请需人工审核开关",      "bool",  0,   1,       "invite/config"),
+    ("invite_loose_match",      "INVITE_LOOSE_MATCH",      "宽松归因(申请没带链接时唯一链接兜底)", "bool", 0, 1, "invite/config"),
     ("invite_audit_award",      "INVITE_AUDIT_AWARD",      "审核通过后补发奖励开关",    "bool",  0,   1,       "invite/config"),
     ("invite_link_cmd",         "INVITE_LINK_CMD",         "邀请链接指令(不带斜杠)",    "cmd",   0,   0,       "invite/config"),
     ("invite_rank_admin_only",  "INVITE_RANK_ADMIN_ONLY",  "排行仅管理员可查开关",      "bool",  0,   1,       "invite/config"),
@@ -401,6 +402,7 @@ INVITE_ENABLED = 1          # 邀请系统总开关
 INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
 INVITE_REWARD = 50          # 每成功邀请 1 人奖励积分
 INVITE_AUDIT_ENABLED = 0    # 新邀请需人工审核开关（审核页一键通过/拒绝）
+INVITE_LOOSE_MATCH = 1      # 宽松归因：申请/事件都没带链接时，本群唯一专属链接直接兜底（Telegram 偶发漏字段）
 INVITE_AUDIT_AWARD = 1      # 审核通过后补发奖励开关
 INVITE_LINK_CMD = "link"    # 获取专属邀请链接指令
 INVITE_RANK_ADMIN_ONLY = 0  # 邀请排行仅管理员可查开关
@@ -4335,6 +4337,41 @@ async def cmd_points_flow(update, context):
     await send_reply(update, context, "\n".join(lines))
 
 
+async def cmd_my_invite(update, context):
+    """我的邀请进度（对标竞品）：已计入/合格人数/累计奖励/专属链接，一眼看清到哪一步。"""
+    if not await need_auth(update, context): return
+    if not INVITE_ENABLED:
+        await send_reply(update, context, "❌ 邀请系统未开启。"); return
+    if is_group_chat(update):
+        cid, cname = update.effective_chat.id, (getattr(update.effective_chat, "title", "") or "本群")
+    else:
+        cid, cname = None, "全部群"
+    uid = update.effective_user.id
+    total = ok_n = left_n = pending_n = award_sum = 0
+    for rec in invite_records.values():
+        if rec.get("inviter") != uid: continue
+        if cid is not None and rec.get("cid") != cid: continue
+        if rec.get("audit") == "ok":
+            total += 1
+            if rec.get("left"): left_n += 1
+            else: ok_n += 1
+            award_sum += int(rec.get("award", 0) or 0)
+        elif rec.get("audit") in ("pending", "unmet"):
+            pending_n += 1
+    mine = invite_links.get(cid, {}).get(uid) if cid is not None else None
+    lines = [f"🌸 我的邀请进度｜{cname}", "━━━━━━━━━━━━━━━━━"]
+    lines.append(f"✅ 已计入（未退群）：{ok_n} 人")
+    if left_n: lines.append(f"💀 已退群失效：{left_n} 人（不计排行）")
+    if pending_n: lines.append(f"⏳ 待审核/待达标：{pending_n} 人")
+    lines.append(f"🎁 累计邀请奖励：{award_sum} 分（每成功邀请 1 位得 {INVITE_REWARD} 分）")
+    if mine:
+        lines.append(f"\n🔗 专属链接：\n{mine.get('link', '')}")
+        lines.append("新朋友点链接→申请加入→管理员批准，即自动记账；退群自动失效。")
+    else:
+        lines.append("\n本群还没有你的专属链接，发「邀请」领取。")
+    await send_reply(update, context, "\n".join(lines))
+
+
 async def cmd_invite_debug(update, context):
     """邀请链路自检（管理员）：一条命令看清链路断在哪一环。"""
     if not await need_auth(update, context): return
@@ -4711,8 +4748,10 @@ async def cmd_admin_list(update, context):
 async def cmd_autosm(update, context):
     if not await need_auth(update, context): return
     if not is_bot_admin(update.effective_user.id): await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
-    cid = update.effective_chat.id; hourly_race_enabled[cid] = not hourly_race_enabled[cid]; save_data()
-    await send_reply(update, context, f"整点自动赛车：{'✅ 已开启' if hourly_race_enabled[cid] else '❌ 已关闭'}")
+    cid = update.effective_chat.id
+    cur = hourly_race_enabled.get(cid, True)   # 授权群默认开启，此处按群覆盖
+    hourly_race_enabled[cid] = not cur; save_data()
+    await send_reply(update, context, f"本群整点自动赛车：{'✅ 已开启' if not cur else '❌ 已关闭（总开关和时段仍需在后台配置）'}")
 
 async def on_button(update, context):
     try:
@@ -6914,6 +6953,17 @@ async def _invite_track_join(cmu, cid, uid, name, context):
             if info.get("link") == link and i_uid != uid:
                 inviter = i_uid
                 break
+        if not inviter and not link and INVITE_LOOSE_MATCH:
+            # 宽松归因：Telegram 实测会漏掉 chat_join_request 的 invite_link 字段（申请明明点了专属链接）。
+            # 申请/事件都没带链接时，若本群只有一条机器人专属链接，直接归因给它；多条则无法判定。
+            cands = [i_uid for i_uid, info in invite_links.get(cid, {}).items()
+                     if str(info.get("link", "")).startswith("http") and i_uid != uid]
+            if len(cands) == 1:
+                inviter = cands[0]
+                link = f"宽松归因(唯一链接…{str(invite_links[cid][inviter].get('link',''))[-8:]})"
+                _inv_dbg(cid, f"宽松归因命中：申请未带链接，本群唯一专属链接 → 邀请人 {inviter}")
+            elif len(cands) > 1:
+                _inv_dbg(cid, f"⚠️ 申请未带链接且本群有 {len(cands)} 条专属链接，宽松归因无法判定")
         if not inviter:
             if link:
                 _inv_dbg(cid, f"⚠️ 归因失败：链接不在已存表（已存：{[i.get('link','')[-12:] for i in invite_links.get(cid, {}).values()]}）")
@@ -7294,23 +7344,34 @@ async def admin_report_scheduler(app):
         except Exception:
             logger.exception("admin_report_scheduler 本轮异常（已吞并继续）")
 
+async def _auto_race_tick(app, now):
+    """自动开赛单轮扫描：总开关开着且到点时，对每个授权群发车。
+    每群默认开启；群里发「整点自动赛车」可单独关/开本群。（此前默认关闭+只遍历手动开过的群，
+    网页总开关打开也不会发车——bug 已修）"""
+    if not (RACE_AUTO_ENABLED and RACE_ENABLED
+            and now.minute == max(0, min(59, RACE_HOURLY_MINUTE))
+            and max(0, min(23, RACE_HOURLY_START)) <= now.hour <= max(0, min(23, RACE_HOURLY_END))):
+        return
+    for cid in list(AUTHORIZED_GROUPS):
+        if not hourly_race_enabled.get(cid, True): continue
+        if cid in active_horse_races: continue
+        mode = current_game_mode()
+        jackpot = race_jackpot.get(cid, 0) if mode == "official" else 0
+        race = HorseRace(cid, ADMIN_USER_ID, jackpot, mode); active_horse_races[cid] = race
+        msg = await safe_send(app.bot, cid, await race.view(app), reply_markup=race.buttons())
+        if msg: race.game_msg_id = msg.message_id
+        race.task = asyncio.create_task(race.run(app)); save_data()
+
+
 async def hourly_race_scheduler(app):
     last_key = None
     while True:
         try:
             now = now_bj(); key = now.strftime("%Y%m%d%H")
-            if (RACE_AUTO_ENABLED and now.minute == max(0, min(59, RACE_HOURLY_MINUTE))
-                    and max(0, min(23, RACE_HOURLY_START)) <= now.hour <= max(0, min(23, RACE_HOURLY_END))
-                    and key != last_key):  # 开赛分钟/时段均网页可配；起始>结束=全天不开
-                last_key = key
-                for cid, enabled in list(hourly_race_enabled.items()):
-                    if not enabled or cid in active_horse_races or not RACE_ENABLED: continue
-                    mode = current_game_mode()
-                    jackpot = race_jackpot.get(cid, 0) if mode == "official" else 0
-                    race = HorseRace(cid, ADMIN_USER_ID, jackpot, mode); active_horse_races[cid] = race
-                    msg = await safe_send(app.bot, cid, await race.view(app), reply_markup=race.buttons())
-                    if msg: race.game_msg_id = msg.message_id
-                    race.task = asyncio.create_task(race.run(app)); save_data()
+            if key != last_key:  # 每分钟轮询，同一小时只发一轮；开赛分钟/时段均网页可配
+                await _auto_race_tick(app, now)
+                if RACE_AUTO_ENABLED and now.minute == max(0, min(59, RACE_HOURLY_MINUTE)):
+                    last_key = key
             next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
             await asyncio.sleep(max(1, (next_minute-now).total_seconds()))
         except Exception:
@@ -7610,6 +7671,7 @@ CMD_ALIASES = {
     "竞猜结算": cmd_guess_settle, "竞猜撤销": cmd_guess_cancel,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
     "link": cmd_invite_link, "邀请链接": cmd_invite_link, "邀请": cmd_invite_link,
+    "my_invite": cmd_my_invite, "我的邀请": cmd_my_invite, "邀请进度": cmd_my_invite,
     "invite_debug": cmd_invite_debug, "邀请调试": cmd_invite_debug,
     "流水": cmd_points_flow, "积分流水": cmd_points_flow,
     "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
@@ -8714,6 +8776,10 @@ def start_health_server():
                             "<form method='post' action='/invite_clear' style='margin-bottom:10px' "
                             "onsubmit=\"return confirm('确认清空全部邀请记录与邀请链接？此操作不可恢复！')\">"
                             "<button style='background:#8a3b3b;color:#fff'>🧹 清空全部邀请数据</button></form>"
+                            "<form method='post' action='/invite_clear_group' style='margin-bottom:10px;display:flex;gap:8px;align-items:center' "
+                            "onsubmit=\"return confirm('确认删除所选群的全部邀请记录？其他群不受影响，此操作不可恢复！')\">"
+                            f"<select name='cid' required><option value=''>选择要清记录的群</option>{_group_options(selected=sel_icid)}</select>"
+                            "<button style='background:#a3663b;color:#fff'>🗑 删除该群记录</button></form>"
                             "<table class='tbl'><tr><th>记录ID</th><th>邀请人</th><th>被邀请人</th><th>时间</th><th>状态</th><th>奖励</th><th>操作</th></tr>"
                             + rows_html + "</table></div>")
                 elif sub == "daily":
@@ -9584,6 +9650,19 @@ def start_health_server():
                     invite_records.clear(); invite_links.clear()
                     save_data()
                     self._redirect("/page/invite/records?note=" + quote("🧹 已清空全部邀请数据")); return
+                if path == "/invite_clear_group":
+                    # 按群删除：只清选中群的邀请记录（不动其他群，不动链接）
+                    try: cid_ = int(form.get("cid", ["0"])[0] or 0)
+                    except ValueError: cid_ = 0
+                    if cid_:
+                        n = sum(1 for k in list(invite_records) if k.startswith(f"{cid_}:"))
+                        for k in [k for k in list(invite_records) if k.startswith(f"{cid_}:")]:
+                            invite_records.pop(k, None)
+                        save_data()
+                        self._redirect("/page/invite/records?cid=" + str(cid_) + "&note=" + quote(f"🗑 已删除该群 {n} 条邀请记录"))
+                    else:
+                        self._redirect("/page/invite/records?note=" + quote("请先选择要删除的群"))
+                    return
                 if path == "/guessops":
                     # 竞猜网页操作：结算 A/B 或撤销退款
                     op = form.get("op", [""])[0]

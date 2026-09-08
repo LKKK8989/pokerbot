@@ -8489,8 +8489,8 @@ def start_health_server():
                             f"<datalist id='dl_users_admin'>{_all_user_options()}</datalist>"
                             "<button type='submit' style='margin-top:0'>➕ 添加管理员</button></form></div>")
                 elif sub == "auth":
-                    rows = "".join(f"<tr><td><code>{g}</code> {html.escape(chat_name_cache.get(g) or '')}</td>"
-                                   f"<td>{_btn('authdel', 'cid', g, '取消授权', '#e06666')}</td></tr>"
+                    rows = "".join(f"<tr><td><code>{g}</code> {html.escape(chat_name_cache.get(g) or '（未知群/已解散）')}</td>"
+                                   f"<td>{_btn('authdel', 'cid', g, '移除(含数据)', '#e06666')}</td></tr>"
                                    for g in sorted(AUTHORIZED_GROUPS))
                     body = (f"<h1>{gicon} 授权群管理</h1>"
                             "<div class='sub'>授权群里的玩家才能使用游戏；也可在群里发 /授权</div>{msg}"
@@ -9510,7 +9510,23 @@ def start_health_server():
                     if op == "authadd" and cid_:
                         AUTHORIZED_GROUPS.add(cid_); save_data(); _back(note=f"✅ 已授权群 {cid_}")
                     elif op == "authdel" and cid_:
-                        AUTHORIZED_GROUPS.discard(cid_); save_data(); _back(note=f"✅ 已取消授权 {cid_}")
+                        # 移除群 = 取消授权 + 清掉该群所有残留数据（邀请记录/链接、各群开关、进出群缓存），
+                        # 群解散后不再在下拉里留裸数字
+                        AUTHORIZED_GROUPS.discard(cid_)
+                        n_inv = sum(1 for k in list(invite_records) if k.startswith(f"{cid_}:"))
+                        for k in [k for k in list(invite_records) if k.startswith(f"{cid_}:")]:
+                            invite_records.pop(k, None)
+                        invite_links.pop(cid_, None)
+                        invite_pending.pop(f"{cid_}:", None)
+                        for k in [k for k in list(invite_pending) if k.startswith(f"{cid_}:")]:
+                            invite_pending.pop(k, None)
+                        hourly_race_enabled.pop(cid_, None)
+                        join_requests.pop(cid_, None); leave_records.pop(cid_, None)
+                        member_joined_at.pop(cid_, None)
+                        chat_name_cache.pop(cid_, None)
+                        game_chips.pop(cid_, None)   # 群已解散积分数据无用；下拉(授权∪有积分群)不再出现裸数字
+                        save_data()
+                        _back(note=f"✅ 已移除群 {cid_}（含 {n_inv} 条邀请记录及全部群数据）")
                     elif op == "black" and uid_:
                         BLACKLISTED_USERS.add(uid_); save_data(); _back(note=f"🔨 已拉黑 {uid_}")
                     elif op == "unblack" and uid_:

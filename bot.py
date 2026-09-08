@@ -33,6 +33,7 @@ EMERGENCY_MAX_USES = 3
 
 # 游戏时间配置 (秒)
 TURN_TIMEOUT = 60          # 德州/21点单回合思考时间
+JINHUA_OPEN_PENDING_TIMEOUT = 600  # 金花跟平阶段（open_pending）超时自动开牌，防全员掉线牌局卡死
 ROOM_WAIT_TIMEOUT = 60     # 各游戏等待房统一倒计时（60秒）
 RACE_AUTO_START = 120      # 赛车自动开赛时间
 RACE_ANIMATION_INTERVAL = 5.0   # 每帧画面停留秒数（间隔越大帧数越少，需与赛程总时长一起权衡）
@@ -349,7 +350,45 @@ SETTINGS_FIELDS = [
     ("invite_qualify_username", "INVITE_QUALIFY_USERNAME", "质量要求-进群须有用户名(无则拒)","bool",0,   1,      "invite/qualify"),
 ]
 _settings_lock = threading.Lock()
-_web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
+_web_password = WEB_DEFAULT_PASSWORD  # 运行时明文（仅内存，落盘绝不写它）；改密后由 hash 接管校验
+_web_password_hash = ""  # pbkdf2-sha256 hex：真正落盘/进备份的凭据（拿到备份也还原不出密码）
+_web_salt = ""           # 上面 hash 配套的盐
+
+def _hash_web_pwd(pwd, salt):
+    """后台密码摘要（pbkdf2-sha256）。落盘只存它，明文只活在内存里。"""
+    import hashlib
+    return hashlib.pbkdf2_hmac("sha256", str(pwd).encode("utf-8"), str(salt).encode("utf-8"), 120000).hex()
+
+def _pwd_ok(pwd):
+    """校验后台登录密码：有 hash 就用 hash 比对，没有（首次/旧明文存档）才退回到明文比对。"""
+    try:
+        if _web_password_hash and _web_salt:
+            return secrets.compare_digest(_hash_web_pwd(pwd, _web_salt), _web_password_hash)
+    except Exception:
+        return False
+    return bool(pwd) and secrets.compare_digest(str(pwd), str(_web_password))
+
+
+def _client_ip(handler):
+    """⑲ 取真实客户端 IP：反代场景（Northflank ingress 等）socket 地址恒为代理 IP，
+    若直接用它做登录限速键，一人试错就会锁死全部管理员。
+
+    规则：有 X-Forwarded-For 取最后一段（ingress 在末尾追加的真实连接来源）；
+    无 XFF（直连）用 socket 地址。注意：直连部署时 XFF 可被伪造绕过限速，
+    本 bot 部署在 Northflank（必经 ingress），信任 XFF 是正确取舍。
+    """
+    try:
+        xff = (handler.headers.get("X-Forwarded-For") or "").split(",")
+        for seg in reversed(xff):
+            seg = seg.strip()
+            if seg:
+                return seg
+    except Exception:
+        pass
+    try:
+        return handler.client_address[0]
+    except Exception:
+        return "unknown"
 
 # ---------- 积分系统：运行时配置默认值（网页可改） ----------
 SIGN_ENABLED = 1
@@ -426,6 +465,7 @@ ANTISPAM_TIMER_N = 4        # 定时器特征：同内容累计至少 N 条才�
 ANTISPAM_TIMER_TOL = 30     # 定时器间隔偏差容忍（百分比，间隔需落在均值 ±30% 内）
 ANTISPAM_MUTE_SECONDS = 3600  # 命中禁言基础时长（秒，0=只删不禁）
 ANTISPAM_MUTE_ESCALATE = 1  # 累犯禁言翻倍（1h→2h→4h…）
+ANTISPAM_OFFENSE_WINDOW = 7 * 86400  # 累犯计数的有效期（秒，默认 7 天）：窗口外的命中不再计入翻倍，防"历史总次数"把人变成事实永久禁言
 ANTISPAM_NOTICE_SECONDS = 60  # 命中通告自动删除（秒，0=不删）
 ANTISPAM_MIN_LEN = 5        # 参与统计的最短内容长度（防误伤"哈哈哈"类闲聊）
 antispam_hist = {}          # (cid, uid, 内容归一化) -> [ts,...] 最多保留 12 条
@@ -467,6 +507,7 @@ GUESS_ENABLED = 1           # 积分竞猜开关
 GUESS_MIN_BET = 10          # 竞猜单注下限
 GUESS_MAX_BET = 0           # 竞猜单注上限（0=不限）
 GUESS_DURATION = 5          # 竞猜下注时长（分钟），到点封盘等管理员结算
+GUESS_AUTO_SETTLE_MINUTES = 60  # 封盘后多久仍未结算就自动撤销退款（0=永不自动）。防管理员忘记 → 玩家积分永久卡死
 BUY_ENABLED = 1
 BUY_MIN = 1000
 BUY_MAX = 100000
@@ -560,7 +601,8 @@ chat_rules = []                                      # 阿福式聊天积分规�
 buy_packages = []                                    # 购买积分套餐 [{"name","cny","points","sort","on"}]
 rp_packets = {}                                      # pid -> {"cid","from","left_amt","left_n","grabbed":{uid:amt},"ts","msg_id"}
 guesses = {}                                         # cid -> 竞猜 {"q","a","b","end_ts","locked","bets":{uid:{"A","B"}},"side_pots":{"A","B"},"msg_id","task"}
-invite_links = {}                                    # cid -> {uid: {"link","invite_id","ts"}} 每人专属邀请链接
+_guess_tasks = set()                                 # 兜底任务的强引用：只 create_task 不保存引用可能被 GC 掉，兜底就形同虚设
+invite_links = defaultdict(dict)                     # cid -> {uid: {"link","invite_id","ts"}} 每人专属邀请链接（必须 defaultdict：恢复/写入走 [cid][uid] 两级，普通 dict 会 KeyError 被吞→整表丢失→归因全失败、邀请进度恒 0）
 invite_records = {}                                  # "cid:uid" -> {"cid","inviter","invitee","invitee_name","ts","qualified","rejected","left","award","link"}；旧存档可能带 audit(ok/pending/unmet/rejected) 兼容读取
 invite_pending = {}                                  # "cid:uid" -> 进群申请携带的邀请链接（人审批后 join 事件常不带链接，靠这个兜底归因；内存态）
 invite_debug = defaultdict(list)                     # cid -> [最近10条邀请链路调试事件]（每环失败不再静默，/邀请调试 可查）
@@ -606,9 +648,36 @@ web_magic_tokens = {}                                # /后台 一键登录：to
 lotteries = {}
 
 def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=None, sidebar_order=None):
+    """写设置文件 + 同步到数据快照。
+
+    安全红线：密码**只存 hash**，明文绝不落盘——否则它会随 bot_data.json 的自动备份
+    发到每个备份接收人手里，等于把后台口令交给普通管理员。
+    """
+    global _web_password_hash, _web_salt, _web_password
     if sidebar_order is None:
         sidebar_order = list(SETTINGS_SNAPSHOT.get("sidebar_order") or [])
-    payload = {"fields": cfg, "web_password": password,
+    if password:
+        try:
+            _web_salt = secrets.token_hex(16)
+            _web_password_hash = _hash_web_pwd(password, _web_salt)
+            _web_password = password   # 仅内存，供本次运行期的明文分支比对
+        except Exception:
+            logger.exception("密码摘要计算失败（保持原凭据不变）")
+    if not _web_password_hash:
+        # 内存还没凭据（如恢复流程早于 load_settings）：从现有文件继承，绝不写空凭据把人锁在门外
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                r0 = json.load(f)
+            h0 = str(r0.get("web_password_hash", "")).strip()
+            s0 = str(r0.get("web_password_salt", "")).strip()
+            if h0 and s0:
+                _web_password_hash, _web_salt = h0, s0
+            elif not password and str(r0.get("web_password", "")).strip():
+                _web_password = str(r0.get("web_password", "")).strip()
+        except Exception:
+            pass
+    payload = {"fields": cfg, "web_password_hash": _web_password_hash,
+               "web_password_salt": _web_salt,
                "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or [],
                "sidebar_order": sidebar_order,
                "chat_rules": list(chat_rules), "buy_packages": list(buy_packages),
@@ -803,7 +872,7 @@ def _load_settings_payload():
 
 def load_settings():
     """启动时读取设置并套用；无设置文件则用数据内嵌快照，仍无则用代码内默认值。"""
-    global _web_password
+    global _web_password, _web_password_hash, _web_salt
     payload, origin = _load_settings_payload()
     if not payload:
         logger.info("无可用设置（%s 与数据快照均无），全部使用默认配置", SETTINGS_FILE)
@@ -812,6 +881,12 @@ def load_settings():
         if "fields" not in payload and "_settings" in payload:
             payload = payload["_settings"]  # 误指向 bot_data.json 时拆出内嵌设置，表格化数据(chat_rules等)才读得到
         apply_settings(payload.get("fields", {}))
+        # 密码：优先读 hash（新格式）；旧存档是明文则临时保留，下次写盘自动升级为 hash
+        h = str(payload.get("web_password_hash", "")).strip()
+        s = str(payload.get("web_password_salt", "")).strip()
+        if h and s:
+            _web_password_hash, _web_salt = h, s
+            _web_password = ""   # 内存不再保留明文（hash 无法反推，登录走 _pwd_ok 的 hash 分支）
         pwd = str(payload.get("web_password", "")).strip()
         if pwd:
             _web_password = pwd
@@ -1341,8 +1416,14 @@ def load_data():
         invite_links.clear()
         for cid, users in data.get("invite_links", {}).items():
             for uid, v in users.items():
-                try: invite_links[int(cid)][int(uid)] = dict(v)
-                except (KeyError, ValueError, TypeError): continue
+                # 必须 setdefault：invite_links 即使已是 defaultdict，这里 clear() 后仍是 defaultdict，
+                # 但旧的 except(KeyError) 会把类型错误也一并吞掉 → 整表静默丢失（邀请进度恒 0 的真凶）
+                try:
+                    invite_links.setdefault(int(cid), {})[int(uid)] = dict(v)
+                except (ValueError, TypeError):
+                    logger.warning("邀请链接恢复跳过异常项 cid=%s uid=%s", cid, uid)
+        if not invite_links and data.get("invite_links"):
+            logger.warning("邀请链接表恢复后为空，但存档里有 %d 条——请检查恢复逻辑", len(data["invite_links"]))
         for cid, users in data.get("warn_counts", {}).items():
             for uid, v in users.items():
                 try: warn_counts[int(cid)][int(uid)] = int(v)
@@ -2719,9 +2800,7 @@ class HorseRace:
                 logger.exception("赛车结算异常，群 %s", self.chat_id)
                 # 仅在尚未派彩时退款，避免已派彩玩家被双重派彩
                 if not payouts_applied:
-                    wallet = game_chips
-                    for uid, bets in self.bets.items():
-                        wallet[self.chat_id][uid] += sum(bets.values())
+                    self.refund_all()   # 退款与清 pending 必须同生共死，否则重启会再退一次
                     if self.mode == "official": race_jackpot[self.chat_id] = self.jackpot
                     await safe_send(app.bot, self.chat_id, "⚠️ 赛车结算异常，本局已退款以保护玩家积分。")
                 else:
@@ -2735,14 +2814,21 @@ class HorseRace:
                 if self.mode == "official":
                     for uid in self.bets: await emergency_if_needed(self.chat_id, uid, app)
 
+    def refund_all(self):
+        """全部下注原路退回，并同步清除 pending_game_bets。
+
+        退款与清 pending 必须同生共死：只退钱不清 pending 的话，进程重启时
+        load_data 会按残留的 pending 再退一次 = 凭空多出一份积分。
+        """
+        for uid, bets in self.bets.items():
+            game_chips[self.chat_id][uid] += sum(bets.values())
+            pending_game_bets[self.chat_id].get(uid, {}).pop("horse", None)
+
     async def refund(self, app, notice):
         async with self.lock:
             if self.cancelled: return
             self.cancelled, self.phase = True, "cancelled"
-            wallet = game_chips
-            for uid, bets in self.bets.items(): 
-                wallet[self.chat_id][uid] += sum(bets.values())
-                pending_game_bets[self.chat_id].get(uid, {}).pop("horse", None)
+            self.refund_all()
             # 奖池不再在开局时弹出，故取消/退款时无需回写（race_jackpot[cid] 始终保留原始奖池）
             save_data()
             if active_horse_races.get(self.chat_id) is self: active_horse_races.pop(self.chat_id, None)
@@ -3624,6 +3710,15 @@ async def start_jinhua_turn_timer(game, app):
     game.cancel_timer()
     await show_jinhua_action(game, app)
     if game.phase in ("open_pending", "showdown"):
+        # open_pending 兜底：跟平阶段无"当前玩家"可计时，若全员不动（如掉线）牌局会永久卡死。
+        # 挂一个看门狗：超时后仍处于 open_pending 则自动开牌结算（settle_jinhua 幂等，重复触发无害）。
+        if game.phase == "open_pending":
+            async def _open_pending_timeout():
+                await asyncio.sleep(JINHUA_OPEN_PENDING_TIMEOUT)
+                if game.settled or game.phase != "open_pending": return
+                game.last_action = "跟平阶段超时，自动开牌结算"
+                await settle_jinhua(game, app)
+            game.turn_task = asyncio.create_task(_open_pending_timeout())
         return
     uid = game.current()
 
@@ -4448,20 +4543,47 @@ def _invite_progress_text(uid, cid, my_name, cname):
         L.append(f"🚫 拒绝 {rejected} 人（进群未满足头像/用户名，不发放）")
     return "\n".join(L)
 
-async def _invite_send_progress_card(update, context, uid, cid, cname, link=None, edit_msg=None):
-    """发/刷新合格结算卡片。edit_msg 存在则编辑原消息（刷新按钮）。"""
-    my_name = await get_name(context.application, uid, cid=cid if cid else None)
+def _invite_card_body_kb(uid, cid, cname, my_name, link, refresh_cb):
+    """邀请卡片正文+按钮（群卡片/私聊推送共用）。
+
+    安全：分享按钮走 t.me/share/url?url=<链接>，链接里的 + 在 query 中会被解码成空格
+    （t.me/+hash 变 t.me/ 空格hash → 好友收到无效链接），必须整体 URL 编码（+ → %2B）。
+    """
     body = _invite_progress_text(uid, cid, my_name, cname)
     rows = []
     if link:
         body += f"\n🔗 <b>你的专属链接</b>（好友点开直接进群）\n<code>{link}</code>\n\n📌 好友进群先记账为「待达标」，本群达标后自动发奖；也可点下方「刷新进度」立即重判。"
         rows.append([InlineKeyboardButton("打开链接", url=link),
-                     InlineKeyboardButton("分享给好友", url=f"https://t.me/share/url?url={link}")])
+                     InlineKeyboardButton("分享给好友", url="https://t.me/share/url?url=" + quote(link, safe=""))])
     else:
         body += "\n\n📌 发「" + str(INVITE_LINK_CMD) + "」领取本群专属链接。"
-    if cid is not None:
-        rows.append([InlineKeyboardButton("🔄 刷新进度", callback_data=f"invite_refresh_{uid}")])
-    kb = InlineKeyboardMarkup(rows) if rows else None
+    if refresh_cb:
+        rows.append([InlineKeyboardButton("🔄 刷新进度", callback_data=refresh_cb)])
+    return body, (InlineKeyboardMarkup(rows) if rows else None)
+
+
+async def _invite_push_card_to_private(context, uid, cid, cname):
+    """邀请面板推送到用户私聊（群里发「邀请」时不再刷屏群消息）。
+
+    返回 True=已送达私聊；False=私聊发不出去（用户没 /start 过 bot），调用方应回退群内发送。
+    """
+    link = (invite_links.get(cid, {}).get(uid) or {}).get("link", "")
+    my_name = await get_name(context.application, uid, cid=cid)
+    body, kb = _invite_card_body_kb(uid, cid, cname, my_name, link,
+                                    f"invite_refresh_priv_{cid}_{uid}")
+    try:
+        await context.bot.send_message(uid, body, parse_mode="HTML", reply_markup=kb)
+        return True
+    except Exception:
+        logger.info("邀请面板推送私聊失败 uid=%s（用户可能未 /start）", uid)
+        return False
+
+
+async def _invite_send_progress_card(update, context, uid, cid, cname, link=None, edit_msg=None):
+    """发/刷新合格结算卡片。edit_msg 存在则编辑原消息（刷新按钮）。"""
+    my_name = await get_name(context.application, uid, cid=cid if cid else None)
+    refresh_cb = f"invite_refresh_{uid}" if cid is not None else None
+    body, kb = _invite_card_body_kb(uid, cid, cname, my_name, link, refresh_cb)
     if edit_msg is not None:
         try:
             await edit_msg.edit_text(body, parse_mode="HTML", reply_markup=kb)
@@ -4485,6 +4607,11 @@ async def cmd_my_invite(update, context):
     mine = None
     if cid is not None:
         mine = (invite_links.get(cid, {}).get(uid) or {}).get("link")
+        # 群里只回执一句话，完整面板推私聊（不占群消息；私聊可反复刷新）
+        if await _invite_push_card_to_private(context, uid, cid, cname):
+            await send_reply(update, context, "🎟️ 邀请面板已发到你的私聊，进度可随时在私聊刷新。")
+            return
+        await send_reply(update, context, "⚠️ 私聊推送失败（可能你还没私聊过我发 /start），先在这里看：")
     await _invite_send_progress_card(update, context, uid, cid, cname, link=mine)
 
 
@@ -4958,6 +5085,36 @@ async def on_button(update, context):
                 await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
             await _deep_start_confirm(q, data, context)
             return
+        # --- 邀请：私聊刷新（面板推送到私聊后，私聊 chat.id 不是群 id，必须在群授权前处理） ---
+        if data.startswith("invite_refresh_priv_"):
+            if uid in BLACKLISTED_USERS and not is_bot_admin(uid):
+                await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
+            try:
+                rcid_s, _, owner_s = data[len("invite_refresh_priv_"):].rpartition("_")
+                rcid, owner = int(rcid_s), int(owner_s)
+            except ValueError:
+                await q.answer("按钮已过期", show_alert=True); return
+            if uid != owner:
+                await q.answer("只能刷新自己的进度", show_alert=True); return
+            new_awd = 0
+            try:
+                new_awd = await _invite_refresh_all(context.application, rcid, owner)
+            except Exception:
+                logger.exception("邀请私聊刷新异常（已吞并）")
+            cname = chat_name_cache.get(rcid) or str(rcid)
+            link = (invite_links.get(rcid, {}).get(owner) or {}).get("link", "")
+            try:
+                my_name = await get_name(context.application, owner, cid=rcid)
+                body, kb = _invite_card_body_kb(owner, rcid, cname, my_name, link,
+                                                f"invite_refresh_priv_{rcid}_{owner}")
+                await q.message.edit_text(body, parse_mode="HTML", reply_markup=kb)
+            except Exception:
+                logger.exception("刷新私聊邀请卡片失败（已吞并）")
+            try:
+                await q.answer("已刷新" + (f"：新发放 {new_awd} 次奖励 🎉" if new_awd else "：暂无新达标"))
+            except Exception:
+                pass
+            return
         if not is_auth(cid): await q.answer("未授权", show_alert=True); return
         if uid in BLACKLISTED_USERS and not is_bot_admin(uid): await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
         if data == "noop": await q.answer(); return  # 占位按钮（售罄/页码），点了不报错
@@ -5009,7 +5166,10 @@ async def on_button(update, context):
                 if uid not in game.players:
                     await q.answer("❌ 你未参与本局游戏。", show_alert=True); return
                 if str(uid) != data.split("_")[2]: await q.answer("不是你的回合", show_alert=True); return
-                card = game.hit(uid); await q.answer(f"你抽到了 {game.get_card_str([card])}")
+                card = game.hit(uid)
+                if card is None:  # 超时/并发竞态下已不是该玩家回合（stale 按钮），不能让 get_card_str 崩溃
+                    await q.answer("不是你的回合", show_alert=True); return
+                await q.answer(f"你抽到了 {game.get_card_str([card])}")
                 if game.phase == "finished" or game.phase == "dealer_turn": await update_blackjack_ui(game, context.application)
                 else: await update_blackjack_ui(game, context.application); await start_bj_turn_timer(game, context.application)
             elif data.startswith("bj_stand_"):
@@ -5165,10 +5325,7 @@ async def on_button(update, context):
                 await q.answer("选择比牌对手"); return
             if data == "jh_cancel_pk":
                 game.compare_menu_owner = None
-                if game.phase == "open_pending":
-                    await show_jinhua_action(game, context.application)
-                else:
-                    await start_jinhua_turn_timer(game, context.application)
+                await start_jinhua_turn_timer(game, context.application)  # 内部含 open_pending 看门狗
                 await q.answer("已取消比牌"); return
             if data.startswith("jh_pk_"):
                 if game.compare_menu_owner is None or uid != game.compare_menu_owner:
@@ -5241,7 +5398,7 @@ async def on_button(update, context):
                     if not ok: await q.answer(desc, show_alert=True); return
                     await q.answer(desc)
                     game.last_action = f"{await get_name(context.application, uid)} {desc}"
-                    await show_jinhua_action(game, context.application)
+                    await start_jinhua_turn_timer(game, context.application)  # open_pending 后挂超时看门狗
                 else:
                     await q.answer("未知操作", show_alert=True)
                 return
@@ -5254,7 +5411,7 @@ async def on_button(update, context):
                 await q.answer(desc)
                 game.last_action = f"{await get_name(context.application, uid)} 弃牌"
                 if game.phase == "showdown": await settle_jinhua(game, context.application)
-                else: await show_jinhua_action(game, context.application)
+                else: await start_jinhua_turn_timer(game, context.application)  # 弃牌后仍在 open_pending 则挂看门狗
                 return
             if uid != game.current(): await q.answer("还没轮到你", show_alert=True); return
             action = {"jh_fold": "fold", "jh_call": "call", "jh_allin": "allin"}.get(data); extra = 0
@@ -5267,7 +5424,7 @@ async def on_button(update, context):
             await q.answer(desc)
             game.last_action = f"{await get_name(context.application, uid)} {desc}"
             if game.phase == "showdown": await settle_jinhua(game, context.application)
-            elif game.phase == "open_pending": await show_jinhua_action(game, context.application)
+            elif game.phase == "open_pending": await start_jinhua_turn_timer(game, context.application)  # 挂超时看门狗
             else: await start_jinhua_turn_timer(game, context.application)
             return
         # --- 积分商城：点蓝色按钮直接兑换 / 翻页 / 商品详情 ---
@@ -5406,6 +5563,20 @@ def _antispam_check(cid, uid, text):
             return "timer"
     return None
 
+def _antispam_prune(offs, window=None):
+    """累犯计数只保留时间窗内的命中（就地清理并返回）。
+
+    不清理的话 antispam_offense 只增不减，禁言时长 = 基础 × 2^(n-1)，
+    老用户隔几个月再犯一次就是几十小时，等同永久禁言，内存也只涨不降。
+    """
+    w = ANTISPAM_OFFENSE_WINDOW if window is None else window
+    try: w = float(w)
+    except (TypeError, ValueError): return offs
+    if w and w > 0:
+        cut = time.time() - w
+        offs[:] = [t for t in offs if t >= cut]
+    return offs
+
 async def _antispam_hit(update, context, cid, uid, reason):
     """命中处理：撤删本条 → 清该用户统计防连环触发 → 禁言（累犯翻倍）→ 群内通告。"""
     message = update.effective_message
@@ -5415,6 +5586,7 @@ async def _antispam_hit(update, context, cid, uid, reason):
         antispam_hist.pop(k, None)
     offs = antispam_offense.setdefault((cid, uid), [])
     offs.append(time.time())
+    _antispam_prune(offs)   # 只保留时间窗内的命中，否则累犯计数只增不减 → 2^(n-1) 变事实永久禁言
     n = len(offs)
     mute = ANTISPAM_MUTE_SECONDS * (2 ** (n - 1)) if ANTISPAM_MUTE_ESCALATE else ANTISPAM_MUTE_SECONDS
     muted = False
@@ -5519,6 +5691,12 @@ async def _autodel_enforce(update, context):
 async def on_media(update, context):
     """自动删除规则中心：非文本消息（图/视频/贴纸/文件/联系人/系统消息等）按开关静默撤删。"""
     try:
+        # 黑名单拦截：命令/文本/回调入口都拦了，媒体消息此前漏了 → 拉黑形同虚设
+        u = update.effective_user
+        if u and not u.is_bot and u.id in BLACKLISTED_USERS and not is_bot_admin(u.id):
+            try: await update.effective_message.delete()
+            except Exception: pass
+            return
         if await _autodel_enforce(update, context):
             return
     except Exception:
@@ -6557,7 +6735,12 @@ async def _lottery_refresh_announce(app, cid, lo):
         pass
 
 async def _lottery_draw(app, cid, lo):
-    """开奖：从参与者中按奖品库存随机抽；写回 lo['winners']/prizes 剩余库存；发群通知 + 私聊中奖者。"""
+    """开奖：从参与者中按奖品库存随机抽；写回 lo['winners']/prizes 剩余库存；发群通知 + 私聊中奖者。
+
+    返回 True=本次实际开奖；False=活动已不在 open 状态（防定时扫描与手动开奖并发重复开奖、覆盖中奖名单）。
+    """
+    if lo.get("status") != "open":
+        return False
     lo["status"] = "drawing"
     prizes = [dict(p) for p in lo["prizes"]]  # 拷贝并加 left 字段
     for p in prizes:
@@ -6625,6 +6808,7 @@ async def _lottery_draw(app, cid, lo):
     lo["status"] = "finished"
     lo["end_ts"] = time.time()
     save_data()
+    return True
 
 async def cmd_lottery(update, context):
     """群组抽奖：管理员用 /开奖 <标题> | <奖品> | <秒数> 开局；玩家用 /开奖 或 关键词 参与。
@@ -6657,7 +6841,8 @@ async def cmd_lottery(update, context):
             if not lo:
                 await send_reply(update, context, "❌ 当前没有进行中的抽奖活动"); return
             await send_reply(update, context, "🎲 正在开奖…")
-            await _lottery_draw(context.application, cid, lo)
+            if not await _lottery_draw(context.application, cid, lo):
+                await send_reply(update, context, "ℹ️ 本活动已开奖/已结束，请勿重复操作")
             return
         if args_part in ("结束", "取消"):
             lo = _lottery_active(cid)
@@ -6973,7 +7158,8 @@ async def cmd_inherit(update, context):
         if used + amount > INHERIT_DAILY_LIMIT:
             await send_reply(update, context, f"❌ 超出每日转赠上限：今日已转出 {used}，上限 {INHERIT_DAILY_LIMIT}（网页「积分继承」可调）。"); return
     old_self, old_tgt = game_chips[cid][uid], game_chips[cid][target]
-    async with wallet_locks[uid]:
+    # 必须同时锁住收款方：只锁付款方的话，收款方此刻若有 /add、结算等持锁写操作，转入会被覆盖丢失
+    async with user_wallet_locks([uid, target]):
         if game_chips[cid][uid] < amount:
             await send_reply(update, context, f"❌ 你的积分不足：需要 {amount}，当前 {game_chips[cid][uid]}。"); return
         game_chips[cid][uid] -= amount
@@ -7053,12 +7239,33 @@ async def _guess_close(cid, app):
         await safe_edit(app.bot, cid, g["msg_id"], _guess_text(cid), reply_markup=None)
     except Exception:
         logger.exception("竞猜封盘看板刷新异常（已吞并）")
+    # 兜底：管理员迟迟不结算/撤销时自动退款，绝不让玩家积分卡在奖池里（重启也捞不回来）
+    if GUESS_AUTO_SETTLE_MINUTES and GUESS_AUTO_SETTLE_MINUTES > 0:
+        try: asyncio.create_task(_guess_auto_settle(cid, app))
+        except Exception: pass
+
+
+async def _guess_auto_settle(cid, app):
+    """封盘后超时未处理 → 自动撤销并全额退款（积分卡死兜底）。"""
+    try:
+        await asyncio.sleep(max(1, float(GUESS_AUTO_SETTLE_MINUTES) * 60))
+        g = guesses.get(cid)
+        if not g or not g.get("locked") or g.get("settled"):
+            return      # 已被结算/撤销/重开
+        try:
+            await _guess_do_cancel(app, cid, auto=True)
+        except Exception:
+            logger.exception("竞猜超时自动退款失败（已吞并）")
+    except Exception:
+        logger.exception("竞猜超时兜底任务异常（已吞并）")
 
 
 async def _guess_do_settle(app, cid, winner):
     """结算：猜中方按注额比例瓜分全部奖池；无人猜中则奖池沉没。返回错误文案或 None。"""
     g = guesses.get(cid)
     if not g: return "本群没有进行中的竞猜"
+    if g.get("settled"): return "本局已结算，请勿重复操作"
+    g["settled"] = True      # 先占位：派彩里有 await，两个管理员同时结算会导致重复派彩
     winner = (winner or "").strip().upper()
     if winner not in ("A", "B"): return "用法：竞猜结算 A 或 竞猜结算 B"
     pots = g["side_pots"]
@@ -7107,10 +7314,11 @@ async def _guess_do_settle(app, cid, winner):
     return None
 
 
-async def _guess_do_cancel(app, cid):
+async def _guess_do_cancel(app, cid, auto=False):
     """撤销竞猜：全额退还托管注金。返回错误文案或 None。"""
     g = guesses.get(cid)
     if not g: return "本群没有进行中的竞猜"
+    g["settled"] = True   # 与结算互斥，防并发重复退款
     n = 0
     for uid, bets in g["bets"].items():
         back = int(bets.get("A", 0)) + int(bets.get("B", 0))
@@ -7122,7 +7330,10 @@ async def _guess_do_cancel(app, cid):
     guesses.pop(cid, None)
     save_data()
     try:
-        await send_settle(app, cid, f"🎯 竞猜「{g['q']}」已撤销，{n} 人的托管注金已全额退回。")
+        tip = (f"⏳ 竞猜「{g['q']}」封盘后 {GUESS_AUTO_SETTLE_MINUTES} 分钟无人结算，已自动撤销，"
+               f"{n} 人的托管注金全额退回。" if auto else
+               f"🎯 竞猜「{g['q']}」已撤销，{n} 人的托管注金已全额退回。")
+        await send_settle(app, cid, tip)
     except Exception:
         logger.exception("竞猜撤销播报异常（已吞并）")
     return None
@@ -7529,8 +7740,10 @@ async def _invite_award(app, rec):
     inviter, cid = rec["inviter"], rec["cid"]
     reward = max(0, int(INVITE_REWARD))
     if reward:
-        old = game_chips[cid].get(inviter, 0)
-        game_chips[cid][inviter] = old + reward
+        # 必须持锁：两名被邀请人同时达标时，两次"读 old + 写 old+reward"会互相覆盖，只到账一份
+        async with wallet_locks[inviter]:
+            old = game_chips[cid].get(inviter, 0)
+            game_chips[cid][inviter] = old + reward
         rec["award"] = reward
         ledger_add(cid, 0, inviter, reward, "邀请奖励")
     inviter_name = await get_name(app, inviter, cid=cid)
@@ -7771,6 +7984,40 @@ async def on_new_members_msg(update, context):
         logger.exception("message 入群事件处理异常（已吞并）")
 
 
+async def _cleanup_left_member_games(app, cid, uid):
+    """⑭ 退群清理：把已退群成员从等待房移除，防止幽灵玩家被开局带上场。
+
+    - 金花/德州 waiting：纯移除（两游戏入房不扣钱，德州 chips 只是只读快照）
+    - 21点 waiting：入房时已预扣积分，移除必须原额退款并清 pending（防重启重复退）
+    - 进行中对局（betting/playing/open_pending）不动内部结构——各游戏已有回合超时
+      （德州/21点超时自动弃牌停牌、金花 open_pending 看门狗自动开牌），不卡局不丢钱。
+    全程吞异常：退群清理绝不能拖垮成员事件处理。
+    """
+    try:
+        g = active_jinhua_games.get(cid)
+        if g and g.phase == "waiting" and uid in g.players:
+            g.players.remove(uid)
+            await update_jinhua_waiting(g, app)
+            return
+        g = active_poker_games.get(cid)
+        if g and g.phase == "waiting" and uid in g.players:
+            g.players.remove(uid)
+            await update_poker_waiting(g, app)
+            return
+        g = active_blackjack_games.get(cid)
+        if g and g.phase == "waiting" and uid in g.players:
+            async with wallet_locks[uid]:
+                if uid in g.players:
+                    g.players.remove(uid)
+                    amt = g.bets.pop(uid, 0)
+                    if amt:
+                        game_chips[cid][uid] += amt   # 与 bj_end 手动终止同一退款语义
+                    pending_game_bets[cid].get(uid, {}).pop("21", None)
+            await update_blackjack_ui(g, app)
+    except Exception:
+        logger.exception("退群清理牌局异常（已吞并）")
+
+
 async def on_member_event(update, context):
     """成员进出事件：退群/入群记录（bot 需为群管理员才能收到）。"""
     try:
@@ -7787,6 +8034,7 @@ async def on_member_event(update, context):
             leave_records[cid] = leave_records[cid][-100:]
             rec = invite_records.get(f"{cid}:{uid}")
             if rec: rec["left"] = True   # 邀请记录：退群即失效（不再计入排行）
+            await _cleanup_left_member_games(context.application, cid, uid)  # ⑭ 从等待房移除，防幽灵开局
         elif new.status in ("member", "administrator") and old.status in ("left", "kicked"):
             leave_records[cid].append({"ts": ts, "uid": uid, "name": name, "join": True})
             leave_records[cid] = leave_records[cid][-100:]
@@ -8211,7 +8459,7 @@ async def cmd_restore(update, context):
                 pass
             try:
                 _write_settings_file(data.get("fields", {}),
-                                     data.get("web_password") or globals().get("_web_password", ""),
+                                     data.get("web_password") or "",   # 新格式备份没有明文，空=不动凭据
                                      data.get("cmd_aliases") or {}, data.get("tg_menu") or [])
                 load_settings()
                 await asyncio.to_thread(force_save_now)
@@ -8256,7 +8504,7 @@ async def cmd_restore(update, context):
                     TG_MENU.extend([list(x) for x in tm if isinstance(x, (list, tuple)) and len(x) == 2])
                 apply_command_aliases()
                 _write_settings_file(embedded.get("fields", {}),
-                                     embedded.get("web_password") or globals().get("_web_password", ""),
+                                     embedded.get("web_password") or "",   # 空=不动凭据，避免把密码打回默认
                                      embedded.get("cmd_aliases") or {}, embedded.get("tg_menu") or [])
                 logger.warning("数据恢复：已一并还原网页设置（%s 项）", len(embedded.get("fields", {})))
         except Exception:
@@ -8820,12 +9068,18 @@ def start_health_server():
             """群选择联动用户 datalist 的脚本：select[data-users-for] 选中群后自动填充对应成员。"""
             gusers = {str(cid): {str(u): user_names.get(u, str(u)) for u in chips}
                       for cid, chips in game_chips.items()}
-            return ("<script>var GUSERS=" + json.dumps(gusers, ensure_ascii=False) + ";"
+            # 安全：昵称是可控输入，直接嵌进 <script> 会形成存储型 XSS（玩家改昵称即可在后台执行 JS）。
+            # ① 把 < / 转成 \u003c \u002f（JSON 合法转义，JS 解析后还原，但不会闭合标签）
+            # ② 不再用 innerHTML 拼字符串，改用 DOM API 写入
+            raw = json.dumps(gusers, ensure_ascii=False).replace("<", "\\u003c").replace("/", "\\u002f")
+            return ("<script>var GUSERS=" + raw + ";"
                     "document.addEventListener('DOMContentLoaded',function(){"
                     "function fill(){document.querySelectorAll('select[data-users-for]').forEach(function(sel){"
                     "var dl=document.getElementById(sel.getAttribute('data-users-for'));if(!dl)return;"
                     "var us=GUSERS[sel.value]||{};"
-                    "dl.innerHTML=Object.keys(us).map(function(u){return '<option value=\"'+u+'\">'+us[u]+'</option>';}).join('');});}"
+                    "dl.textContent='';"
+                    "Object.keys(us).forEach(function(u){var o=document.createElement('option');"
+                    "o.value=u;o.textContent=us[u];dl.appendChild(o);});});}"
                     "document.querySelectorAll('select[data-users-for]').forEach(function(sel){sel.addEventListener('change',fill);});fill();});</script>")
 
         def _otp_page(otp_token, err="", notice=""):
@@ -8922,6 +9176,11 @@ def start_health_server():
 
         def _login_page(err=""):
             msg = "<div class='err'>密码错误，请重试</div>" if err else ""
+            # 仍是出厂默认密码 = 任何人猜到域名就能进后台，必须显著警告（但不阻断，避免把自己锁在门外）
+            if _pwd_ok(WEB_DEFAULT_PASSWORD):
+                msg += ("<div class='err' style='text-align:left;line-height:1.6'>⚠️ <b>当前仍是默认密码</b>（"
+                        + html.escape(str(WEB_DEFAULT_PASSWORD))
+                        + "）。知道后台地址的人都能直接登录并操作积分/数据，请立刻在「安全设置」里修改（至少 8 位，字母+数字）。</div>")
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     "<title>登录 - 机器人后台</title><style>"
@@ -9282,7 +9541,7 @@ def start_health_server():
                                    f"<td>{_btn('authdel', 'cid', g, '移除(含数据)', '#e06666')}</td></tr>"
                                    for g in sorted(AUTHORIZED_GROUPS))
                     body = (f"<h1>{gicon} 授权群管理</h1>"
-                            "<div class='sub'>授权群里的玩家才能使用游戏；也可在群里发 /授权</div>{msg}"
+                            f"<div class='sub'>授权群里的玩家才能使用游戏；也可在群里发 /授权</div>{msg}"
                             "<div class='card'><table class='tbl'><tr><th>群</th><th>操作</th></tr>"
                             + (rows or "<tr><td colspan='2'>暂无授权群</td></tr>") + "</table>"
                             "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
@@ -9295,7 +9554,7 @@ def start_health_server():
                                    f"<td>{_btn('unblack', 'uid', u, '解黑')}</td></tr>"
                                    for u in sorted(BLACKLISTED_USERS))
                     body = (f"<h1>{gicon} 拉黑管理</h1>"
-                            "<div class='sub'>被拉黑的玩家无法使用机器人任何功能；也可群里 /拉黑 /解黑</div>{msg}"
+                            f"<div class='sub'>被拉黑的玩家无法使用机器人任何功能；也可群里 /拉黑 /解黑</div>{msg}"
                             "<div class='card'><table class='tbl'><tr><th>ID</th><th>名字</th><th>操作</th></tr>"
                             + (rows or "<tr><td colspan='3'>黑名单为空</td></tr>") + "</table>"
                             "<form method='post' action='/adminops2' style='display:flex;gap:10px;margin-top:14px'>"
@@ -9316,7 +9575,7 @@ def start_health_server():
                             "<button type='submit' style='margin-top:0'>👑 封赌神</button></form></div>")
                 elif sub == "seasonpts":
                     body = (f"<h1>{gicon} 排位分调整</h1>"
-                            "<div class='sub'>给玩家加/减排位分（正加负减）；赛季未开始时需玩家已在赛季名单</div>{msg}"
+                            f"<div class='sub'>给玩家加/减排位分（正加负减）；赛季未开始时需玩家已在赛季名单</div>{msg}"
                             "<div class='card'><form method='post' action='/adminops2'>"
                             "<input type='hidden' name='op' value='seasonpts'>"
                             "<div class='row'><div class='lbl'>群 ID<small>选群后用户 ID 自动带出该群成员</small></div>"
@@ -9372,7 +9631,7 @@ def start_health_server():
                                    f"<td><code>{o.get('cid', '')}</code></td></tr>"
                                    for o in reversed(mall_orders[-50:]))
                     body = (f"<h1>{gicon} 商城订单（最近 50）</h1>"
-                            "<div class='sub'>玩家下单记录；发货请线下完成</div>{msg}"
+                            f"<div class='sub'>玩家下单记录；发货请线下完成</div>{msg}"
                             "<div class='card'><table class='tbl'><tr><th>时间</th><th>玩家</th><th>商品</th><th>价格</th><th>群</th></tr>"
                             + (rows or "<tr><td colspan='5'>暂无订单</td></tr>") + "</table></div>")
                 else:
@@ -9394,7 +9653,7 @@ def start_health_server():
                 menu_txt = "\n".join(f"{c_} {d_}" for c_, d_ in TG_MENU)
                 body = (f"<h1>{gicon} 命令管理</h1>"
                         "<div class='sub'>每个命令的触发词随意改（逗号分隔，可中文可英文）；保存后<b>立即生效</b>并持久化。"
-                        "Telegram / 菜单每行一条「命令 描述」，命令仅限英文小写/数字/下划线</div>{msg}{err}"
+                        f"Telegram / 菜单每行一条「命令 描述」，命令仅限英文小写/数字/下划线</div>{msg}{err}"
                         "<div class='card'><form method='post' action='/cmdaliases'>"
                         "<h3>⌨️ 命令触发词</h3>"
                         "<table class='tbl'><tr><th style='width:150px'>命令</th><th>触发词（逗号分隔）</th></tr>"
@@ -9403,7 +9662,7 @@ def start_health_server():
                         "<textarea name='tg_menu' rows='14' style='width:100%;font-family:inherit'>" + html.escape(menu_txt) + "</textarea>"
                         "<button type='submit' style='margin-top:12px'>💾 保存全部命令设置</button></form></div>")
             elif gkey == "security":
-                is_default = _web_password == WEB_DEFAULT_PASSWORD
+                is_default = _pwd_ok(WEB_DEFAULT_PASSWORD)
                 warn = "<div class='err'>⚠️ 当前还在用初始密码，建议立即修改（至少4位）</div>" if is_default else ""
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码</div>{msg}{warn}"
                         "<form method='post' action='/save'>"
@@ -9506,7 +9765,7 @@ def start_health_server():
                         f"{rows_html}</table></div>"
                         # 配置表单
                         f"<div class='card'><h3>⚙️ 配置</h3><form method='post' action='/save'>"
-                        f"<input type='hidden' name='group' value='points/lottery'>"
+                        f"<input type='hidden' name='group' value='lottery'>"
                         + _field_rows("lottery")
                         + "<div class='sub' style='margin-top:16px'>消息模板支持占位符："
                           f"<code>{'{title}'}</code> <code>{'{nick}'}</code> <code>{'{n}'}</code> <code>{'{balance}'}</code> "
@@ -9629,7 +9888,7 @@ def start_health_server():
                 sname = subs.get(sub, sub)
                 if gkey == "points" and sub == "adjust":
                     body = (f"<h1>{gicon} {sname}</h1>"
-                            "<div class='sub'>直接给玩家加/减统一积分（正数加、负数减），立即生效并落盘；等效群里的 /add 命令</div>{msg}"
+                            f"<div class='sub'>直接给玩家加/减统一积分（正数加、负数减），立即生效并落盘；等效群里的 /add 命令</div>{msg}"
                             "<div class='card'><form method='post' action='/points_adj'>"
                             "<div class='row'><div class='lbl'>群 ID<small>下拉选择；选群后用户 ID 自动带出该群成员</small></div>"
                             f"<select name='cid' data-users-for='dl_adj_uid' required>{_group_options()}</select></div>"
@@ -9642,7 +9901,7 @@ def start_health_server():
                 elif gkey == "points" and sub == "impexp":
                     opts = _group_options()
                     body = (f"<h1>{gicon} {sname}</h1>"
-                            "<div class='sub'>按群导出/导入积分。导入会<b>覆盖</b>该群已有积分，务必先用模板核对格式</div>{msg}{err}"
+                            f"<div class='sub'>按群导出/导入积分。导入会<b>覆盖</b>该群已有积分，务必先用模板核对格式</div>{msg}{err}"
                             "<div class='card'><h3>📥 导出</h3>"
                             "<form method='get' action='/points_export'>"
                             f"<div class='row'><div class='lbl'>选择群</div><select name='cid'>{opts}</select></div>"
@@ -9654,6 +9913,8 @@ def start_health_server():
                             f"<div class='row'><div class='lbl'>导入到群</div><select name='cid'>{opts}</select></div>"
                             "<div class='row'><div class='lbl'>数据文件<small>.csv / .xls / .xlsx</small></div>"
                             "<input type='file' name='file' accept='.csv,.xls,.xlsx' required></div>"
+                            "<div class='row'><div class='lbl'>⚠️ 覆盖确认<small>导入为覆盖式写入，不可撤销</small></div>"
+                            "<label style='display:flex;gap:8px;align-items:center'><input type='checkbox' name='confirm' value='1' required style='width:auto'> 我确认覆盖所选群的全部积分</label></div>"
                             "<button type='submit'>✅ 确认导入</button></form></div>")
                 elif gkey == "points" and sub == "level":
                     lv_rows = "".join(
@@ -9711,7 +9972,7 @@ def start_health_server():
                             f"签到：基础 {SIGN_BASE_REWARD} 分，连续满 7 天额外 +{SIGN_STREAK_BONUS} 分；抢积分红包"
                             + (f"；充值：{BUY_MIN}~{BUY_MAX}/次（管理员确认到账）" if BUY_ENABLED else "") + "</td></tr>"
                             "<tr><th>消耗</th><td>发积分红包；积分商城下单（"
-                            + ("、".join(f"{x['name']} {x['value']}分" for x in MALL_ITEMS) or "暂无商品")
+                            + ("、".join(f"{x.get('name', '?')} {_mall_price(x)}分" for x in MALL_ITEMS) or "暂无商品")
                             + "）</td></tr>"
                             f"<tr><th>转赠</th><td>{'开启' if INHERIT_ENABLED else '关闭'}，把积分转给群内成员{fee}</td></tr>"
                             "<tr><th>等级</th><td>"
@@ -9849,7 +10110,7 @@ def start_health_server():
                         gs_rows = ("<tr><td colspan='7' style='text-align:center;color:#6a6982'>"
                                    "暂无进行中的竞猜；用上方「新增竞猜」直接发起，或群里发「开竞猜 题目/选项A/选项B」</td></tr>")
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>管理员群里发「开竞猜 题目/选项A/选项B [时长分钟]」开局，成员点按钮下注托管；"
-                            "到点自动封盘，「竞猜结算 A/B」开出答案后猜中方按注额比例瓜分全部奖池，「竞猜撤销」全额退款</div>{msg}"
+                            f"到点自动封盘，「竞猜结算 A/B」开出答案后猜中方按注额比例瓜分全部奖池，「竞猜撤销」全额退款</div>{msg}"
                             + _flt_bar("/page/points/guess") +
                             "<div class='card'><h3>🎯 进行中的竞猜</h3>"
                             "<table class='tbl'><tr><th>群</th><th>题目</th><th>选项A</th><th>选项B</th><th>奖池</th><th>状态</th><th>操作</th></tr>"
@@ -10053,7 +10314,7 @@ def start_health_server():
                         sessions[session] = time.time() + 7 * 86400
                     # 通知所有管理员：有人通过一键链接进入后台
                     try:
-                        ip = self.client_address[0]
+                        ip = _client_ip(self)
                         ua = (self.headers.get("User-Agent") or "")[:120]
                         if _bot_app and _bot_loop:
                             async def _notify():
@@ -10222,6 +10483,9 @@ def start_health_server():
                     try: cid = int(fields.get("cid", 0))
                     except (TypeError, ValueError): cid = 0
                     if not cid: _imp_back(err="群 ID 无效"); return
+                    # ⑱ 二次确认：导入是覆盖式写入，未显式勾选确认一律拒绝（防选错群整群余额被覆盖）
+                    if str(fields.get("confirm", "")).strip() not in ("1", "on", "true"):
+                        _imp_back(err="未勾选「我确认覆盖所选群的全部积分」，导入已取消（不影响现有数据）"); return
                     file_field = fields.get("file")
                     if not isinstance(file_field, tuple) or not file_field[1]:
                         _imp_back(err="未收到文件"); return
@@ -10242,7 +10506,7 @@ def start_health_server():
                 except Exception:
                     form = {}
                 if path == "/login":
-                    ip = self.client_address[0]
+                    ip = _client_ip(self)
                     with sess_lock:
                         _cnt, lock_until = login_fails.get(ip, [0, 0])
                     if time.time() < lock_until:
@@ -10262,7 +10526,7 @@ def start_health_server():
                         else:
                             self._send(200, _login_page(err=1))
                         return
-                    if secrets.compare_digest(pwd, _web_password):
+                    if _pwd_ok(pwd):
                         # 二次验证：密码对了还不够，还要 Telegram 私聊验证码
                         if globals().get("WEB_OTP_ENABLED", True):
                             tok, _code, serr = _send_otp_code(ip)
@@ -10282,7 +10546,7 @@ def start_health_server():
                     return
                 if path == "/login2":
                     """二次验证提交：校验 Telegram 验证码，通过才建会话。"""
-                    ip = self.client_address[0]
+                    ip = _client_ip(self)
                     with sess_lock:
                         _c2, lock2 = otp_fails.get(ip, [0, 0])
                     if time.time() < lock2:
@@ -10685,7 +10949,19 @@ def start_health_server():
                         self._redirect("/"); return
                     group = form.get("group", [""])[0]
                     if group == "security":
-                        save_settings({}, form.get("new_password", [""])[0])
+                        _np = (form.get("new_password", [""])[0] or "").strip()
+                        if len(_np) < 4:   # 此前不足 4 位被 save_settings 静默跳过，却仍提示"已保存"
+                            self._redirect("/page/security?err=" + quote("密码至少 4 位，未做任何修改")); return
+                        save_settings({}, _np)
+                        # 改密后作废其他会话，只保留当前这个（旧会话继续可用等于白改）
+                        try:
+                            _mm = re.search(r"wb_session=([^;\s]+)", self.headers.get("Cookie") or "")
+                            _cur = _mm.group(1) if _mm else ""
+                            with sess_lock:
+                                for _s in [s for s in list(sessions) if s != _cur]:
+                                    sessions.pop(_s, None)
+                        except Exception:
+                            pass
                         self._redirect("/page/security?saved=1"); return
                     valid_keys = {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
                     cfg = {k: v[0] for k, v in form.items() if k in valid_keys}
@@ -10765,6 +11041,25 @@ async def auto_backup(context):
         logger.exception("自动备份失败")
 
 
+async def on_app_error(update, context):
+    """全局错误兜底：任何 handler 抛出的未捕获异常都会进入这里。
+
+    记录完整堆栈日志，给当事人一条可感知的提示（不再静默失败），并推送管理员。
+    自身全程吞异常——错误处理器绝不能二次抛错。
+    """
+    logger.exception("未处理异常", exc_info=context.error)
+    try:
+        chat = getattr(update, "effective_chat", None) if update is not None else None
+        if chat is not None:
+            await context.bot.send_message(chat.id, "⚠️ 处理该操作时出错，请稍后重试；已通知管理员排查。")
+    except Exception:
+        pass
+    try:
+        await context.bot.send_message(ADMIN_USER_ID, f"⚠️ bot 发生未处理异常：{context.error!r}")
+    except Exception:
+        pass
+
+
 def main():
     global save_event
     load_settings()  # 先套用网页端保存的设置，再启动 bot
@@ -10797,6 +11092,7 @@ def main():
     app.add_handler(ChatMemberHandler(on_member_event, chat_member_types=ChatMemberHandler.ANY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members_msg))  # 普通群入群兜底
     app.add_handler(ChatJoinRequestHandler(on_join_request))  # 入群申请事件（群需开「申请加入」）
+    app.add_error_handler(on_app_error)  # 全局错误兜底：handler 异常不再静默
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__": main()

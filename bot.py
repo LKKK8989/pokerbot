@@ -344,6 +344,7 @@ SETTINGS_FIELDS = [
     ("invite_self_msg",         "INVITE_SELF_MSG",         "自己邀请自己消息",          "text",  0,   0,       "invite/config"),
     # 合格邀请结算（2026-09-08 替代旧「进群前置」死字段）：被邀请人本群达标才算合格才发奖
     ("invite_qualify_enabled",  "INVITE_QUALIFY_ENABLED",  "合格结算开关(达标才发奖)",   "bool",  0,   1,       "invite/qualify"),
+    ("invite_manual_count",     "INVITE_MANUAL_COUNT",     "手动拉人计入邀请(添加人=邀请人)", "bool", 0, 1,  "invite/qualify"),
     ("invite_qualify_msgs",     "INVITE_QUALIFY_MSGS",     "质量要求-本群发言≥N条(0=不限)", "int", 0,  100000,  "invite/qualify"),
     ("invite_qualify_points",   "INVITE_QUALIFY_POINTS",   "质量要求-本群净赚积分≥M(0=不限)", "int", 0, 1000000, "invite/qualify"),
     ("invite_qualify_avatar",   "INVITE_QUALIFY_AVATAR",   "质量要求-进群须有头像(无则拒)", "bool", 0,   1,      "invite/qualify"),
@@ -453,6 +454,7 @@ INVITE_RANK_ALL_CMD = "总邀请排行"
 # 机制：被邀请人经专属直链进群只记账（待达标）；在本群真实活动（发言/净赚积分）达阈值才标合格并发奖；
 # 达标检查事件驱动（发言/签到/刷新按钮兜底重判）；单邀请人发放次数 ≤ INVITE_REWARD_TIMES。
 INVITE_QUALIFY_ENABLED = 1   # 合格结算开关（1=达标才发奖；0=进群即发，兼容老行为）
+INVITE_MANUAL_COUNT = 0      # 手动拉人计入邀请（1=管理员/成员手动添加的人记到添加人名下；默认关，防拉小号刷奖励）
 INVITE_QUALIFY_MSGS = 10     # 质量要求：被邀请人本群累计发言 ≥ N 条（0=不限）
 INVITE_QUALIFY_POINTS = 0    # 质量要求：被邀请人本群净赚积分 ≥ M（0=不限；净赚=余额-初始分）
 INVITE_QUALIFY_AVATAR = 0    # 质量要求：进群须有头像（无则拒绝，永不发；防小号）
@@ -7793,20 +7795,28 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                     except Exception:
                         pass
             else:
-                # 2026-09-08 起：事件/申请都没带链接 → 一律不归因（宁缺毋滥，绝不猜测安错人）。
+                # 2026-09-08 起：事件/申请都没带链接 → 默认不归因（宁缺毋滥，绝不猜测安错人）。
                 # /link 发的是直链，正常进群事件必带链接；漏链接说明走的是申请制或直接拉人。
                 _inv_dbg(cid, "⚠️ 事件与申请均无链接 → 不归因（宁缺毋滥）：直链进群才带链接，群开「申请加入」会丢链接")
-                # 黑盒终结：给管理员私聊发诊断通知（不打扰群），说明为何没计入
-                try:
-                    await context.bot.send_message(
-                        ADMIN_USER_ID,
-                        f"ℹ️ 进群未计入邀请：{name}（<code>{uid}</code>）加入群 <code>{cid}</code> 时"
-                        f"未携带任何邀请链接（多为手动拉人/直接搜索进群）。\n"
-                        f"邀请只认「邀请人的专属链接」进群；请让对方退出后通过专属链接重新进群。",
-                        parse_mode="HTML")
-                except Exception:
-                    pass
-            return
+                # 手动拉人计入（可选开关）：chat_member 的 from_user = 造成本次进群的人（手动添加时即添加人）
+                adder = getattr(cmu, "from_user", None)
+                a_id = getattr(adder, "id", 0) if adder else 0
+                if INVITE_MANUAL_COUNT and a_id > 0 and a_id != uid and not getattr(adder, "is_bot", False):
+                    inviter = a_id
+                    _inv_dbg(cid, f"✅ 手动拉人计入邀请：uid={uid} 由 {a_id} 添加（开关已开）")
+                else:
+                    # 黑盒终结：给管理员私聊发诊断通知（不打扰群），说明为何没计入
+                    try:
+                        await context.bot.send_message(
+                            ADMIN_USER_ID,
+                            f"ℹ️ 进群未计入邀请：{name}（<code>{uid}</code>）加入群 <code>{cid}</code> 时"
+                            f"未携带任何邀请链接（多为手动拉人/直接搜索进群）。\n"
+                            f"邀请只认「邀请人的专属链接」进群；可让邀请人邀请，或后台开启「手动拉人计入邀请」。",
+                            parse_mode="HTML")
+                    except Exception:
+                        pass
+            if not inviter:
+                return
         if inviter == uid:
             _inv_dbg(cid, f"uid={uid} 自己邀自己，跳过")
             if str(INVITE_SELF_MSG).strip():
@@ -7818,7 +7828,8 @@ async def _invite_track_join(cmu, cid, uid, name, context):
         _inv_dbg(cid, f"✅ 归因成功 uid={uid} → 邀请人 {inviter}")
         rec = {"cid": cid, "inviter": inviter, "invitee": uid, "invitee_name": name,
                "ts": now_bj().strftime("%Y-%m-%d %H:%M"), "qualified": False,
-               "rejected": False, "left": False, "award": 0, "link": link}
+               "rejected": False, "left": False, "award": 0, "link": link,
+               "manual": not bool(link)}   # 手动拉人计入的记录带 manual 标记
         # 进群硬门槛（头像/用户名，进群瞬间检查一次；不满足直接拒绝，永不发奖）
         ju = _join_user_obj(cmu)
         if INVITE_QUALIFY_USERNAME and not getattr(ju, "username", None):

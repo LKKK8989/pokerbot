@@ -5895,16 +5895,12 @@ async def cmd_points_redeem(update, context):
     if not items:
         await send_reply(update, context, "🎁 本群暂无可兑换商品，管理员可在后台「积分系统 → 积分兑换」给本群上架。"); return
     args = context.args or []
-    if not args:  # 商品按钮列表：点蓝色按钮直接兑换
+    if not args:  # 商品按钮列表：与竞品一致——商品信息全在按钮里，消息正文不重复列
         _cn = chat_name_cache.get(cid) or ""
-        lines = [f"🎁 积分兑换｜{_cn}" if _cn else "🎁 积分兑换", "━" * 14]
-        for i, x in enumerate(items, 1):
-            left = int(x.get("left", 0) or 0)
-            left_txt = "不限" if left <= 0 else str(left)
-            lines.append(f"{i}. {x['name']}　—　{int(x.get('price', 0) or 0)} 积分　剩余 {left_txt}")
-        lines.append("")
         mins = max(1, MALL_LIST_DELETE_SECONDS // 60)
-        lines.append(f"💡 点下方蓝色按钮兑换（{mins} 分钟后消息自动删除）；也可发「{REDEEM_CMD} 编号/名称」")
+        lines = [f"🎁 积分兑换｜{_cn}" if _cn else "🎁 积分兑换",
+                 "━" * 14,
+                 f"💡 点下方蓝色按钮直接兑换（{mins} 分钟后消息自动删除）；也可发「{REDEEM_CMD} 编号/名称」"]
         rows = []
         for i, x in enumerate(items, 1):
             price = int(x.get("price", 0) or 0)
@@ -5942,17 +5938,9 @@ async def cmd_mall(update, context):
     pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
     page = min(page, pages)
     chunk = items[(page - 1) * MALL_PAGE_SIZE: page * MALL_PAGE_SIZE]
-    lines = [f"🛒 积分商城（{page}/{pages} 页）", "━" * 14]
-    for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
-        desc = str(item.get("desc", "") or "").strip()
-        stk_txt = ""
-        if isinstance(item.get("stock"), int):
-            stk_txt = f"  剩余 {item['stock']}" if item['stock'] else "  已售罄"
-        lines.append(f"{i}. {item['name']}　—　{_mall_price(item)} 积分{stk_txt}"
-                     + (f"\n  　{desc}" if desc else ""))
-    lines.append("")
-    lines.append("💡 点击下方【立即兑换】按钮即可购买；翻页用【上一页/下一页】。")
-    # 内联按钮：每商品一行（商品名 / 立即兑换），底部翻页
+    lines = [f"🛒 积分商城（{page}/{pages} 页）", "━" * 14,
+             f"💡 点下方蓝色按钮兑换（{max(1, MALL_LIST_DELETE_SECONDS // 60)} 分钟后消息自动删除）"]
+    # 商品信息全在按钮里，消息正文不重复列
     rows = []
     for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
         stock_btn = item.get("stock")
@@ -7174,9 +7162,11 @@ async def _invite_award(app, rec):
             pass
     if str(INVITE_OK_GROUP).strip():
         try:
-            await app.bot.send_message(chat_id=cid, text=_fmt_tpl(
+            ok_msg = await app.bot.send_message(chat_id=cid, text=_fmt_tpl(
                 "invite_ok_group", inviter=inviter_name, inviter_id=inviter,
                 invitee=rec.get("invitee_name", ""), invitee_id=rec.get("invitee", ""), reward=reward))
+            if ok_msg and REPLY_DELETE_SECONDS > 0:
+                schedule_delete(app, cid, ok_msg, REPLY_DELETE_SECONDS)
         except Exception:
             pass
     save_data()
@@ -7441,7 +7431,9 @@ async def on_member_event(update, context):
             if WELCOME_ENABLED:
                 try:
                     text = WELCOME_TPL.replace("{name}", name).replace("{group}", getattr(cmu.chat, "title", "") or "").replace("{id}", str(uid))
-                    await context.bot.send_message(chat_id=cid, text=text)
+                    wmsg = await context.bot.send_message(chat_id=cid, text=text)
+                    if wmsg and REPLY_DELETE_SECONDS > 0:
+                        schedule_delete(context.application, cid, wmsg, REPLY_DELETE_SECONDS)
                 except TelegramError: pass
         _remember_name(update)
         save_data()

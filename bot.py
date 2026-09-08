@@ -307,7 +307,7 @@ SETTINGS_FIELDS = [
     # 群组抽奖（基础版：1 个 prize+count 形式；点数抽奖/乐透等高级类型后续按需扩展）
     ("lottery_enabled",         "LOTTERY_ENABLED",         "群组抽奖总开关",            "bool",  0,   1,       "lottery"),
     ("lottery_keyword",         "LOTTERY_KEYWORD",         "参与触发词(也支持 /开奖)",   "short", 0,   0,       "lottery"),
-    ("lottery_default_duration","LOTTERY_DEFAULT_DURATION","默认持续秒数",              "int",   10,  3600,    "lottery"),
+    ("lottery_default_duration","LOTTERY_DEFAULT_DURATION","倒计时默认时长(秒)",          "int",   10,  3600,    "lottery"),
     ("lottery_fee",             "LOTTERY_FEE",             "参与扣积分(0=免费)",         "int",   0,   10000,   "lottery"),
     ("lottery_msg_start",       "LOTTERY_MSG_START",       "活动公告模板",              "text", 0,   0,       "lottery"),
     ("lottery_msg_joined",      "LOTTERY_MSG_JOINED",      "参与成功模板",              "text", 0,   0,       "lottery"),
@@ -370,7 +370,7 @@ WEB_BASE_URL = ""  # 后台公网地址（如 https://xxx.northflank.app），/�
 # ---------- 群组抽奖 ----------
 LOTTERY_ENABLED = True             # 总开关（网页 general→points/lottery 可关）
 LOTTERY_KEYWORD = "抽奖"            # 玩家参与的触发词（也支持 /开奖 命令）
-LOTTERY_DEFAULT_DURATION = 60       # 默认持续秒数（解析失败时兜底）
+LOTTERY_DEFAULT_DURATION = 60       # 倒计时默认时长：群内命令开抽奖不带时间时用；网页倒计时模式预填值
 LOTTERY_FEE = 0                     # 参与扣积分（0=免费）；参与门槛在每场活动创建时单独设置
 LOTTERY_MAX_PRIZES = 8              # 单次抽奖最多几档奖品
 LOTTERY_MSG_START = (
@@ -555,6 +555,7 @@ rp_packets = {}                                      # pid -> {"cid","from","lef
 guesses = {}                                         # cid -> 竞猜 {"q","a","b","end_ts","locked","bets":{uid:{"A","B"}},"side_pots":{"A","B"},"msg_id","task"}
 invite_links = {}                                    # cid -> {uid: {"link","invite_id","ts"}} 每人专属邀请链接
 invite_records = {}                                  # "cid:uid" -> {"cid","inviter","invitee","invitee_name","ts","audit","left","award","link"}
+invite_pending = {}                                  # "cid:uid" -> 进群申请携带的邀请链接（人审批后 join 事件常不带链接，靠这个兜底归因；内存态）
 buy_orders = {}                                      # oid -> {"cid","uid","amount","ts"} 购买积分申请（管理员人工确认）
 warn_counts = defaultdict(lambda: defaultdict(int))  # warn_counts[cid][uid] = 警告次数（网页成员列表加减）
 redeem_goods = []                                    # 积分兑换商品 [{"name","price","left","redeemed","desc","on"}] left=0 不限
@@ -1602,13 +1603,8 @@ def ledger_add(cid, frm, to, amt, typ):
     if len(ledger) > 5000: del ledger[:len(ledger) - 5000]
 
 
-async def apply_rake(app, cid, nets, label):
-    """游戏抽水：官方模式结算后对赢家净赢按 RAKE_PERCENT% 抽成，回收销毁（不回流奖池）。
-
-    nets: {uid: 本局净输赢}（正=赢）。只抽真实用户（uid>0）且净赢 ≥ RAKE_MIN_NET 的赢家。
-    扣款直接从统一钱包 game_chips 扣；台账 typ=「抽水-<label>」；群内轻提示（可静默失败）。
-    返回 (总抽水, {uid: 该玩家被抽金额})。
-    """
+def calc_rake(nets):
+    """计算抽水（纯计算不扣款）：对赢家净赢按 RAKE_PERCENT% 抽成。返回 (总抽水, {uid: 金额})。"""
     if not RAKE_ENABLED or RAKE_PERCENT <= 0:
         return 0, {}
     rake_total, rake_per = 0, {}
@@ -1622,16 +1618,22 @@ async def apply_rake(app, cid, nets, label):
             continue
         rake_per[uid] = amt
         rake_total += amt
+    return rake_total, rake_per
+
+
+async def commit_rake(app, cid, rake_per, label):
+    """抽水落账：从钱包扣除 + 写台账。不再单独发群消息——抽水在结算面板里直接体现为「实收」。"""
+    if not rake_per:
+        return 0
+    total = 0
+    for uid, amt in rake_per.items():
         async with wallet_locks[uid]:
             game_chips[cid][uid] = max(0, game_chips[cid].get(uid, 0) - amt)
         ledger_add(cid, uid, 0, amt, f"抽水-{label}")
-    if rake_total:
+        total += amt
+    if total:
         save_data()
-        try:
-            await safe_send(app.bot, cid, f"💸 本局{label}系统抽水 <b>{rake_total}</b> 积分（{RAKE_PERCENT}%）", parse_mode="HTML")
-        except Exception:
-            pass
-    return rake_total, rake_per
+    return total
 
 
 def record_game_flows(cid, nets, typ):
@@ -2095,29 +2097,28 @@ def poker_buttons(game, uid):
     if not acting:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🃏 查看手牌", callback_data="texas_hand")]])
     to_call = max(0, game.current_bet - game.round_bets[uid])
-    # 第一行三连：手牌/弃牌/跟注（压缩整体高度，5 行 → 3 行）
+    # 面板宽度=最宽行：每行最多2个按钮压宽度；跟注+加注同行、半池+全池同行、全下独占
     rows = [[InlineKeyboardButton("🃏 手牌", callback_data="texas_hand"),
-             InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold"),
-             InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}",
-                                  callback_data="texas_check" if not to_call else "texas_call")]]
+             InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold")]]
+    act_btn = InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}",
+                                   callback_data="texas_check" if not to_call else "texas_call")
     if uid not in game.raise_locked:
         # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底
         half_amt = max(FIXED_MIN_RAISE, game.pot // 2)
         pot_amt = max(FIXED_MIN_RAISE, game.pot)
-        pot_row = []
-        if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
-            pot_row.append(InlineKeyboardButton(f"💰 半池 +{half_amt}", callback_data="texas_raise_half"))
-        if game.chips[uid] >= to_call + pot_amt:
-            pot_row.append(InlineKeyboardButton(f"💰 全池 +{pot_amt}", callback_data="texas_raise_pot"))
-        if pot_row: rows.append(pot_row)
-        # 固定额加注（最低加注额）与全下并排一行；各自筹码不足时隐藏
-        last_row = []
+        row_act = [act_btn]
         if game.chips[uid] >= to_call + FIXED_MIN_RAISE and half_amt > FIXED_MIN_RAISE:
-            last_row.append(InlineKeyboardButton(f"🔼 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}"))
-        if game.chips[uid] > 0:
-            last_row.append(InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin"))
-        if last_row: rows.append(last_row)
-    elif game.chips[uid] > 0:
+            row_act.append(InlineKeyboardButton(f"🔼 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}"))
+        rows.append(row_act)
+        row_p = []
+        if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
+            row_p.append(InlineKeyboardButton(f"💰 半池+{half_amt}", callback_data="texas_raise_half"))
+        if game.chips[uid] >= to_call + pot_amt:
+            row_p.append(InlineKeyboardButton(f"💰 全池+{pot_amt}", callback_data="texas_raise_pot"))
+        if row_p: rows.append(row_p)
+    else:
+        rows.append([act_btn])
+    if game.chips[uid] > 0:
         rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
 
@@ -2189,6 +2190,11 @@ async def settle_poker(game, app):
         for uid, hand, amount, details, _ in sorted(result, key=lambda item: item[2], reverse=True):
             lines.extend([f"{names[uid]}：{hand}｜+{amount}（{'，'.join(f'{pool}+{value}' for pool, value in details)}）", ""])
         
+        # 抽水先算（官方模式），面板「盈亏」行直接带实收；资金流审查同源
+        _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players} \
+            if (game.mode == "official" and not game.season) else {}
+        rake_per = calc_rake(_nets)[1] if _nets else {}
+
         lines.append("投入 / 盈亏：")
         for uid in game.players:
             net = game.chips[uid] - game.initial_chips[uid]
@@ -2196,13 +2202,14 @@ async def settle_poker(game, app):
                 pass  # 排位分已在 showdown 写回 season_points，不写当日榜
             elif game.mode == "official":
                 poker_profit_by_date[date][game.chat_id][uid] += net
-            lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
+            r_amt = rake_per.get(uid, 0)
+            r_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
+            lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}{r_txt}", ""])
 
         # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌送分"）；排位分不记
         if game.mode == "official" and not game.season:
-            _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}
             record_game_flows(game.chat_id, _nets, "德州")
-            await apply_rake(app, game.chat_id, _nets, "德州")
+            await commit_rake(app, game.chat_id, rake_per, "德州")
 
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（排位赛不播）
         if game.mode == "official" and not game.season:
@@ -2582,6 +2589,8 @@ class HorseRace:
                     if self.mode == "official":
                         race_profit_by_date[date][self.chat_id][uid] += net
                     settlements.append((uid, self.name_cache[uid], stake, bet_on_winner, payout, net, bet_odd))
+                # 抽水先算（官方模式），结算行直接带「实收」
+                rake_per = calc_rake({s[0]: s[5] for s in settlements})[1] if self.mode == "official" else {}
                 # 阶段二：统一改写钱包（此处仅 dict 操作，不会抛异常，payouts_applied 必定置位）
                 for uid, _, _, _, payout, _, _ in settlements:
                     wallet[self.chat_id][uid] += payout; total_payout += payout
@@ -2593,7 +2602,7 @@ class HorseRace:
                     detail = f"🐴 押中 {HORSE_EMOJI[winner]}{HORSE_NAMES[winner]}（赔率 {best[6]:.1f}）"
                     await broadcast_big_win(app, self.chat_id, best[0], "🏎️ 赛车大赛", best[5], detail)
                 if self.mode == "official":
-                    await apply_rake(app, self.chat_id, {s[0]: s[5] for s in settlements}, "赛车")
+                    await commit_rake(app, self.chat_id, rake_per, "赛车")
 
                 available_pool = self.jackpot + self.pool
                 supplement = max(0, total_payout - available_pool)
@@ -2606,8 +2615,10 @@ class HorseRace:
 
                 lines.extend(["", "💰 本局结算："])
                 for _, name, stake, bet_on_winner, payout, net, bo in settlements:
+                    r_amt = rake_per.get(_, 0)
+                    r_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
                     if bet_on_winner > 0:
-                        lines.append(f"{name}：总投注 {stake}｜命中 {bet_on_winner}（{bo:.2f}x）｜派彩 {payout}｜净 {net:+d}")
+                        lines.append(f"{name}：总投注 {stake}｜命中 {bet_on_winner}（{bo:.2f}x）｜派彩 {payout}｜净 {net:+d}{r_txt}")
                     else:
                         lines.append(f"{name}：总投注 {stake}｜未命中｜净 {net:+d}")
 
@@ -2703,7 +2714,7 @@ async def require_group_chat(update, game_name, cmd, context=None):
 
 async def cmd_start(update, context):
     if not await need_auth(update, context): return
-    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n🎟️ 邀请有礼：\n/link - 领取本群专属邀请链接\n今日邀请排行 / 本月邀请排行 / 总邀请排行 - 查看邀请榜\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
+    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n🎟️ 邀请有礼：\n/link - 领取本群专属邀请链接\n今日邀请排行 / 本月邀请排行 / 总邀请排行 - 查看邀请榜\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n流水 - 查自己的积分来源明细（红包/抽水/邀请奖励等；回复他人消息查对方仅限管理员）\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
     if is_bot_admin(update.effective_user.id):
         text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
     await send_reply(update, context, text)
@@ -2852,8 +2863,13 @@ async def update_blackjack_ui(game, app):
                 
                 net = payout - bet
                 hand_text = game.get_card_str(game.hands[uid])
-                lines.append(f"👤 <b>玩家</b>：{player_names[uid]} | {hand_text} ({p_score})\n<b>结果</b>：{result_str} | 盈亏 {net:+d}")
+                # 抽水在面板体现：赢家用「实收」显示税后，不再单独发抽水消息
+                r_amt = calc_rake({uid: net})[1].get(uid, 0) if game.mode == "official" else 0
+                rake_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
+                lines.append(f"👤 <b>玩家</b>：{player_names[uid]} | {hand_text} ({p_score})\n<b>结果</b>：{result_str} | 盈亏 {net:+d}{rake_txt}")
                 payout_plan.append((uid, payout, net))
+            # 抽水金额先算好（与面板一致），结算落账时一并扣
+            rake_per = calc_rake({uid: net for uid, _p, net in payout_plan})[1] if game.mode == "official" else {}
 
             # ===== 阶段二：全部算成功后，统一改钱包 + 写盈亏 + 清退款记录 =====
             async with user_wallet_locks([uid for uid, _, _ in payout_plan]):
@@ -2869,7 +2885,7 @@ async def update_blackjack_ui(game, app):
             if game.mode == "official" and payout_plan:
                 best = max(payout_plan, key=lambda x: x[2])
                 if best[2] > 0: await broadcast_big_win(app, game.chat_id, best[0], "♠️ 21点", best[2])
-                await apply_rake(app, game.chat_id, {uid: net for uid, _p, net in payout_plan}, "21点")
+                await commit_rake(app, game.chat_id, rake_per, "21点")
 
             # 记录庄家历史 (仅记录本局主要趋势)
             if game.mode == "official":
@@ -2939,20 +2955,15 @@ async def cmd_21(update, context):
     if cid in active_blackjack_games:
         g = active_blackjack_games[cid]
         if g.phase == "waiting":
-            text, kb = await build_blackjack_wait_board(g, context.application)
-            msg = await safe_send(context.bot, cid, text, reply_markup=kb, parse_mode="HTML")
-            if msg: g.game_msg_id = msg.message_id
+            # 已有等待房：绝不发第二块面板（两块并存时旧面板按钮会指到已失效状态，点了没反应）。面板状态没变，无需编辑，只提示。
+            await send_reply(update, context, "本群已有等待中的 21点，请在上面的面板加入。")
         else:
             await send_reply(update, context, "当前已有 21点 进行中。")
         return
     mode = current_game_mode()
     game = BlackjackGame(cid, uid, mode)
     active_blackjack_games[cid] = game
-    # 发起人自动入座（按最低档加入下注；余额不足则仅建房不占座，与其他游戏对齐）
-    bet0 = BJ_JOIN_BETS[0] if BJ_JOIN_BETS else 500
-    async with wallet_locks[uid]:
-        if game_chips[cid][uid] >= bet0 and game.add_player(uid, bet0):
-            game_chips[cid][uid] -= bet0
+    # 发起人不自动入座：想玩自己点「加入」下注，不强制扣分（2026-09-08 用户要求）
     await update_blackjack_ui(game, context.application)  # 直接发送等待房界面，无"准备中"占位
     await start_bj_wait_timeout(game, context.application) # 启动等待超时
 
@@ -3588,17 +3599,22 @@ async def settle_jinhua(game, app):
         for uid, hand, amount, details, _ in sorted(result, key=lambda item: item[2], reverse=True):
             if amount > 0:
                 lines.extend([f"{names[uid]}：{hand}｜+{amount}（{'，'.join(f'{pool}+{value}' for pool, value in details)}）", ""])
+        # 抽水先算（官方模式），面板「盈亏」行直接带实收
+        _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players} \
+            if game.mode == "official" else {}
+        rake_per = calc_rake(_nets)[1] if _nets else {}
         lines.append("投入 / 盈亏：")
         for uid in game.players:
             net = game.chips[uid] - game.initial_chips[uid]
             if game.mode == "official":
                 jinhua_profit_by_date[date][game.chat_id][uid] += net
-            lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
+            r_amt = rake_per.get(uid, 0)
+            r_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
+            lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}{r_txt}", ""])
         # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌/比牌倒赔送分"）
         if game.mode == "official":
-            _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}
             record_game_flows(game.chat_id, _nets, "金花")
-            await apply_rake(app, game.chat_id, _nets, "金花")
+            await commit_rake(app, game.chat_id, rake_per, "金花")
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（豹子特别标注）
         if game.mode == "official":
             top_uid, top_net = None, 0
@@ -4285,6 +4301,40 @@ async def refund_poker(game, app, notice):
     # 解散提示牌桌也延迟清理，避免一堆「已解散」卡片堆在群里
     schedule_delete_ids(app, game.chat_id, game.game_msg_id, PANEL_DELETE_SECONDS)
     save_data()
+
+
+async def cmd_points_flow(update, context):
+    """积分流水：查每笔积分来源/去向（红包/转赠/兑换/抽水/邀请奖励/游戏送分）。回复某人消息+流水可查对方（仅管理员）。"""
+    if not await need_auth(update, context): return
+    uid = update.effective_user.id
+    target = uid
+    if update.effective_message and update.effective_message.reply_to_message:
+        if not is_bot_admin(uid):
+            await send_reply(update, context, "❌ 查别人的流水仅限管理员（回复对方消息发「流水」）。"); return
+        target = update.effective_message.reply_to_message.from_user.id
+    entries = []
+    for e in ledger:
+        amt = int(e.get("amt", 0) or 0)
+        if e.get("frm") == target and amt:
+            entries.append((e.get("ts", ""), -amt, str(e.get("typ", "")), e.get("to")))
+        elif e.get("to") == target and amt:
+            entries.append((e.get("ts", ""), amt, str(e.get("typ", "")), e.get("frm")))
+    for e in game_flows:
+        amt = int(e.get("amt", 0) or 0)
+        if e.get("frm") == target and amt:
+            entries.append((e.get("ts", ""), -amt, f"{e.get('typ', '')}(送分)", e.get("to")))
+        elif e.get("to") == target and amt:
+            entries.append((e.get("ts", ""), amt, f"{e.get('typ', '')}(收到)", e.get("frm")))
+    entries.sort(key=lambda x: x[0])
+    if not entries:
+        await send_reply(update, context, "📒 暂无积分流水。红包/转赠/兑换/抽水/邀请奖励/游戏送分等都会记在这里；21点/赛车盈亏用「盈亏」查。"); return
+    recent = entries[-15:]
+    lines = [f"📒 积分流水｜{await get_name(context.application, target, cid=update.effective_chat.id)}", "━━━━━━━━━━━━━━━━━"]
+    for ts, amt, typ, peer in recent:
+        peer_txt = f" → 用户{peer}" if (peer and amt < 0) else (f" ← 用户{peer}" if peer else "")
+        lines.append(f"{ts}｜{'+' if amt >= 0 else ''}{amt}｜{typ}{peer_txt}")
+    lines.append(f"共 {len(entries)} 笔，显示最近 {len(recent)} 笔（21点/赛车每局盈亏用「盈亏」查）")
+    await send_reply(update, context, "\n".join(lines))
 
 
 async def cmd_end(update, context):
@@ -4974,6 +5024,10 @@ async def on_button(update, context):
 
     except Exception:
         logger.exception("按钮处理异常")
+        try:
+            await update.callback_query.answer("操作异常，请重试", show_alert=True)
+        except Exception:
+            pass
 
 
 def _antispam_norm(text):
@@ -6418,14 +6472,19 @@ async def _guess_do_settle(app, cid, winner):
         won = next((a for w, _s, a, _o in paid if w == uid), 0)
         nets[uid] = won - staked
     record_game_flows(cid, nets, "竞猜")
-    await apply_rake(app, cid, nets, "竞猜")
+    rake_per = calc_rake(nets)[1]
+    await commit_rake(app, cid, rake_per, "竞猜")
     guesses.pop(cid, None)
     save_data()
     ans_txt = g["a"] if winner == "A" else g["b"]
     if paid:
         lines = ""
         for uid, stake, amt, _old in sorted(paid, key=lambda x: -x[2])[:20]:
-            lines += f"\n🎉 {await get_name(app, uid, cid=cid)} 押 {stake} → 分得 {amt}"
+            _staked_all = sum(int(v) for v in g["bets"].get(uid, {}).values())
+            _net = amt - _staked_all
+            _r = rake_per.get(uid, 0)
+            _r_txt = f"（实收 {_net - _r}，含抽水{_r}）" if _r else ""
+            lines += f"\n🎉 {await get_name(app, uid, cid=cid)} 押 {stake} → 分得 {amt}｜净 {_net:+d}{_r_txt}"
         for uid, _s, _amt, old in paid:  # 等级联动（按派付后余额）
             await _check_level_change(app, cid, uid, old, game_chips[cid].get(uid, 0))
     else:
@@ -6822,7 +6881,8 @@ async def _invite_track_join(cmu, cid, uid, name, context):
         if key in invite_records:   # 重复进群不重复计，仅视为回归
             invite_records[key]["left"] = False
             return
-        link = getattr(getattr(cmu, "invite_link", None), "link", "") or ""
+        link = (getattr(getattr(cmu, "invite_link", None), "link", "")
+                or invite_pending.pop(f"{cid}:{uid}", ""))   # 入群申请兜底：审批后的 join 事件常不带链接
         inviter = 0
         for i_uid, info in invite_links.get(cid, {}).items():
             if info.get("link") == link and i_uid != uid:
@@ -6943,6 +7003,22 @@ async def cmd_invite_link(update, context):
                      + f"\n📊 你在本群已成功邀请 {total} 人")
 
 
+async def on_new_members_msg(update, context):
+    """message 版入群事件（普通群收不到 chat_member 更新，只能靠服务消息兜底）。
+    普通群的服务消息不带邀请链接，能归因到就走 pending 映射，归因不到就静默跳过。"""
+    try:
+        message = update.effective_message
+        if not message or not message.new_chat_members:
+            return
+        cid = message.chat_id
+        for member in message.new_chat_members:
+            uid = member.id
+            name = member.first_name or f"用户{uid}"
+            await _invite_track_join(message, cid, uid, name, context)
+    except Exception:
+        logger.exception("message 入群事件处理异常（已吞并）")
+
+
 async def on_member_event(update, context):
     """成员进出事件：退群/入群记录（bot 需为群管理员才能收到）。"""
     try:
@@ -6983,6 +7059,8 @@ async def on_join_request(update, context):
         uid, name = req.from_user.id, req.from_user.first_name or f"用户{req.from_user.id}"
         join_requests[cid].append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "uid": uid, "name": name})
         join_requests[cid] = join_requests[cid][-100:]
+        if getattr(req, "invite_link", None) and getattr(req.invite_link, "link", ""):
+            invite_pending[f"{cid}:{uid}"] = req.invite_link.link   # 邀请归因兜底：批准后的 join 事件可能不带链接
         save_data()
     except Exception:
         logger.exception("入群申请处理异常（已吞并）")
@@ -7494,6 +7572,7 @@ CMD_ALIASES = {
     "竞猜结算": cmd_guess_settle, "竞猜撤销": cmd_guess_cancel,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
     "link": cmd_invite_link, "邀请链接": cmd_invite_link, "邀请": cmd_invite_link,
+    "流水": cmd_points_flow, "积分流水": cmd_points_flow,
     "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
 }
 # 动态指令接管默认名：网页改指令后，旧默认名同步失效
@@ -8166,6 +8245,13 @@ def start_health_server():
             msg += "<div class='err'>部分数值超出范围或非法，已跳过这些项</div>" if bad else ""
             msg += f"<div class='ok'>{html.escape(note)}</div>" if note else ""
             msg += f"<div class='err'>{html.escape(err)}</div>" if err else ""
+            sel_flt_cid = int((flt or {}).get("cid", 0) or 0)
+            def _flt_bar(action):
+                # 数据页通用「群组筛选」条：GET ?cid=，选择即提交
+                return ("<form method='get' action='" + action + "' style='margin-bottom:10px'>"
+                        "<div class='lbl'>群组筛选</div><select name='cid' onchange='this.form.submit()'>"
+                        "<option value='0'>全部群</option>" + _group_options(selected=sel_flt_cid)
+                        + "</select><noscript><button style='margin:0'>查看</button></noscript></form>")
             if gkey == "members" and sub == "mlist":
                 fl = flt or {}
                 sel_cid = fl.get("cid", 0)
@@ -8476,7 +8562,7 @@ def start_health_server():
                                if not LOTTERY_ENABLED else "")
                 body = (f"<h1>{gicon} {sname}</h1>"
                         f"<div class='sub'>在这里创建抽奖 → 机器人自动发到群里 → 群成员发「{html.escape(LOTTERY_KEYWORD)}」参与 → 到点自动开奖</div>"
-                        f"{msg}{err}{status_html}"
+                        f"{msg}{err}{status_html}" +
                         # 新增抽奖表单（照阿福格式：描述/关键词/开奖方式下拉/结构化奖品行）
                         "<div class='card'><h3>➕ 新增抽奖</h3>"
                         "<form method='post' action='/lottery_create' id='lottery_form'>"
@@ -8522,8 +8608,9 @@ def start_health_server():
                         "document.getElementById('duration').required=!t;"
                         "});"
                         "document.getElementById('mode_sel').dispatchEvent(new Event('change'));"
-                        "</script></div>"
+                        "</script></div>" +
                         # 活动列表
+                        _flt_bar("/page/lottery") +
                         "<div class='card'><h3>📋 活动列表（最近 20 条，进行中置顶）</h3>"
                         "<table class='tbl'><tr><th>群</th><th>标题</th><th>状态</th><th>参与</th><th>中奖</th><th>参与费</th><th>开局</th><th>操作</th></tr>"
                         f"{rows_html}</table></div>"
@@ -8541,6 +8628,15 @@ def start_health_server():
                 subs_inv = {k: n for k, n in SUBPAGES.get("invite", [])}
                 sub = sub or "config"
                 sname = subs_inv.get(sub, sub)
+                sel_icid = (flt or {}).get("cid", 0)
+                def _inv_icid(v):   # int 化记录 cid（记录里存的是 int）
+                    try: return int(v)
+                    except (TypeError, ValueError): return 0
+                def _inv_bar(action):
+                    return ("<form method='get' action='" + action + "' style='margin-bottom:10px'>"
+                            "<div class='lbl'>群组筛选</div><select name='cid' onchange='this.form.submit()'>"
+                            "<option value='0'>全部群</option>" + _group_options(selected=sel_icid)
+                            + "</select><noscript><button style='margin:0'>查看</button></noscript></form>")
                 if sub == "config":
                     warn_html = ("<div class='err'>⚠️ 邀请系统当前已关闭</div>" if not INVITE_ENABLED else "")
                     body = (f"<h1>{gicon} {gname}</h1>"
@@ -8556,8 +8652,10 @@ def start_health_server():
                             "链接消息 <code>{link}</code> <code>{reward}</code>；排行行 <code>{i}</code> <code>{name}</code> <code>{count}</code></div>"
                             "<button type='submit' style='margin-top:8px'>💾 保存邀请设置</button></form></div>")
                 elif sub == "records":
+                    _recs = [(k, r) for k, r in invite_records.items()
+                             if not sel_icid or _inv_icid(r.get("cid")) == sel_icid]
                     rows_html = ""
-                    for k, r in sorted(invite_records.items(), key=lambda kv: kv[1].get("ts", ""), reverse=True)[:100]:
+                    for k, r in sorted(_recs, key=lambda kv: kv[1].get("ts", ""), reverse=True)[:100]:
                         audit_badge = {"ok": "<span style='color:#6fd08c'>有效</span>",
                                        "pending": "<span style='color:#f0c060'>待审核</span>",
                                        "unmet": "<span style='color:#f09595'>未满足</span>",
@@ -8573,7 +8671,7 @@ def start_health_server():
                     if not rows_html:
                         rows_html = "<tr><td colspan='7' style='text-align:center;color:#6a6982'>暂无邀请记录</td></tr>"
                     body = (f"<h1>{gicon} 邀请记录</h1><div class='sub'>最近 100 条邀请记录；退群自动标失效（不计排行）</div>{msg}"
-                            "<div class='card'>"
+                            "<div class='card'>" + _inv_bar("/page/invite/records") +
                             "<form method='post' action='/invite_clear' style='margin-bottom:10px' "
                             "onsubmit=\"return confirm('确认清空全部邀请记录与邀请链接？此操作不可恢复！')\">"
                             "<button style='background:#8a3b3b;color:#fff'>🧹 清空全部邀请数据</button></form>"
@@ -8582,19 +8680,20 @@ def start_health_server():
                 elif sub == "daily":
                     daily_counts = defaultdict(int)
                     for r in invite_records.values():
-                        if r.get("audit") == "ok":
+                        if r.get("audit") == "ok" and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
                             daily_counts[str(r.get("ts", ""))[:10]] += 1
                     rows_html = "".join(f"<tr><td>{d}</td><td>{n}</td></tr>"
                                         for d, n in sorted(daily_counts.items(), reverse=True)[:60])
                     if not rows_html:
                         rows_html = "<tr><td colspan='2' style='text-align:center;color:#6a6982'>暂无数据</td></tr>"
                     body = (f"<h1>{gicon} 统计</h1><div class='sub'>每日有效邀请数（最近 60 天）</div>{msg}"
-                            "<div class='card'><table class='tbl'><tr><th>日期</th><th>有效邀请</th></tr>"
+                            "<div class='card'>" + _inv_bar("/page/invite/daily") +
+                            "<table class='tbl'><tr><th>日期</th><th>有效邀请</th></tr>"
                             + rows_html + "</table></div>")
                 elif sub == "summary":
                     sums = defaultdict(lambda: {"ok": 0, "award": 0})
                     for r in invite_records.values():
-                        if r.get("audit") == "ok" and not r.get("left"):
+                        if r.get("audit") == "ok" and not r.get("left") and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
                             sums[r.get("inviter")]["ok"] += 1
                             sums[r.get("inviter")]["award"] += int(r.get("award", 0) or 0)
                     rows_html = ""
@@ -8604,7 +8703,8 @@ def start_health_server():
                     if not rows_html:
                         rows_html = "<tr><td colspan='3' style='text-align:center;color:#6a6982'>暂无数据</td></tr>"
                     body = (f"<h1>{gicon} 汇总</h1><div class='sub'>按邀请人汇总（有效且未退群，前 50）</div>{msg}"
-                            "<div class='card'><table class='tbl'><tr><th>邀请人</th><th>有效邀请</th><th>累计奖励</th></tr>"
+                            "<div class='card'>" + _inv_bar("/page/invite/summary") +
+                            "<table class='tbl'><tr><th>邀请人</th><th>有效邀请</th><th>累计奖励</th></tr>"
                             + rows_html + "</table></div>")
                 elif sub == "pre":
                     body = (f"<h1>{gicon} 前置条件</h1>"
@@ -8614,7 +8714,8 @@ def start_health_server():
                             + _field_rows("invite/pre") +
                             "<button type='submit' style='margin-top:8px'>💾 保存前置条件</button></form></div>")
                 elif sub == "audit":
-                    pend = {k: r for k, r in invite_records.items() if r.get("audit") in ("pending", "unmet")}
+                    pend = {k: r for k, r in invite_records.items()
+                            if r.get("audit") in ("pending", "unmet") and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid)}
                     rows_html = ""
                     for k, r in sorted(pend.items(), key=lambda kv: kv[1].get("ts", ""), reverse=True):
                         tag = "待审核" if r.get("audit") == "pending" else f"未满足（{html.escape(str(r.get('note', '')))}）"
@@ -8632,7 +8733,8 @@ def start_health_server():
                         rows_html = "<tr><td colspan='6' style='text-align:center;color:#6a6982'>暂无待审核记录</td></tr>"
                     body = (f"<h1>{gicon} 审核</h1><div class='sub'>开启「新邀请需人工审核」后，进群邀请在此通过/拒绝；"
                             f"「审核通过后补发奖励」开关决定通过时是否补发 {INVITE_REWARD} 积分</div>{msg}"
-                            "<div class='card'><table class='tbl'><tr><th>记录ID</th><th>邀请人</th><th>被邀请人</th><th>时间</th><th>状态</th><th>操作</th></tr>"
+                            "<div class='card'>" + _inv_bar("/page/invite/audit") +
+                            "<table class='tbl'><tr><th>记录ID</th><th>邀请人</th><th>被邀请人</th><th>时间</th><th>状态</th><th>操作</th></tr>"
                             + rows_html + "</table></div>")
                 else:
                     body = f"<h1>{gicon} {gname}</h1><div class='sub'>该子页暂未开通</div>{msg}"
@@ -8845,6 +8947,7 @@ def start_health_server():
                                    "暂无进行中的竞猜；用上方「新增竞猜」直接发起，或群里发「开竞猜 题目/选项A/选项B」</td></tr>")
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>管理员群里发「开竞猜 题目/选项A/选项B [时长分钟]」开局，成员点按钮下注托管；"
                             "到点自动封盘，「竞猜结算 A/B」开出答案后猜中方按注额比例瓜分全部奖池，「竞猜撤销」全额退款</div>{msg}"
+                            + _flt_bar("/page/points/guess") +
                             "<div class='card'><h3>🎯 进行中的竞猜</h3>"
                             "<table class='tbl'><tr><th>群</th><th>题目</th><th>选项A</th><th>选项B</th><th>奖池</th><th>状态</th><th>操作</th></tr>"
                             + gs_rows + "</table>"
@@ -8862,26 +8965,30 @@ def start_health_server():
                             + _field_rows("points/guess")
                             + "<button type='submit' style='margin-top:8px'>💾 保存竞猜设置</button></form></div>")
                 elif gkey == "points" and sub == "mallord":
+                    _ord_src = [o for o in reversed(mall_orders[-200:]) if not sel_flt_cid or int(o.get("cid", 0) or 0) == sel_flt_cid]
                     ord_rows = "".join(
-                        f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{o.get('cid')}</td>"
+                        f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{o.get('cid')} {html.escape(chat_name_cache.get(int(o.get('cid', 0) or 0), ''))}</td>"
                         f"<td>{o.get('uid')} {html.escape(user_names.get(o.get('uid'), ''))}</td>"
                         f"<td>{html.escape(str(o.get('item', '')))}</td><td>{o.get('price')}</td></tr>"
-                        for o in reversed(mall_orders[-50:]))
+                        for o in _ord_src[:50])
                     if not ord_rows:
                         ord_rows = "<tr><td colspan='5' style='text-align:center;color:#6a6982'>还没有兑换订单</td></tr>"
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>商城兑换订单（最近 50 条）</div>{msg}"
+                            + _flt_bar("/page/points/mallord") +
                             "<div class='card'><table class='tbl'><tr><th>时间</th><th>群</th><th>用户</th><th>商品</th><th>价格</th></tr>"
                             + ord_rows + "</table></div>")
                 elif gkey == "points" and sub == "buy":
                     pend_rows = "".join(
-                        f"<tr><td><code>{oid}</code></td><td>{o.get('cid')}</td>"
+                        f"<tr><td><code>{oid}</code></td><td>{o.get('cid')} {html.escape(chat_name_cache.get(int(o.get('cid', 0) or 0), ''))}</td>"
                         f"<td>{o.get('uid')} {html.escape(user_names.get(o.get('uid'), ''))}</td>"
                         f"<td>{o.get('amount')}</td><td>{html.escape(str(o.get('ts', '')))}</td></tr>"
-                        for oid, o in buy_orders.items())
+                        for oid, o in buy_orders.items()
+                        if not sel_flt_cid or int(o.get("cid", 0) or 0) == sel_flt_cid)
                     if not pend_rows:
                         pend_rows = ("<tr><td colspan='5' style='text-align:center;color:#6a6982'>"
                                      "没有待处理的购买申请（群里点按钮处理）</td></tr>")
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>保存立即生效 · 套餐在「积分套餐管理」页配置</div>{msg}"
+                            + _flt_bar("/page/points/buy") +
                             "<div class='card'><h3>🧾 待处理购买申请</h3>"
                             "<table class='tbl'><tr><th>单号</th><th>群</th><th>用户</th><th>数量</th><th>时间</th></tr>"
                             + pend_rows + "</table></div>"
@@ -9672,6 +9779,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_media))  # 自动删除规则中心：媒体类
     app.add_handler(ChatMemberHandler(on_member_event))       # 退群/入群事件（bot 需群管理员）
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members_msg))  # 普通群入群兜底
     app.add_handler(ChatJoinRequestHandler(on_join_request))  # 入群申请事件（群需开「申请加入」）
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 

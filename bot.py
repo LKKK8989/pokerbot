@@ -7796,6 +7796,16 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                 # 2026-09-08 起：事件/申请都没带链接 → 一律不归因（宁缺毋滥，绝不猜测安错人）。
                 # /link 发的是直链，正常进群事件必带链接；漏链接说明走的是申请制或直接拉人。
                 _inv_dbg(cid, "⚠️ 事件与申请均无链接 → 不归因（宁缺毋滥）：直链进群才带链接，群开「申请加入」会丢链接")
+                # 黑盒终结：给管理员私聊发诊断通知（不打扰群），说明为何没计入
+                try:
+                    await context.bot.send_message(
+                        ADMIN_USER_ID,
+                        f"ℹ️ 进群未计入邀请：{name}（<code>{uid}</code>）加入群 <code>{cid}</code> 时"
+                        f"未携带任何邀请链接（多为手动拉人/直接搜索进群）。\n"
+                        f"邀请只认「邀请人的专属链接」进群；请让对方退出后通过专属链接重新进群。",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
             return
         if inviter == uid:
             _inv_dbg(cid, f"uid={uid} 自己邀自己，跳过")
@@ -7920,6 +7930,11 @@ async def cmd_invite_link(update, context):
         mine = invite_links[cid][uid]
     link = mine.get("link", "")
     cname = chat_name_cache.get(cid) or (getattr(update.effective_chat, "title", "") or str(cid))
+    # 邀请面板推私聊（群内不刷屏）；私聊发不出（用户没 /start）才回退群内卡片
+    if await _invite_push_card_to_private(context, uid, cid, cname):
+        await send_reply(update, context, "🎟️ 邀请面板已发到你的私聊，进度可随时在私聊刷新。")
+        return
+    await send_reply(update, context, "⚠️ 私聊推送失败（可能你还没私聊过我发 /start），先在这里看：")
     await _invite_send_progress_card(update, context, uid, cid, cname, link=link)
 
 

@@ -98,8 +98,10 @@ SETTINGS_GROUPS = [
     ("blackjack", "21点",      "♠️"),
     ("jinhua",    "炸金花",     "♣️"),
     ("race",      "赛车",       "🏎️"),
+    ("rake",      "游戏抽水",   "💸"),
     ("points",    "积分系统",   "💰"),
     ("lottery",   "群组抽奖",   "🎉"),
+    ("invite",    "邀请系统",   "🎟️"),
     ("season",    "排位赛",     "🏆"),
     ("members",   "群组管理",   "👥"),
     ("autodel",   "自动删除",   "🗑️"),
@@ -115,8 +117,8 @@ SIDEBAR_CHILDREN = {"texas": ["season"]}  # 把某些独立组折叠进父组显
 # 侧边栏三大节（照阿福：节标题 + 节内菜单项）。不在任何节里的组保持原样渲染在最后。
 SIDEBAR_SECTIONS = [
     ("🤖 机器人设置", ["dashboard", "schedule", "commands", "general", "admin", "security"]),
-    ("👥 群组设置",   ["members", "autodel", "points", "lottery"]),
-    ("🎲 娱乐功能",   ["texas", "blackjack", "jinhua", "race"]),
+    ("👥 群组设置",   ["members", "autodel", "points", "lottery", "invite"]),
+    ("🎲 娱乐功能",   ["texas", "blackjack", "jinhua", "race", "rake"]),
 ]
 SUBPAGES = {
     "points": [
@@ -129,14 +131,20 @@ SUBPAGES = {
         ("rp",       "积分红包"),
         ("level",    "积分等级"),
         ("inherit",  "积分继承"),
-        ("auction",  "积分拍卖"),
         ("redeem",   "积分兑换"),
         ("mall",     "积分商城"),
         ("mallord",  "商城订单"),
         ("buy",      "购买积分"),
         ("buypkg",   "积分套餐管理"),
-        ("box",      "积分盲盒"),
         ("guess",    "积分竞猜"),
+    ],
+    "invite": [
+        ("config",  "邀请链接配置"),
+        ("records", "邀请记录"),
+        ("daily",   "统计"),
+        ("summary", "汇总"),
+        ("pre",     "前置条件"),
+        ("audit",   "审核"),
     ],
     "members": [
         ("mlist",   "群组成员列表"),
@@ -180,6 +188,9 @@ SETTINGS_FIELDS = [
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
     ("race_enabled",            "RACE_ENABLED",            "赛车开关",                  "bool",  0,   1,       "race"),
     ("race_admin_only",         "RACE_ADMIN_ONLY",         "赛车仅管理员开局",          "bool",  0,   1,       "race"),
+    ("rake_enabled",            "RAKE_ENABLED",            "游戏抽水开关(官方模式结算)", "bool",  0,   1,       "rake"),
+    ("rake_percent",            "RAKE_PERCENT",            "抽水比例(%·赢家净赢抽成)",  "int",   0,   50,      "rake"),
+    ("rake_min_net",            "RAKE_MIN_NET",            "抽水门槛(净赢低于此值不抽)", "int",   0,   1000000, "rake"),
     ("broadcast_enabled",       "BROADCAST_ENABLED",       "大奖战报自动广播开关",      "bool",  0,   1,       "general"),
     ("broadcast_min_amount",    "BROADCAST_MIN_AMOUNT",    "战报阈值(单局净赢≥此值广播)", "int",  100, 10000000,"general"),
     ("game_starting_chips",     "GAME_STARTING_CHIPS",     "新玩家初始积分(全游戏统一)", "int",  100, 1000000, "general"),
@@ -289,9 +300,6 @@ SETTINGS_FIELDS = [
     ("inherit_daily_limit",     "INHERIT_DAILY_LIMIT",     "每日转赠上限(0=不限,防小号)", "int",  0,   1000000, "points/inherit"),
     ("fund_flow_alert",         "FUND_FLOW_ALERT",         "资金流标红阈值(单对单向累计)", "int",  100, 10000000,"admin/fundflow"),
     ("inherit_fee_percent",     "INHERIT_FEE_PERCENT",     "转赠手续费(%,0=无)",        "int",   0,   50,      "points/inherit"),
-    ("auction_enabled",         "AUCTION_ENABLED",         "积分拍卖开关",              "bool",  0,   1,       "points/auction"),
-    ("auction_step",            "AUCTION_STEP",            "每次加价幅度(积分)",        "int",   10,  100000,  "points/auction"),
-    ("auction_duration",        "AUCTION_DURATION",        "拍卖时长(秒)",              "int",   30,  3600,    "points/auction"),
     ("guess_enabled",           "GUESS_ENABLED",           "积分竞猜开关",              "bool",  0,   1,       "points/guess"),
     ("guess_min_bet",           "GUESS_MIN_BET",           "竞猜单注下限(积分)",        "int",   1,   100000,  "points/guess"),
     ("guess_max_bet",           "GUESS_MAX_BET",           "竞猜单注上限(积分,0=不限)", "int",   0,   1000000, "points/guess"),
@@ -317,8 +325,30 @@ SETTINGS_FIELDS = [
     ("redeem_msg_list",         "REDEEM_MSG_LIST",         "兑换商品行模板",            "text",  0,   0,       "points/redeem"),
     ("redeem_msg_ok_group",     "REDEEM_MSG_OK_GROUP",     "兑换成功群通知",            "text",  0,   0,       "points/redeem"),
     ("redeem_msg_ok_dm",        "REDEEM_MSG_OK_DM",        "兑换成功私聊通知",          "text",  0,   0,       "points/redeem"),
-    ("box_enabled",             "BOX_ENABLED",             "积分盲盒开关",              "bool",  0,   1,       "points/box"),
-    ("box_price",               "BOX_PRICE",               "单次盲盒价格(积分)",        "int",   1,   1000000, "points/box"),
+    # ---------- 邀请系统（群组设置 → 邀请系统，子页面制照阿福模板） ----------
+    ("invite_enabled",          "INVITE_ENABLED",          "邀请系统开关",              "bool",  0,   1,       "invite/config"),
+    ("invite_notify",           "INVITE_NOTIFY",           "邀请人私聊通知开关",        "bool",  0,   1,       "invite/config"),
+    ("invite_reward",           "INVITE_REWARD",           "邀请奖励(积分/人)",         "int",   0,   1000000, "invite/config"),
+    ("invite_audit_enabled",    "INVITE_AUDIT_ENABLED",    "新邀请需人工审核开关",      "bool",  0,   1,       "invite/config"),
+    ("invite_audit_award",      "INVITE_AUDIT_AWARD",      "审核通过后补发奖励开关",    "bool",  0,   1,       "invite/config"),
+    ("invite_link_cmd",         "INVITE_LINK_CMD",         "邀请链接指令(不带斜杠)",    "cmd",   0,   0,       "invite/config"),
+    ("invite_rank_admin_only",  "INVITE_RANK_ADMIN_ONLY",  "排行仅管理员可查开关",      "bool",  0,   1,       "invite/config"),
+    ("invite_rank_today_cmd",   "INVITE_RANK_TODAY_CMD",   "今日邀请排行指令",          "cmd",   0,   0,       "invite/config"),
+    ("invite_rank_month_cmd",   "INVITE_RANK_MONTH_CMD",   "本月邀请排行指令",          "cmd",   0,   0,       "invite/config"),
+    ("invite_rank_all_cmd",     "INVITE_RANK_ALL_CMD",     "总邀请排行指令",            "cmd",   0,   0,       "invite/config"),
+    ("invite_ok_group",         "INVITE_OK_GROUP",         "邀请成功群内通知模板",      "text",  0,   0,       "invite/config"),
+    ("invite_link_msg",         "INVITE_LINK_MSG",         "邀请链接消息模板",          "text",  0,   0,       "invite/config"),
+    ("invite_rank_today_msg",   "INVITE_RANK_TODAY_MSG",   "今日邀请排行标题模板",      "text",  0,   0,       "invite/config"),
+    ("invite_rank_month_msg",   "INVITE_RANK_MONTH_MSG",   "本月邀请排行标题模板",      "text",  0,   0,       "invite/config"),
+    ("invite_rank_all_msg",     "INVITE_RANK_ALL_MSG",     "总邀请排行标题模板",        "text",  0,   0,       "invite/config"),
+    ("invite_rank_line_fmt",    "INVITE_RANK_LINE_FMT",    "排行行格式模板",            "text",  0,   0,       "invite/config"),
+    ("invite_invalid_msg",      "INVITE_INVALID_MSG",      "无效邀请链接消息",          "text",  0,   0,       "invite/config"),
+    ("invite_self_msg",         "INVITE_SELF_MSG",         "自己邀请自己消息",          "text",  0,   0,       "invite/config"),
+    ("invite_pre_enabled",      "INVITE_PRE_ENABLED",      "进群前置条件开关",          "bool",  0,   1,       "invite/pre"),
+    ("invite_pre_points",       "INVITE_PRE_POINTS",       "前置-被邀请人积分≥N(0=不限)", "int", 0,  1000000, "invite/pre"),
+    ("invite_pre_msgs",         "INVITE_PRE_MSGS",         "前置-被邀请人发言≥N条(0=不限)", "int", 0, 100000,  "invite/pre"),
+    ("invite_pre_avatar",       "INVITE_PRE_AVATAR",       "前置-被邀请人必须有头像",   "bool",  0,   1,       "invite/pre"),
+    ("invite_pre_username",     "INVITE_PRE_USERNAME",     "前置-被邀请人必须有用户名", "bool",  0,   1,       "invite/pre"),
 ]
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时由 load_settings 覆盖
@@ -368,6 +398,22 @@ LOTTERY_MSG_RESULT = (
 )
 OBSERVE_ENABLED = 0         # 新成员观察期开关（1=开启：入群未满时长的成员发言即删并禁言到期满）
 OBSERVE_SECONDS = 300       # 观察期时长（秒）
+# ---------- 邀请系统 ----------
+INVITE_ENABLED = 1          # 邀请系统总开关
+INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
+INVITE_REWARD = 50          # 每成功邀请 1 人奖励积分
+INVITE_AUDIT_ENABLED = 0    # 新邀请需人工审核开关（审核页一键通过/拒绝）
+INVITE_AUDIT_AWARD = 1      # 审核通过后补发奖励开关
+INVITE_LINK_CMD = "link"    # 获取专属邀请链接指令
+INVITE_RANK_ADMIN_ONLY = 0  # 邀请排行仅管理员可查开关
+INVITE_RANK_TODAY_CMD = "今日邀请排行"
+INVITE_RANK_MONTH_CMD = "本月邀请排行"
+INVITE_RANK_ALL_CMD = "总邀请排行"
+INVITE_PRE_ENABLED = 0      # 进群前置条件开关（被邀请人需满足才发奖，否则记 unmet）
+INVITE_PRE_POINTS = 0       # 前置：被邀请人积分 ≥ N（0=不限）
+INVITE_PRE_MSGS = 0         # 前置：被邀请人累计发言 ≥ N 条（0=不限）
+INVITE_PRE_AVATAR = 0       # 前置：被邀请人必须有头像
+INVITE_PRE_USERNAME = 0     # 前置：被邀请人必须有用户名
 # ===== 定时刷屏识别（TG 定时消息发出后无标记，只能按行为特征抓：复读机 + 定时器节奏） =====
 ANTISPAM_ENABLED = 1        # 1=开启
 ANTISPAM_REPEAT_N = 3       # 复读命中：窗口内同内容第 N 条
@@ -413,9 +459,6 @@ POINT_LEVELS = [
 MALL_ITEMS = []  # [{"name": 商品名, "value": 价格}]
 INHERIT_ENABLED = 1
 INHERIT_FEE_PERCENT = 0
-AUCTION_ENABLED = 1
-AUCTION_STEP = 100
-AUCTION_DURATION = 60
 GUESS_ENABLED = 1           # 积分竞猜开关
 GUESS_MIN_BET = 10          # 竞猜单注下限
 GUESS_MAX_BET = 0           # 竞猜单注上限（0=不限）
@@ -423,8 +466,6 @@ GUESS_DURATION = 5          # 竞猜下注时长（分钟），到点封盘等�
 BUY_ENABLED = 1
 BUY_MIN = 1000
 BUY_MAX = 100000
-BOX_ENABLED = 0             # 积分盲盒开关
-BOX_PRICE = 100             # 单次盲盒价格
 REDEEM_CMD = "积分兑换"      # 积分兑换触发词
 REDEEM_MAX_PER_USER = 0     # 每人最大兑换数量（0=不限）
 REDEEM_START = ""           # 兑换开始时间（YYYY-MM-DD HH:MM，留空不限）
@@ -461,7 +502,23 @@ MSG_TPL_DEFAULTS = {
     "redeem_msg_list": "🎁 {goodsName}｜{pointNum} 积分｜剩余 {leftNum}",
     "redeem_msg_ok_group": "🎉 {name} 兑换成功：{goodsName}（-{pointNum} 积分）\n💰 余额 {balance}",
     "redeem_msg_ok_dm": "🎉 你已成功兑换「{goodsName}」（{pointNum} 积分），请联系管理员发货。",
+    "invite_ok_group": "🎉 {invitee} 通过 {inviter} 的邀请加入本群！\n💰 {inviter} 获得邀请奖励 {reward} 积分",
+    "invite_link_msg": "🎟️ 你的专属邀请链接：\n{link}\n\n每成功邀请 1 位新朋友进群，奖励 {reward} 积分！",
+    "invite_rank_today_msg": "📈 <b>今日邀请排行</b>",
+    "invite_rank_month_msg": "📅 <b>本月邀请排行</b>",
+    "invite_rank_all_msg": "🏆 <b>总邀请排行</b>",
+    "invite_rank_line_fmt": "{i}. {name}｜邀请 {count} 人",
+    "invite_invalid_msg": "⚠️ {name} 的邀请链接无效，请让邀请人重新生成",
+    "invite_self_msg": "😅 不能邀请自己哦",
 }
+INVITE_OK_GROUP = MSG_TPL_DEFAULTS["invite_ok_group"]
+INVITE_LINK_MSG = MSG_TPL_DEFAULTS["invite_link_msg"]
+INVITE_RANK_TODAY_MSG = MSG_TPL_DEFAULTS["invite_rank_today_msg"]
+INVITE_RANK_MONTH_MSG = MSG_TPL_DEFAULTS["invite_rank_month_msg"]
+INVITE_RANK_ALL_MSG = MSG_TPL_DEFAULTS["invite_rank_all_msg"]
+INVITE_RANK_LINE_FMT = MSG_TPL_DEFAULTS["invite_rank_line_fmt"]
+INVITE_INVALID_MSG = MSG_TPL_DEFAULTS["invite_invalid_msg"]
+INVITE_SELF_MSG = MSG_TPL_DEFAULTS["invite_self_msg"]
 SIGN_MSG_TPL = MSG_TPL_DEFAULTS["sign_msg_tpl"]
 QUERY_MSG_TPL = MSG_TPL_DEFAULTS["query_msg_tpl"]
 ADD_MSG_TPL = MSG_TPL_DEFAULTS["add_msg_tpl"]
@@ -495,11 +552,11 @@ sign_data = defaultdict(lambda: defaultdict(dict))   # sign_data[cid][uid] = {"l
 chat_today = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # chat_today[date][cid][uid] = 当日聊天已得积分
 mall_orders = []                                     # [{"ts","cid","uid","name","item","price"}]
 chat_rules = []                                      # 阿福式聊天积分规则 [{"match","points","on"}] 命中即停；空=走每N字符旧规则
-box_pool = []                                        # 盲盒奖品池 [{"name","weight","points"}] points=0 谢谢参与
 buy_packages = []                                    # 购买积分套餐 [{"name","cny","points","sort","on"}]
 rp_packets = {}                                      # pid -> {"cid","from","left_amt","left_n","grabbed":{uid:amt},"ts","msg_id"}
-auctions = {}                                        # cid -> {"item","price","top_uid","end_ts","msg_id","task"} 拍卖（托管竞得者积分）
 guesses = {}                                         # cid -> 竞猜 {"q","a","b","end_ts","locked","bets":{uid:{"A","B"}},"side_pots":{"A","B"},"msg_id","task"}
+invite_links = {}                                    # cid -> {uid: {"link","invite_id","ts"}} 每人专属邀请链接
+invite_records = {}                                  # "cid:uid" -> {"cid","inviter","invitee","invitee_name","ts","audit","left","award","link"}
 buy_orders = {}                                      # oid -> {"cid","uid","amount","ts"} 购买积分申请（管理员人工确认）
 warn_counts = defaultdict(lambda: defaultdict(int))  # warn_counts[cid][uid] = 警告次数（网页成员列表加减）
 redeem_goods = []                                    # 积分兑换商品 [{"name","price","left","redeemed","desc","on"}] left=0 不限
@@ -537,7 +594,7 @@ def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=Non
     payload = {"fields": cfg, "web_password": password,
                "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or [],
                "sidebar_order": sidebar_order,
-               "chat_rules": list(chat_rules), "box_pool": list(box_pool), "buy_packages": list(buy_packages),
+               "chat_rules": list(chat_rules), "buy_packages": list(buy_packages),
                "point_levels": list(POINT_LEVELS), "mall_items": list(MALL_ITEMS),
                "redeem_goods": list(redeem_goods)}
     try:
@@ -562,7 +619,9 @@ def _sync_dyn_aliases():
     aliases = globals().get("CMD_ALIASES")
     if aliases is None:
         return
-    for gname, fn in (("QUERY_CMD", cmd_my_points), ("SIGN_CMD", cmd_sign), ("RANK_CMD", cmd_points_rank), ("LEVEL_CMD", cmd_my_level), ("REDEEM_CMD", cmd_points_redeem)):
+    for gname, fn in (("QUERY_CMD", cmd_my_points), ("SIGN_CMD", cmd_sign), ("RANK_CMD", cmd_points_rank), ("LEVEL_CMD", cmd_my_level), ("REDEEM_CMD", cmd_points_redeem),
+                      ("INVITE_LINK_CMD", cmd_invite_link), ("INVITE_RANK_TODAY_CMD", cmd_invite_rank_today),
+                      ("INVITE_RANK_MONTH_CMD", cmd_invite_rank_month), ("INVITE_RANK_ALL_CMD", cmd_invite_rank_all)):
         old = _DYN_CMD_OWNED.get(gname)
         if old and aliases.get(old) is fn:
             aliases.pop(old, None)
@@ -747,8 +806,8 @@ def load_settings():
         so = payload.get("sidebar_order") or []
         if isinstance(so, list):
             SIDEBAR_ORDER.clear(); SIDEBAR_ORDER.extend(str(x) for x in so)
-        # 表格化数据：聊天积分规则 / 盲盒奖品池 / 购买积分套餐
-        for key, gl in (("chat_rules", chat_rules), ("box_pool", box_pool), ("buy_packages", buy_packages),
+        # 表格化数据：聊天积分规则 / 购买积分套餐
+        for key, gl in (("chat_rules", chat_rules), ("buy_packages", buy_packages),
                         ("point_levels", POINT_LEVELS), ("mall_items", MALL_ITEMS),
                         ("redeem_goods", redeem_goods)):
             v = payload.get(key)
@@ -1011,8 +1070,6 @@ def force_save_now():
                 "sign_data": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in sign_data.items()},
                 "chat_today": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in chats.items()} for date, chats in chat_today.items()},
                 "mall_orders": mall_orders[-200:],
-                "auctions": {str(cid): {"item": a["item"], "price": a["price"], "top_uid": a["top_uid"],
-                                        "step": a.get("step", AUCTION_STEP), "end_ts": a["end_ts"], "msg_id": a["msg_id"]} for cid, a in auctions.items()},
                 "guesses": {str(cid): {"q": g["q"], "a": g["a"], "b": g["b"], "end_ts": g["end_ts"],
                                        "locked": bool(g.get("locked")), "msg_id": g.get("msg_id"),
                                        "bets": {str(uid): {"A": int(v["A"]), "B": int(v["B"])} for uid, v in g["bets"].items()},
@@ -1022,6 +1079,9 @@ def force_save_now():
                 "redeem_counts": {str(uid): int(v) for uid, v in redeem_counts.items()},
                 "redeem_orders": redeem_orders[-500:],
                 "game_flows": game_flows[-2000:],
+                "invite_records": {k: dict(v) for k, v in invite_records.items() if isinstance(v, dict)},
+                "invite_links": {str(cid): {str(uid): dict(v) for uid, v in users.items()}
+                                 for cid, users in invite_links.items()},
                 "warn_counts": {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in warn_counts.items()},
                 "member_profiles": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in member_profiles.items()},
                 "whitelist": {str(cid): sorted(users) for cid, users in whitelist.items()},
@@ -1033,7 +1093,7 @@ def force_save_now():
                 "user_first_seen": {str(uid): ts for uid, ts in user_first_seen.items()},
                 # 设置快照内嵌进数据：跟着备份/恢复一起走，容器重建后设置不回退
                 "_settings": dict(SETTINGS_SNAPSHOT, chat_rules=list(chat_rules),
-                                  box_pool=list(box_pool), buy_packages=list(buy_packages),
+                                  buy_packages=list(buy_packages),
                                   point_levels=list(POINT_LEVELS), mall_items=list(MALL_ITEMS),
                                   redeem_goods=list(redeem_goods)),
                 # 群组抽奖：每群活动（含已结束的，方便历史展示）
@@ -1194,14 +1254,6 @@ def load_data():
                     chat_today[str(date)][int(cid)][int(uid)] = int(v)
         mall_orders.clear()
         mall_orders.extend(data.get("mall_orders", [])[-200:])
-        auctions.clear()
-        for cid, a in data.get("auctions", {}).items():
-            try:
-                auctions[int(cid)] = {"item": str(a["item"]), "price": int(a["price"]),
-                                      "top_uid": int(a["top_uid"]) if a.get("top_uid") else None,
-                                      "step": int(a.get("step", AUCTION_STEP)),
-                                      "end_ts": float(a["end_ts"]), "msg_id": a.get("msg_id"), "task": None}
-            except (KeyError, ValueError, TypeError): continue
         guesses.clear()
         for cid, g in data.get("guesses", {}).items():
             try:
@@ -1229,6 +1281,14 @@ def load_data():
         game_flows.clear()
         for o in data.get("game_flows", [])[-2000:]:
             if isinstance(o, dict): game_flows.append(dict(o))
+        invite_records.clear()
+        for k, v in data.get("invite_records", {}).items():
+            if isinstance(v, dict): invite_records[str(k)] = dict(v)
+        invite_links.clear()
+        for cid, users in data.get("invite_links", {}).items():
+            for uid, v in users.items():
+                try: invite_links[int(cid)][int(uid)] = dict(v)
+                except (KeyError, ValueError, TypeError): continue
         for cid, users in data.get("warn_counts", {}).items():
             for uid, v in users.items():
                 try: warn_counts[int(cid)][int(uid)] = int(v)
@@ -1542,6 +1602,38 @@ def ledger_add(cid, frm, to, amt, typ):
     """资金流台账：红包领取/转赠等人对人转移逐笔记账（防小号审查用，留 5000 条）。"""
     ledger.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "frm": frm, "to": to, "amt": amt, "typ": typ})
     if len(ledger) > 5000: del ledger[:len(ledger) - 5000]
+
+
+async def apply_rake(app, cid, nets, label):
+    """游戏抽水：官方模式结算后对赢家净赢按 RAKE_PERCENT% 抽成，回收销毁（不回流奖池）。
+
+    nets: {uid: 本局净输赢}（正=赢）。只抽真实用户（uid>0）且净赢 ≥ RAKE_MIN_NET 的赢家。
+    扣款直接从统一钱包 game_chips 扣；台账 typ=「抽水-<label>」；群内轻提示（可静默失败）。
+    返回 (总抽水, {uid: 该玩家被抽金额})。
+    """
+    if not RAKE_ENABLED or RAKE_PERCENT <= 0:
+        return 0, {}
+    rake_total, rake_per = 0, {}
+    for uid, net in (nets or {}).items():
+        if not isinstance(uid, int) or uid <= 0 or net <= 0:
+            continue
+        if net < RAKE_MIN_NET:
+            continue
+        amt = int(net * RAKE_PERCENT / 100)
+        if amt <= 0:
+            continue
+        rake_per[uid] = amt
+        rake_total += amt
+        async with wallet_locks[uid]:
+            game_chips[cid][uid] = max(0, game_chips[cid].get(uid, 0) - amt)
+        ledger_add(cid, uid, 0, amt, f"抽水-{label}")
+    if rake_total:
+        save_data()
+        try:
+            await safe_send(app.bot, cid, f"💸 本局{label}系统抽水 <b>{rake_total}</b> 积分（{RAKE_PERCENT}%）", parse_mode="HTML")
+        except Exception:
+            pass
+    return rake_total, rake_per
 
 
 def record_game_flows(cid, nets, typ):
@@ -2110,7 +2202,9 @@ async def settle_poker(game, app):
 
         # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌送分"）；排位分不记
         if game.mode == "official" and not game.season:
-            record_game_flows(game.chat_id, {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}, "德州")
+            _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}
+            record_game_flows(game.chat_id, _nets, "德州")
+            await apply_rake(app, game.chat_id, _nets, "德州")
 
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（排位赛不播）
         if game.mode == "official" and not game.season:
@@ -2500,6 +2594,8 @@ class HorseRace:
                 if best and best[5] > 0:
                     detail = f"🐴 押中 {HORSE_EMOJI[winner]}{HORSE_NAMES[winner]}（赔率 {best[6]:.1f}）"
                     await broadcast_big_win(app, self.chat_id, best[0], "🏎️ 赛车大赛", best[5], detail)
+                if self.mode == "official":
+                    await apply_rake(app, self.chat_id, {s[0]: s[5] for s in settlements}, "赛车")
 
                 available_pool = self.jackpot + self.pool
                 supplement = max(0, total_payout - available_pool)
@@ -2609,9 +2705,9 @@ async def require_group_chat(update, game_name, cmd, context=None):
 
 async def cmd_start(update, context):
     if not await need_auth(update, context): return
-    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
+    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n🎟️ 邀请有礼：\n/link - 领取本群专属邀请链接\n今日邀请排行 / 本月邀请排行 / 总邀请排行 - 查看邀请榜\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
     if is_bot_admin(update.effective_user.id):
-        text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拍卖 物品 起拍价 - 发起积分拍卖\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
+        text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
     await send_reply(update, context, text)
 
 # ---------- 21点 界面与逻辑 ----------
@@ -2775,6 +2871,7 @@ async def update_blackjack_ui(game, app):
             if game.mode == "official" and payout_plan:
                 best = max(payout_plan, key=lambda x: x[2])
                 if best[2] > 0: await broadcast_big_win(app, game.chat_id, best[0], "♠️ 21点", best[2])
+                await apply_rake(app, game.chat_id, {uid: net for uid, _p, net in payout_plan}, "21点")
 
             # 记录庄家历史 (仅记录本局主要趋势)
             if game.mode == "official":
@@ -2957,6 +3054,9 @@ BROADCAST_ENABLED = 1        # 大奖战报自动广播开关（推送到其他�
 BROADCAST_MIN_AMOUNT = 20000 # 战报阈值：单局净赢 ≥ 此值才广播
 BACKUP_INTERVAL_HOURS = 24   # 自动备份间隔（小时），启动时读取
 BACKUP_ENABLED = 1           # 自动备份开关（job 常驻，回调里查开关，保存即时生效）
+RAKE_ENABLED = 1             # 游戏抽水总开关（官方模式结算后对赢家净赢抽成，回收销毁不回流奖池）
+RAKE_PERCENT = 10            # 抽水比例（%）：赢家净赢 × 比例
+RAKE_MIN_NET = 0             # 抽水门槛：单局净赢低于此值不抽（0=全抽）
 JINHUA_HAND_NAMES = {5: "豹子", 4: "同花顺", 3: "金花", 2: "顺子", 1: "对子", 0: "散牌"}
 
 
@@ -3498,7 +3598,9 @@ async def settle_jinhua(game, app):
             lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}", ""])
         # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌/比牌倒赔送分"）
         if game.mode == "official":
-            record_game_flows(game.chat_id, {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}, "金花")
+            _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}
+            record_game_flows(game.chat_id, _nets, "金花")
+            await apply_rake(app, game.chat_id, _nets, "金花")
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（豹子特别标注）
         if game.mode == "official":
             top_uid, top_net = None, 0
@@ -4850,12 +4952,6 @@ async def on_button(update, context):
                 await q.answer("红包已结束或过期", show_alert=True); return
             await _rp_grab(p, data[8:], uid, context, q)
             return
-        if data.startswith("auc_bid_"):
-            try: auc_cid = int(data[8:])
-            except ValueError:
-                await q.answer("无效数据", show_alert=True); return
-            await _auction_bid(auc_cid, uid, context, q)
-            return
         if data.startswith("guessbet_"):
             try: _, side, amount = data.split("_"); amount = int(amount)
             except ValueError:
@@ -6179,7 +6275,7 @@ async def _rp_grab(p, pid, uid, context, q):
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧧 抢红包", callback_data=f"rp_grab_{pid}")]]))
 
 
-# ---------- 积分转赠 / 积分拍卖 / 购买积分（统一钱包） ----------
+# ---------- 积分转赠 / 购买积分（统一钱包） ----------
 async def cmd_inherit(update, context):
     """积分转赠（继承）：把积分转给同群其他成员，可收手续费。"""
     if not await need_auth(update, context): return
@@ -6225,83 +6321,6 @@ async def cmd_inherit(update, context):
         amount=amount, fee=fee_txt, recv=recv, balance=game_chips[cid][uid]))
     await _check_level_change(context.application, cid, uid, old_self, game_chips[cid][uid])
     await _check_level_change(context.application, cid, target, old_tgt, game_chips[cid][target])
-
-
-def _auction_text(cid):
-    a = auctions[cid]
-    remain = max(0, int(a["end_ts"] - now_bj().timestamp()))
-    top = user_names.get(a["top_uid"], str(a["top_uid"])) if a["top_uid"] else "（暂无人出价）"
-    return (f"🔨 积分拍卖｜{a['item']}\n"
-            f"💰 当前最高价：{a['price']}（{top}）\n"
-            f"⏱ 剩余 {remain} 秒｜每次加价 {a['step']}\n点击按钮出价，出价即托管，价高者得！")
-
-async def _auction_settle(cid, app):
-    """拍卖倒计时结算：有主则成交（出价时已托管支付），无主流拍。"""
-    a = auctions.get(cid)
-    if not a: return
-    remain = a["end_ts"] - now_bj().timestamp()
-    if remain > 0:
-        await asyncio.sleep(remain)
-        a = auctions.get(cid)
-        if not a: return
-    auctions.pop(cid, None); save_data()
-    try:
-        if a["top_uid"]:
-            await safe_send(app.bot, cid, f"🔨 拍卖成交｜{a['item']}\n🎉 {await get_name(app, a['top_uid'], cid=cid)} 以 {a['price']} 积分竞得！（出价时已托管支付）")
-        else:
-            await safe_send(app.bot, cid, f"🔨 拍卖流拍｜{a['item']}（无人出价）")
-    except Exception:
-        logger.exception("拍卖结算播报异常（已吞并）")
-
-
-async def cmd_auction(update, context):
-    """管理员发起积分拍卖：/拍卖 物品名 起拍价，按钮加价，价高者得。"""
-    if not await need_auth(update, context): return
-    if not is_group_chat(update):
-        await send_reply(update, context, "⚠️ 拍卖请在群聊中使用。"); return
-    if not is_bot_admin(update.effective_user.id):
-        await send_reply(update, context, "❌ 仅 Bot 管理员可发起拍卖。"); return
-    if not AUCTION_ENABLED:
-        await send_reply(update, context, "❌ 拍卖功能未开启（网页「积分系统 → 积分拍卖」可开启）。"); return
-    cid = update.effective_chat.id
-    args = context.args or []
-    if len(args) < 2 or not args[-1].isdigit():
-        await send_reply(update, context, "用法：/拍卖 物品名 起拍价"); return
-    if cid in auctions:
-        await send_reply(update, context, "⚠️ 本群已有拍卖进行中，结标后再开。"); return
-    item, price = " ".join(args[:-1]), int(args[-1])
-    if price < 0:
-        await send_reply(update, context, "❌ 起拍价不能为负。"); return
-    auctions[cid] = {"item": item, "price": price, "top_uid": None, "step": AUCTION_STEP,
-                     "end_ts": now_bj().timestamp() + AUCTION_DURATION, "msg_id": None, "task": None}
-    msg = await safe_send(context.bot, cid, _auction_text(cid),
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🔨 加价 {AUCTION_STEP}", callback_data=f"auc_bid_{cid}")]]))
-    if msg: auctions[cid]["msg_id"] = msg.message_id
-    auctions[cid]["task"] = asyncio.create_task(_auction_settle(cid, context.application))
-    save_data()
-
-
-async def _auction_bid(cid, uid, context, q):
-    """出价：扣新出价者（托管），退前最高价者，刷新看板。"""
-    a = auctions.get(cid)
-    if not a:
-        await q.answer("拍卖已结束", show_alert=True); return
-    if now_bj().timestamp() > a["end_ts"]:
-        await q.answer("拍卖已结束，结算中…", show_alert=True); return
-    if a["top_uid"] == uid:
-        await q.answer("你已经是当前最高价了"); return
-    new_price = a["price"] + (a["step"] if a["top_uid"] is not None else 0)
-    async with wallet_locks[uid]:
-        if game_chips[cid][uid] < new_price:
-            await q.answer(f"积分不足：需 {new_price}，你当前 {game_chips[cid][uid]}", show_alert=True); return
-        game_chips[cid][uid] -= new_price
-        if a["top_uid"]:
-            game_chips[cid][a["top_uid"]] += a["price"]
-        a["price"], a["top_uid"] = new_price, uid
-        save_data()
-    await q.answer(f"✅ 出价成功：{new_price}")
-    await safe_edit(context.bot, cid, a["msg_id"], _auction_text(cid),
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🔨 加价 {a['step']}", callback_data=f"auc_bid_{cid}")]]))
 
 
 # ---------- 积分竞猜：管理开局面两方下注，封盘后按比例瓜分奖池 ----------
@@ -6397,6 +6416,7 @@ async def _guess_do_settle(app, cid, winner):
         won = next((a for w, _s, a, _o in paid if w == uid), 0)
         nets[uid] = won - staked
     record_game_flows(cid, nets, "竞猜")
+    await apply_rake(app, cid, nets, "竞猜")
     guesses.pop(cid, None)
     save_data()
     ans_txt = g["a"] if winner == "A" else g["b"]
@@ -6436,6 +6456,29 @@ async def _guess_do_cancel(app, cid):
     return None
 
 
+async def _guess_do_create(app, cid, q, a, b, duration):
+    """创建竞猜并发布到群（命令与网页共用）。返回错误文案或 None。"""
+    if not GUESS_ENABLED:
+        return "竞猜功能未开启（网页「积分系统 → 积分竞猜」可开启）"
+    if cid in guesses:
+        return "本群已有竞猜进行中，结算或撤销后再开"
+    q, a, b = (q or "").strip()[:50], (a or "").strip()[:20], (b or "").strip()[:20]
+    if not q or not a or not b:
+        return "题目与选项 A/B 不能为空"
+    try:
+        duration = max(1, min(1440, int(duration)))
+    except (TypeError, ValueError):
+        duration = GUESS_DURATION
+    guesses[cid] = {"q": q, "a": a, "b": b,
+                    "end_ts": now_bj().timestamp() + duration * 60, "locked": False,
+                    "bets": {}, "side_pots": {"A": 0, "B": 0}, "msg_id": None, "task": None}
+    msg = await safe_send(app.bot, cid, _guess_text(cid), reply_markup=_guess_buttons(cid))
+    if msg: guesses[cid]["msg_id"] = msg.message_id
+    guesses[cid]["task"] = asyncio.create_task(_guess_close(cid, app))
+    save_data()
+    return None
+
+
 async def cmd_guess_open(update, context):
     """管理员发起积分竞猜：/开竞猜 题目/选项A/选项B [时长分钟]，按钮下注，封盘后按比例瓜分。"""
     if not await need_auth(update, context): return
@@ -6443,27 +6486,15 @@ async def cmd_guess_open(update, context):
         await send_reply(update, context, "⚠️ 竞猜请在群聊中使用。"); return
     if not is_bot_admin(update.effective_user.id):
         await send_reply(update, context, "❌ 仅 Bot 管理员可发起竞猜。"); return
-    if not GUESS_ENABLED:
-        await send_reply(update, context, "❌ 竞猜功能未开启（网页「积分系统 → 积分竞猜」可开启）。"); return
     cid = update.effective_chat.id
     spec = " ".join(context.args or []).strip()
     parts = [p.strip() for p in spec.split("/") if p.strip()]
     if len(parts) < 3 or len(parts) > 4:
         await send_reply(update, context, "用法：/开竞猜 题目/选项A/选项B [时长分钟]"); return
-    duration = GUESS_DURATION
-    if len(parts) == 4:
-        if not parts[3].isdigit():
-            await send_reply(update, context, "❌ 时长必须是分钟数字。"); return
-        duration = max(1, min(1440, int(parts[3])))
-    if cid in guesses:
-        await send_reply(update, context, "⚠️ 本群已有竞猜进行中，结算或撤销后再开。"); return
-    guesses[cid] = {"q": parts[0][:50], "a": parts[1][:20], "b": parts[2][:20],
-                    "end_ts": now_bj().timestamp() + duration * 60, "locked": False,
-                    "bets": {}, "side_pots": {"A": 0, "B": 0}, "msg_id": None, "task": None}
-    msg = await safe_send(context.bot, cid, _guess_text(cid), reply_markup=_guess_buttons(cid))
-    if msg: guesses[cid]["msg_id"] = msg.message_id
-    guesses[cid]["task"] = asyncio.create_task(_guess_close(cid, context.application))
-    save_data()
+    err = await _guess_do_create(context.application, cid, parts[0], parts[1], parts[2],
+                                 parts[3] if len(parts) == 4 else GUESS_DURATION)
+    if err:
+        await send_reply(update, context, f"❌ {err}")
 
 
 async def cmd_guess_settle(update, context):
@@ -6490,32 +6521,6 @@ async def cmd_guess_cancel(update, context):
     if err:
         await send_reply(update, context, f"❌ {err}")
 
-
-async def cmd_box(update, context):
-    """积分盲盒：扣 BOX_PRICE 开一次，按权重随机 BOX_POOL，结果走 send_settle 自动回收。"""
-    if not await need_auth(update, context): return
-    if not BOX_ENABLED:
-        await send_reply(update, context, "❌ 盲盒未开启（网页「积分系统 → 积分盲盒」可开启）。"); return
-    if not box_pool:
-        await send_reply(update, context, "🎁 奖品池还是空的，管理员在后台「积分盲盒」里配置。"); return
-    cid, uid = update.effective_chat.id, update.effective_user.id
-    async with wallet_locks[uid]:
-        if game_chips[cid][uid] < BOX_PRICE:
-            await send_reply(update, context, f"❌ 积分不足：开一次需要 {BOX_PRICE}，你当前 {game_chips[cid][uid]}。"); return
-        game_chips[cid][uid] -= BOX_PRICE
-        weights = [max(1, int(p.get("weight", 1) or 1)) for p in box_pool]
-        pick = random.choices(box_pool, weights=weights, k=1)[0]
-        pts = int(pick.get("points", 0) or 0)
-        game_chips[cid][uid] += pts
-        save_data()
-    name = user_names.get(uid) or str(uid)
-    if pts > 0:
-        text = (f"🎁━━━━━━━━━━━━━━━━━\n🎉 <b>{html.escape(name)}</b> 开出了 <b>{html.escape(str(pick.get('name', '?')))}</b>！\n"
-                f"💰 奖励 <b>{pts}</b> 积分（花费 {BOX_PRICE}）\n🎁━━━━━━━━━━━━━━━━━")
-    else:
-        text = (f"🎁━━━━━━━━━━━━━━━━━\n🎉 <b>{html.escape(name)}</b> 开出了 <b>{html.escape(str(pick.get('name', '?')))}</b>……\n"
-                f"🙏 下次一定（花费 {BOX_PRICE}）\n🎁━━━━━━━━━━━━━━━━━")
-    await send_settle(context.application, cid, text)   # 结算统一出口：自动回收
 
 async def cmd_buy_points(update, context):
     """购买积分（人工确认制，无需支付通道）：玩家申请 → 私聊通知管理员 → 管理员一键确认到账。"""
@@ -6742,6 +6747,190 @@ async def cmd_adminlist_tg(update, context):
         lines.append(f"{mark} {a.user.first_name or ''}（{a.user.id}）")
     await safe_send_long(context.bot, cid, "\n".join(lines))
 
+# ---------- 邀请系统：专属链接追踪进群、奖励、审核、排行 ----------
+
+def _invite_count(inviter, cid=None):
+    """邀请人有效邀请数（audit=ok 且未退群）；cid 限定群，None=全部群。"""
+    n = 0
+    for rec in invite_records.values():
+        if rec.get("inviter") != inviter or rec.get("audit") != "ok" or rec.get("left"):
+            continue
+        if cid is not None and rec.get("cid") != cid:
+            continue
+        n += 1
+    return n
+
+
+async def _invite_pre_reasons(cid, uid, cmu):
+    """进群前置条件检查：返回未满足项名称列表（空=全部满足）。"""
+    if not INVITE_PRE_ENABLED:
+        return []
+    reasons = []
+    if INVITE_PRE_POINTS > 0 and game_chips.get(cid, {}).get(uid, 0) < INVITE_PRE_POINTS:
+        reasons.append(f"积分≥{INVITE_PRE_POINTS}")
+    if INVITE_PRE_MSGS > 0:
+        msgs = int((member_profiles.get(cid, {}).get(uid, {}) or {}).get("msgs", 0) or 0)
+        if msgs < INVITE_PRE_MSGS:
+            reasons.append(f"发言≥{INVITE_PRE_MSGS}条")
+    user = getattr(getattr(cmu, "new_chat_member", None), "user", None)
+    if INVITE_PRE_AVATAR:
+        try:
+            photos = await _bot_app.bot.get_user_profile_photos(uid, limit=1)
+            if not getattr(photos, "total_count", 0):
+                reasons.append("有头像")
+        except Exception:
+            reasons.append("有头像")
+    if INVITE_PRE_USERNAME and not getattr(user, "username", None):
+        reasons.append("有用户名")
+    return reasons
+
+
+async def _invite_award(app, rec):
+    """给邀请人发奖并通知（群内 + 私聊）。rec 需含 cid/inviter/invitee_name/audit。"""
+    inviter, cid = rec["inviter"], rec["cid"]
+    reward = max(0, int(INVITE_REWARD))
+    if reward:
+        old = game_chips[cid].get(inviter, 0)
+        game_chips[cid][inviter] = old + reward
+        rec["award"] = reward
+        ledger_add(cid, 0, inviter, reward, "邀请奖励")
+    inviter_name = await get_name(app, inviter, cid=cid)
+    if INVITE_NOTIFY:
+        try:
+            await app.bot.send_message(chat_id=inviter,
+                text=f"🎟️ 邀请成功！{rec.get('invitee_name', '')} 通过你的邀请进群，奖励 {reward} 积分已到账。")
+        except Exception:
+            pass
+    if str(INVITE_OK_GROUP).strip():
+        try:
+            await app.bot.send_message(chat_id=cid, text=_fmt_tpl(
+                "invite_ok_group", inviter=inviter_name, inviter_id=inviter,
+                invitee=rec.get("invitee_name", ""), invitee_id=rec.get("invitee", ""), reward=reward))
+        except Exception:
+            pass
+    save_data()
+
+
+async def _invite_track_join(cmu, cid, uid, name, context):
+    """邀请追踪：进群事件携带 invite_link 时匹配邀请人，记记录/发奖励/通知（所有异常吞并）。"""
+    try:
+        if not INVITE_ENABLED or uid <= 0 or cid not in AUTHORIZED_GROUPS:
+            return
+        key = f"{cid}:{uid}"
+        if key in invite_records:   # 重复进群不重复计，仅视为回归
+            invite_records[key]["left"] = False
+            return
+        link = getattr(getattr(cmu, "invite_link", None), "link", "") or ""
+        inviter = 0
+        for i_uid, info in invite_links.get(cid, {}).items():
+            if info.get("link") == link and i_uid != uid:
+                inviter = i_uid
+                break
+        if not inviter:
+            if link and str(INVITE_INVALID_MSG).strip():
+                try:
+                    await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_invalid_msg", name=name))
+                except Exception:
+                    pass
+            return
+        if inviter == uid:
+            if str(INVITE_SELF_MSG).strip():
+                try:
+                    await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_self_msg", name=name))
+                except Exception:
+                    pass
+            return
+        rec = {"cid": cid, "inviter": inviter, "invitee": uid, "invitee_name": name,
+               "ts": now_bj().strftime("%Y-%m-%d %H:%M"), "audit": "ok", "left": False,
+               "award": 0, "link": link}
+        unmet = await _invite_pre_reasons(cid, uid, cmu)
+        if unmet:
+            rec["audit"], rec["note"] = "unmet", "、".join(unmet)
+        elif INVITE_AUDIT_ENABLED:
+            rec["audit"] = "pending"
+        invite_records[key] = rec
+        if rec["audit"] == "ok":
+            await _invite_award(context.application, rec)
+        save_data()
+    except Exception:
+        logger.exception("邀请追踪异常（已吞并）")
+
+
+def _invite_rank_rows(scope):
+    """按 scope（today/month/all）算邀请排行，返回 [(rank, uid, count)]（前 10）。"""
+    today = now_bj().strftime("%Y-%m-%d")
+    month = today[:7]
+    counts = defaultdict(int)
+    for rec in invite_records.values():
+        if rec.get("audit") != "ok" or rec.get("left"):
+            continue
+        ts = str(rec.get("ts", ""))
+        if scope == "today" and not ts.startswith(today):
+            continue
+        if scope == "month" and not ts.startswith(month):
+            continue
+        counts[rec.get("inviter")] += 1
+    counts.pop(0, None)
+    ranked = sorted(counts.items(), key=lambda x: -x[1])[:10]
+    return [(i + 1, uid, n) for i, (uid, n) in enumerate(ranked)]
+
+
+async def _invite_send_rank(update, context, scope):
+    if not await need_auth(update, context): return
+    if not INVITE_ENABLED:
+        await send_reply(update, context, "❌ 邀请系统未开启（网页「群组设置 → 邀请系统」可开启）。"); return
+    if INVITE_RANK_ADMIN_ONLY and not is_bot_admin(update.effective_user.id):
+        await send_reply(update, context, "❌ 邀请排行仅管理员可查。"); return
+    cid = update.effective_chat.id
+    titles = {"today": "invite_rank_today_msg", "month": "invite_rank_month_msg", "all": "invite_rank_all_msg"}
+    lines = [_fmt_tpl(titles[scope])]
+    rows = _invite_rank_rows(scope)
+    if not rows:
+        lines.append("暂无数据")
+    for i, uid, n in rows:
+        lines.append(_fmt_tpl("invite_rank_line_fmt", i=i, name=await get_name(context.application, uid, cid=cid), count=n))
+    await send_reply(update, context, "\n".join(lines))
+
+
+async def cmd_invite_rank_today(update, context):
+    """今日邀请排行。"""
+    await _invite_send_rank(update, context, "today")
+
+
+async def cmd_invite_rank_month(update, context):
+    """本月邀请排行。"""
+    await _invite_send_rank(update, context, "month")
+
+
+async def cmd_invite_rank_all(update, context):
+    """总邀请排行。"""
+    await _invite_send_rank(update, context, "all")
+
+
+async def cmd_invite_link(update, context):
+    """获取本群专属邀请链接：/link，新朋友通过链接进群即计邀请。"""
+    if not await need_auth(update, context): return
+    if not is_group_chat(update):
+        await send_reply(update, context, "⚠️ 请在群聊中使用。"); return
+    if not INVITE_ENABLED:
+        await send_reply(update, context, "❌ 邀请系统未开启（网页「群组设置 → 邀请系统」可开启）。"); return
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    mine = invite_links.get(cid, {}).get(uid)
+    if not mine:
+        try:
+            link_obj = await context.bot.create_chat_invite_link(chat_id=cid, name=f"inv{uid}", creates_join_request=True)
+            invite_links[cid][uid] = {"link": link_obj.invite_link, "invite_id": link_obj.invite_link.rsplit("/", 1)[-1],
+                                      "ts": now_bj().strftime("%Y-%m-%d %H:%M")}
+            save_data()
+        except Exception as e:
+            await send_reply(update, context, f"❌ 创建邀请链接失败：{e}（bot 需为群管理员）"); return
+        mine = invite_links[cid][uid]
+    total = _invite_count(uid, cid)
+    await send_reply(update, context, _fmt_tpl("invite_link_msg", link=mine.get("link", ""), reward=INVITE_REWARD)
+                     + f"\n📊 你在本群已成功邀请 {total} 人")
+
+
 async def on_member_event(update, context):
     """成员进出事件：退群/入群记录（bot 需为群管理员才能收到）。"""
     try:
@@ -6755,10 +6944,13 @@ async def on_member_event(update, context):
         if new.status == "left" and old.status != "left":
             leave_records[cid].append({"ts": ts, "uid": uid, "name": name})
             leave_records[cid] = leave_records[cid][-100:]
+            rec = invite_records.get(f"{cid}:{uid}")
+            if rec: rec["left"] = True   # 邀请记录：退群即失效（不再计入排行）
         elif new.status in ("member", "administrator") and old.status in ("left", "kicked"):
             leave_records[cid].append({"ts": ts, "uid": uid, "name": name, "join": True})
             leave_records[cid] = leave_records[cid][-100:]
             member_joined_at[cid][uid] = time.time()  # 观察期起点
+            await _invite_track_join(cmu, cid, uid, name, context)  # 邀请系统追踪（内部自吞异常）
             if WELCOME_ENABLED:
                 try:
                     text = WELCOME_TPL.replace("{name}", name).replace("{group}", getattr(cmu.chat, "title", "") or "").replace("{id}", str(uid))
@@ -7189,12 +7381,8 @@ async def post_init(app):
         asyncio.create_task(lottery_scheduler(app)),
         asyncio.create_task(data_save_worker())
     })
-    # 重启恢复：进行中的拍卖继续倒计时结算（托管分在存档里，不丢）
-    for _cid, _a in list(auctions.items()):
-        if not _a.get("task"):
-            try: _a["task"] = asyncio.create_task(_auction_settle(_cid, app))
-            except Exception: pass
-    for _cid, _g in list(guesses.items()):  # 竞猜：未封盘且未到点的重建封盘倒计时；已封盘的原样等待结算
+    # 重启恢复：竞猜：未封盘且未到点的重建封盘倒计时；已封盘的原样等待结算
+    for _cid, _g in list(guesses.items()):
         if not _g.get("locked") and not _g.get("task") and _g["end_ts"] > now_bj().timestamp():
             try: _g["task"] = asyncio.create_task(_guess_close(_cid, app))
             except Exception: pass
@@ -7290,14 +7478,16 @@ CMD_ALIASES = {
     "白名单": cmd_whitelist, "加白": cmd_whitelist_add, "删白": cmd_whitelist_del,
     "群管理员": cmd_adminlist_tg, "admins": cmd_adminlist_tg,
     "转赠": cmd_inherit, "继承": cmd_inherit, "转让": cmd_inherit, "transfer": cmd_inherit,
-    "拍卖": cmd_auction, "auction": cmd_auction,
     "开竞猜": cmd_guess_open, "guess": cmd_guess_open,
     "竞猜结算": cmd_guess_settle, "竞猜撤销": cmd_guess_cancel,
-    "盲盒": cmd_box, "开盲盒": cmd_box, "box": cmd_box,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
+    "link": cmd_invite_link, "邀请链接": cmd_invite_link,
+    "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
 }
 # 动态指令接管默认名：网页改指令后，旧默认名同步失效
-_DYN_CMD_OWNED.update({"QUERY_CMD": "我的积分", "SIGN_CMD": "签到", "RANK_CMD": "积分排行"})
+_DYN_CMD_OWNED.update({"QUERY_CMD": "我的积分", "SIGN_CMD": "签到", "RANK_CMD": "积分排行",
+                       "INVITE_LINK_CMD": "link", "INVITE_RANK_TODAY_CMD": "今日邀请排行",
+                       "INVITE_RANK_MONTH_CMD": "本月邀请排行", "INVITE_RANK_ALL_CMD": "总邀请排行"})
 
 # ---------- 命令管理：别名覆盖层（网页「命令管理」页编辑，保存立即生效） ----------
 BASE_CMD_ALIASES = dict(CMD_ALIASES)   # 出厂别名基线（只读）
@@ -8333,6 +8523,106 @@ def start_health_server():
                           f"<code>{'{prize_list}'}</code> <code>{'{keyword}'}</code> <code>{'{duration}'}</code> "
                           f"<code>{'{winners}'}</code> <code>{'{reason}'}</code></div>"
                         "<button type='submit' style='margin-top:8px'>💾 保存全部抽奖设置</button></form></div>")
+            elif gkey == "invite":
+                # 邀请系统六子页：配置/记录/统计/汇总/前置条件/审核
+                subs_inv = {k: n for k, n in SUBPAGES.get("invite", [])}
+                sub = sub or "config"
+                sname = subs_inv.get(sub, sub)
+                if sub == "config":
+                    warn_html = ("<div class='err'>⚠️ 邀请系统当前已关闭</div>" if not INVITE_ENABLED else "")
+                    body = (f"<h1>{gicon} {gname}</h1>"
+                            f"<div class='sub'>群里发「<code>{html.escape(str(INVITE_LINK_CMD))}</code>」领专属邀请链接 → 新朋友经链接进群 → 邀请人得奖励"
+                            f"（群内发「{html.escape(str(INVITE_RANK_ALL_CMD))}」看排行）</div>{msg}{warn_html}"
+                            "<div class='card'><h3>🎟️ 使用说明</h3>"
+                            "<div class='sub'>链接经 Telegram 官方 invite_link 事件追踪，进群即记账；被邀请人退群自动失效不计排行；"
+                            "开启人工审核后进群只入册不发奖，到「审核」子页一键通过/拒绝</div></div>"
+                            "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
+                            "<input type='hidden' name='group' value='invite/config'>"
+                            + _field_rows("invite/config") +
+                            "<div class='sub' style='margin-top:16px'>模板占位符：邀请成功通知 <code>{inviter}</code> <code>{invitee}</code> <code>{reward}</code>；"
+                            "链接消息 <code>{link}</code> <code>{reward}</code>；排行行 <code>{i}</code> <code>{name}</code> <code>{count}</code></div>"
+                            "<button type='submit' style='margin-top:8px'>💾 保存邀请设置</button></form></div>")
+                elif sub == "records":
+                    rows_html = ""
+                    for k, r in sorted(invite_records.items(), key=lambda kv: kv[1].get("ts", ""), reverse=True)[:100]:
+                        audit_badge = {"ok": "<span style='color:#6fd08c'>有效</span>",
+                                       "pending": "<span style='color:#f0c060'>待审核</span>",
+                                       "unmet": "<span style='color:#f09595'>未满足</span>",
+                                       "rejected": "<span style='color:#8a89a0'>已拒绝</span>"}.get(r.get("audit", ""), r.get("audit", ""))
+                        if r.get("left"):
+                            audit_badge += " <span style='color:#8a89a0'>(已退群)</span>"
+                        rows_html += (f"<tr><td><code>{k}</code></td>"
+                                      f"<td><code>{r.get('inviter', '')}</code></td>"
+                                      f"<td><code>{r.get('invitee', '')}</code> {html.escape(str(r.get('invitee_name', '')))}</td>"
+                                      f"<td>{r.get('ts', '')}</td><td>{audit_badge}</td>"
+                                      f"<td>{r.get('award', 0)}</td>"
+                                      f"<td><a class='q' href='/invite_del/{k}' onclick=\"return confirm('删除该邀请记录？')\">🗑 删除</a></td></tr>")
+                    if not rows_html:
+                        rows_html = "<tr><td colspan='7' style='text-align:center;color:#6a6982'>暂无邀请记录</td></tr>"
+                    body = (f"<h1>{gicon} 邀请记录</h1><div class='sub'>最近 100 条邀请记录；退群自动标失效（不计排行）</div>{msg}"
+                            "<div class='card'>"
+                            "<form method='post' action='/invite_clear' style='margin-bottom:10px' "
+                            "onsubmit=\"return confirm('确认清空全部邀请记录与邀请链接？此操作不可恢复！')\">"
+                            "<button style='background:#8a3b3b;color:#fff'>🧹 清空全部邀请数据</button></form>"
+                            "<table class='tbl'><tr><th>记录ID</th><th>邀请人</th><th>被邀请人</th><th>时间</th><th>状态</th><th>奖励</th><th>操作</th></tr>"
+                            + rows_html + "</table></div>")
+                elif sub == "daily":
+                    daily_counts = defaultdict(int)
+                    for r in invite_records.values():
+                        if r.get("audit") == "ok":
+                            daily_counts[str(r.get("ts", ""))[:10]] += 1
+                    rows_html = "".join(f"<tr><td>{d}</td><td>{n}</td></tr>"
+                                        for d, n in sorted(daily_counts.items(), reverse=True)[:60])
+                    if not rows_html:
+                        rows_html = "<tr><td colspan='2' style='text-align:center;color:#6a6982'>暂无数据</td></tr>"
+                    body = (f"<h1>{gicon} 统计</h1><div class='sub'>每日有效邀请数（最近 60 天）</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>日期</th><th>有效邀请</th></tr>"
+                            + rows_html + "</table></div>")
+                elif sub == "summary":
+                    sums = defaultdict(lambda: {"ok": 0, "award": 0})
+                    for r in invite_records.values():
+                        if r.get("audit") == "ok" and not r.get("left"):
+                            sums[r.get("inviter")]["ok"] += 1
+                            sums[r.get("inviter")]["award"] += int(r.get("award", 0) or 0)
+                    rows_html = ""
+                    for uid, s in sorted(sums.items(), key=lambda kv: -kv[1]["ok"])[:50]:
+                        rows_html += (f"<tr><td><code>{uid}</code> {html.escape(user_names.get(uid, ''))}</td>"
+                                      f"<td>{s['ok']}</td><td>{s['award']}</td></tr>")
+                    if not rows_html:
+                        rows_html = "<tr><td colspan='3' style='text-align:center;color:#6a6982'>暂无数据</td></tr>"
+                    body = (f"<h1>{gicon} 汇总</h1><div class='sub'>按邀请人汇总（有效且未退群，前 50）</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>邀请人</th><th>有效邀请</th><th>累计奖励</th></tr>"
+                            + rows_html + "</table></div>")
+                elif sub == "pre":
+                    body = (f"<h1>{gicon} 前置条件</h1>"
+                            f"<div class='sub'>被邀请人进群时需满足的条件；不满足记「未满足」且不发奖（防小号白嫖邀请奖励）</div>{msg}"
+                            "<div class='card'><form method='post' action='/save'>"
+                            "<input type='hidden' name='group' value='invite/pre'>"
+                            + _field_rows("invite/pre") +
+                            "<button type='submit' style='margin-top:8px'>💾 保存前置条件</button></form></div>")
+                elif sub == "audit":
+                    pend = {k: r for k, r in invite_records.items() if r.get("audit") in ("pending", "unmet")}
+                    rows_html = ""
+                    for k, r in sorted(pend.items(), key=lambda kv: kv[1].get("ts", ""), reverse=True):
+                        tag = "待审核" if r.get("audit") == "pending" else f"未满足（{html.escape(str(r.get('note', '')))}）"
+                        rows_html += (f"<tr><td><code>{k}</code></td>"
+                                      f"<td><code>{r.get('inviter', '')}</code></td>"
+                                      f"<td><code>{r.get('invitee', '')}</code> {html.escape(str(r.get('invitee_name', '')))}</td>"
+                                      f"<td>{r.get('ts', '')}</td><td>{tag}</td>"
+                                      f"<td><form style='display:inline;margin:0' method='post' action='/invite_audit'>"
+                                      f"<input type='hidden' name='op' value='approve'><input type='hidden' name='sel' value='{k}'>"
+                                      f"<button style='padding:2px 10px;cursor:pointer;background:#3d6b4f;color:#fff;border:none;border-radius:6px'>✅ 通过</button></form> "
+                                      f"<form style='display:inline;margin:0' method='post' action='/invite_audit'>"
+                                      f"<input type='hidden' name='op' value='reject'><input type='hidden' name='sel' value='{k}'>"
+                                      f"<button style='padding:2px 10px;cursor:pointer;background:#8a3b3b;color:#fff;border:none;border-radius:6px'>❌ 拒绝</button></form></td></tr>")
+                    if not rows_html:
+                        rows_html = "<tr><td colspan='6' style='text-align:center;color:#6a6982'>暂无待审核记录</td></tr>"
+                    body = (f"<h1>{gicon} 审核</h1><div class='sub'>开启「新邀请需人工审核」后，进群邀请在此通过/拒绝；"
+                            f"「审核通过后补发奖励」开关决定通过时是否补发 {INVITE_REWARD} 积分</div>{msg}"
+                            "<div class='card'><table class='tbl'><tr><th>记录ID</th><th>邀请人</th><th>被邀请人</th><th>时间</th><th>状态</th><th>操作</th></tr>"
+                            + rows_html + "</table></div>")
+                else:
+                    body = f"<h1>{gicon} {gname}</h1><div class='sub'>该子页暂未开通</div>{msg}"
             elif sub:
                 # 子页面制（照阿福模板：积分相关 → 积分设置/每日签到/…）
                 subs = {k: n for k, n in SUBPAGES.get(gkey, [])}
@@ -8422,9 +8712,8 @@ def start_health_server():
                             + (f"；充值：{BUY_MIN}~{BUY_MAX}/次（管理员确认到账）" if BUY_ENABLED else "") + "</td></tr>"
                             "<tr><th>消耗</th><td>发积分红包；积分商城下单（"
                             + ("、".join(f"{x['name']} {x['value']}分" for x in MALL_ITEMS) or "暂无商品")
-                            + "）；参与拍卖出价</td></tr>"
+                            + "）</td></tr>"
                             f"<tr><th>转赠</th><td>{'开启' if INHERIT_ENABLED else '关闭'}，把积分转给群内成员{fee}</td></tr>"
-                            f"<tr><th>拍卖</th><td>{'开启' if AUCTION_ENABLED else '关闭'}，每次加价 {AUCTION_STEP}，时长 {AUCTION_DURATION} 秒</td></tr>"
                             "<tr><th>等级</th><td>"
                             + " ≥ ".join(f"{x['name']} {x['value']}分" for x in POINT_LEVELS) + "</td></tr>"
                             "</table></div>")
@@ -8454,27 +8743,6 @@ def start_health_server():
                              "<input type='text' name='match' placeholder='文字或 len>=5（留空=任意消息）' style='flex:2'>"
                              "<input type='number' name='points' placeholder='积分' required style='flex:1'>"
                              "<button style='margin:0'>➕ 新增规则</button></form></div>")
-                elif gkey == "points" and sub == "box":
-                    pool_rows = "".join(
-                        f"<tr><td>{html.escape(str(p.get('name', '?')))}</td>"
-                        f"<td>{int(p.get('weight', 1) or 1)}</td><td>{int(p.get('points', 0) or 0)}</td>"
-                        f"<td><a href='/box_del/{i}' style='color:#f09595'>删除</a></td></tr>"
-                        for i, p in enumerate(box_pool))
-                    if not pool_rows:
-                        pool_rows = ("<tr><td colspan='4' style='text-align:center;color:#6a6982'>"
-                                     "奖品池是空的，先加几个奖品</td></tr>")
-                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>玩家发「盲盒」扣 {BOX_PRICE} 积分开一次，按权重随机，结果自动回收。保存立即生效</div>{msg}"
-                            "<div class='card'><form method='post' action='/save'>"
-                            f"<input type='hidden' name='group' value='points/box'>"
-                            + _field_rows("points/box") + "<button type='submit'>💾 保存</button></form></div>"
-                            "<div class='card' style='margin-top:18px'><h3>🎁 奖品池（权重越大越容易开到；积分 0 = 谢谢参与）</h3>"
-                            "<table class='tbl'><tr><th>奖品</th><th>权重</th><th>奖励积分</th><th>操作</th></tr>"
-                            + pool_rows + "</table>"
-                            "<form method='post' action='/box_add' style='display:flex;gap:10px;margin-top:12px'>"
-                            "<input type='text' name='name' placeholder='奖品名称' required style='flex:2'>"
-                            "<input type='number' name='weight' value='1' min='1' placeholder='权重' style='flex:1'>"
-                            "<input type='number' name='points' value='0' min='0' placeholder='奖励积分' style='flex:1'>"
-                            "<button style='margin:0'>➕ 添加奖品</button></form></div>")
                 elif gkey == "points" and sub == "buypkg":
                     pkg_rows = ""
                     for i, p in enumerate(buy_packages):
@@ -8561,13 +8829,21 @@ def start_health_server():
                                     f"<button style='padding:2px 10px;cursor:pointer'>撤销退款</button></form></td></tr>")
                     if not gs_rows:
                         gs_rows = ("<tr><td colspan='7' style='text-align:center;color:#6a6982'>"
-                                   "暂无进行中的竞猜；群里发「开竞猜 题目/选项A/选项B」发起</td></tr>")
+                                   "暂无进行中的竞猜；用上方「新增竞猜」直接发起，或群里发「开竞猜 题目/选项A/选项B」</td></tr>")
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>管理员群里发「开竞猜 题目/选项A/选项B [时长分钟]」开局，成员点按钮下注托管；"
                             "到点自动封盘，「竞猜结算 A/B」开出答案后猜中方按注额比例瓜分全部奖池，「竞猜撤销」全额退款</div>{msg}"
                             "<div class='card'><h3>🎯 进行中的竞猜</h3>"
                             "<table class='tbl'><tr><th>群</th><th>题目</th><th>选项A</th><th>选项B</th><th>奖池</th><th>状态</th><th>操作</th></tr>"
                             + gs_rows + "</table>"
                             "<div class='sub' style='margin-top:8px'>网页结算/撤销立即生效并群内播报；下注积分已托管，撤销原路退回</div></div>"
+                            "<div class='card' style='margin-top:18px'><h3>➕ 新增竞猜（网页直接发起，免群内敲命令）</h3>"
+                            "<form method='post' action='/guess_create' style='display:flex;gap:10px;flex-wrap:wrap'>"
+                            "<input type='number' name='cid' placeholder='群ID（授权群）' required style='flex:1;min-width:140px'>"
+                            "<input type='text' name='q' placeholder='题目' required maxlength='50' style='flex:2;min-width:180px'>"
+                            "<input type='text' name='a' placeholder='选项A' required maxlength='20' style='flex:1;min-width:100px'>"
+                            "<input type='text' name='b' placeholder='选项B' required maxlength='20' style='flex:1;min-width:100px'>"
+                            "<input type='number' name='duration' placeholder='时长(分钟,默认" + str(GUESS_DURATION) + ")' min='1' max='1440' style='flex:1;min-width:120px'>"
+                            "<button style='margin:0'>🎯 发起竞猜</button></form></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/guess'>"
                             + _field_rows("points/guess")
@@ -8745,12 +9021,12 @@ def start_health_server():
                         except Exception: pass
                     _lc_back(note=f"✅ 已取消「{lo['title'][:20]}」" + (f"，退还 {fee} 分/人" if fee > 0 else ""))
                     return
-                mm = re.fullmatch(r"/(rule|box|pkg|level|mall|redeem)_(del|toggle)/(\d+)", path)
+                mm = re.fullmatch(r"/(rule|pkg|level|mall|redeem)_(del|toggle)/(\d+)", path)
                 if mm:
                     kind, act, idx = mm.group(1), mm.group(2), int(mm.group(3))
-                    lst = {"rule": chat_rules, "box": box_pool, "pkg": buy_packages,
+                    lst = {"rule": chat_rules, "pkg": buy_packages,
                            "level": POINT_LEVELS, "mall": MALL_ITEMS, "redeem": redeem_goods}[kind]
-                    back = {"rule": "/page/points/rule", "box": "/page/points/box", "pkg": "/page/points/buypkg",
+                    back = {"rule": "/page/points/rule", "pkg": "/page/points/buypkg",
                             "level": "/page/points/level", "mall": "/page/points/mall",
                             "redeem": "/page/points/redeem"}[kind]
                     if 0 <= idx < len(lst):
@@ -8790,6 +9066,12 @@ def start_health_server():
                     self._send(200, "\n".join(lines).encode("utf-8-sig"),
                                [("Content-Type", "text/csv; charset=utf-8"),
                                 ("Content-Disposition", f"attachment; filename=points_{cid}.csv")]); return
+                mm = re.fullmatch(r"/invite_del/(-?\d+):(\d+)", path)
+                if mm:
+                    key = f"{mm.group(1)}:{mm.group(2)}"
+                    invite_records.pop(key, None)
+                    save_data()
+                    self._redirect("/page/invite/records?note=" + quote("🗑 已删除记录 " + key)); return
                 m = re.fullmatch(r"/page/([a-z]+)(?:/([a-z0-9_]+))?", path)
                 if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
                     if m.group(1) == "dashboard":   # 群体总览是定制页（统计卡+排序），无通用表单，别落空壳
@@ -9101,6 +9383,48 @@ def start_health_server():
                     else:
                         _mb(err="参数错误")
                     return
+                if path == "/guess_create":
+                    # 竞猜网页直接发起：免群内敲命令
+                    try: cid_ = int(form.get("cid", ["0"])[0] or 0)
+                    except ValueError: cid_ = 0
+                    q_ = form.get("q", [""])[0]; a_ = form.get("a", [""])[0]; b_ = form.get("b", [""])[0]
+                    dur_ = form.get("duration", [""])[0] or GUESS_DURATION
+                    if not cid_ or cid_ not in AUTHORIZED_GROUPS:
+                        self._send(400, f"err=无效群ID（{cid_ or '未填'}）".encode("utf-8")); return
+                    if not (_bot_app and _bot_loop):
+                        self._send(400, "err=bot 尚未启动完成，请稍后再试".encode("utf-8")); return
+                    async def _gmk():
+                        return await _guess_do_create(_bot_app, cid_, q_, a_, b_, dur_)
+                    try:
+                        err = asyncio.run_coroutine_threadsafe(_gmk(), _bot_loop).result(20)
+                    except Exception as e:
+                        err = f"操作失败：{e}"
+                    if err:
+                        self._send(400, ("err=" + err).encode("utf-8")); return
+                    self._redirect("/page/points/guess?note=" + quote("🎯 竞猜已发起并群内播报")); return
+                if path == "/invite_audit":
+                    # 邀请审核：approve（可补发奖励）/ reject
+                    op = form.get("op", [""])[0]
+                    sel = form.get("sel", [""])[0]
+                    rec = invite_records.get(sel)
+                    if rec and op in ("approve", "reject"):
+                        if op == "approve" and rec.get("audit") in ("pending", "unmet"):
+                            rec["audit"] = "ok"
+                            if INVITE_AUDIT_AWARD and not rec.get("award") and _bot_app and _bot_loop:
+                                async def _ia(app=_bot_app, r=rec):
+                                    await _invite_award(app, r)
+                                try:
+                                    asyncio.run_coroutine_threadsafe(_ia(), _bot_loop).result(20)
+                                except Exception:
+                                    logger.exception("邀请审核补发奖励失败")
+                        elif op == "reject":
+                            rec["audit"] = "rejected"
+                        save_data()
+                    self._redirect("/page/invite/audit"); return
+                if path == "/invite_clear":
+                    invite_records.clear(); invite_links.clear()
+                    save_data()
+                    self._redirect("/page/invite/records?note=" + quote("🧹 已清空全部邀请数据")); return
                 if path == "/guessops":
                     # 竞猜网页操作：结算 A/B 或撤销退款
                     op = form.get("op", [""])[0]
@@ -9132,15 +9456,6 @@ def start_health_server():
                     chat_rules.append({"match": match, "points": pts, "on": True})
                     save_settings({})
                     self._redirect("/page/points/rule"); return
-                if path == "/box_add":
-                    def _ibox(k, dflt):
-                        try: return max(0, int(form.get(k, [str(dflt)])[0] or dflt))
-                        except ValueError: return dflt
-                    name = (form.get("name", [""])[0] or "").strip()[:30]
-                    if name:
-                        box_pool.append({"name": name, "weight": max(1, _ibox("weight", 1)), "points": _ibox("points", 0)})
-                        save_settings({})
-                    self._redirect("/page/points/box"); return
                 if path == "/pkg_add":
                     def _ipkg(k, dflt):
                         try: return int(form.get(k, [str(dflt)])[0] or dflt)

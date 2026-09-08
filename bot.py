@@ -403,6 +403,7 @@ INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
 INVITE_REWARD = 50          # 每成功邀请 1 人奖励积分
 INVITE_AUDIT_ENABLED = 0    # 新邀请需人工审核开关（审核页一键通过/拒绝）
 INVITE_LOOSE_MATCH = 1      # 宽松归因：申请/事件都没带链接时，本群唯一专属链接直接兜底（Telegram 偶发漏字段）
+INVITE_AUTO_APPROVE = True  # 入群申请自动批准：点专属链接→秒批→进群→归因→发奖全自动，不再要管理员手动批
 INVITE_AUDIT_AWARD = 1      # 审核通过后补发奖励开关
 INVITE_LINK_CMD = "link"    # 获取专属邀请链接指令
 INVITE_RANK_ADMIN_ONLY = 0  # 邀请排行仅管理员可查开关
@@ -882,6 +883,9 @@ blackjack_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(i
 jinhua_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 race_jackpot = defaultdict(int)
 hourly_race_enabled = defaultdict(lambda: False)
+# 调度任务调试：每群最后成功开赛时间 + 跳过原因计数（/定时任务 调试命令读这些）
+race_last_sent = {}                                  # cid -> "YYYY-MM-DD HH:MM"
+race_skip_stats = defaultdict(lambda: defaultdict(int))  # cid -> {reason: count}
 daily_emergency_used = defaultdict(lambda: defaultdict(bool))
 # 已实扣的游戏下注，用于全系游戏在重启时自动退款。
 # 按游戏类型分条存储，避免多游戏并发时记录互相覆盖：
@@ -1441,10 +1445,16 @@ async def get_name(app, uid, with_title=True, cid=None):
 
 
 async def safe_send(bot, cid, text, **kwargs):
+    # 默认 HTML 解析：模板里的 <b> 生效；解析失败（昵称含 < 等）自动回退纯文本重发
+    kwargs.setdefault("parse_mode", "HTML")
     for attempt in range(2):
         try: return await bot.send_message(chat_id=cid, text=text, **kwargs)
         except RetryAfter as exc:
             if attempt == 0: await asyncio.sleep(min(exc.retry_after, 5)); continue
+        except BadRequest as exc:
+            if "parse entities" in str(exc).lower() and kwargs.get("parse_mode"):
+                kwargs.pop("parse_mode"); continue  # HTML 解析炸了 → 纯文本重发
+            logger.exception("发送消息失败: %s", cid); break
         except TelegramError:
             logger.exception("发送消息失败: %s", cid); break
     return None
@@ -1509,8 +1519,15 @@ async def safe_send_long(bot, cid, text, **kwargs):
 
 async def safe_edit(bot, cid, msg_id, text, **kwargs):
     if not msg_id: return None
+    kwargs.setdefault("parse_mode", "HTML")
     try: return await bot.edit_message_text(chat_id=cid, message_id=msg_id, text=text, **kwargs)
     except BadRequest as exc:
+        if "parse entities" in str(exc).lower() and kwargs.get("parse_mode"):
+            kwargs.pop("parse_mode")
+            try: return await bot.edit_message_text(chat_id=cid, message_id=msg_id, text=text, **kwargs)
+            except BadRequest as exc2:
+                if "Message is not modified" not in str(exc2): logger.warning("编辑消息失败: %s", exc2)
+            return None
         if "Message is not modified" not in str(exc): logger.warning("编辑消息失败: %s", exc)
     except RetryAfter as exc:
         await asyncio.sleep(min(exc.retry_after, 5))
@@ -1585,11 +1602,20 @@ async def send_reply(update, context, text, kb=None, parse_mode=None, delete_aft
     """
     secs = int(REPLY_DELETE_SECONDS if delete_after is None else delete_after)
     kwargs = {}
+    if parse_mode is None:
+        parse_mode = "HTML"   # 默认 HTML：<b>/<code> 生效；解析失败自动回退纯文本
     if parse_mode:
         kwargs["parse_mode"] = parse_mode
     if kb is not None:
         kwargs["reply_markup"] = kb
-    reply = await update.message.reply_text(text, **kwargs)
+    try:
+        reply = await update.message.reply_text(text, **kwargs)
+    except BadRequest as exc:
+        if "parse entities" in str(exc).lower() and kwargs.get("parse_mode"):
+            kwargs.pop("parse_mode")  # 昵称含 < 等导致解析炸 → 纯文本重发
+            reply = await update.message.reply_text(text, **kwargs)
+        else:
+            raise
     if reply and secs > 0:
         schedule_delete(context.application, update.effective_chat.id, reply, secs)
     return reply
@@ -4362,18 +4388,17 @@ async def cmd_my_invite(update, context):
     cname = "全部群" if cid is None else (chat_name_cache.get(cid) or str(cid))
     my_name = await get_name(context.application, uid)
     lines = [
-        f"🌸 <b>我的邀请进度</b>｜{html.escape(cname)}",
-        "━━━━━━━━━━━━━━━",
-        f"👤 邀请人：<b>{html.escape(my_name)}</b> <code>{uid}</code>",
-        f"✅ 已计入（未退群）：<b>{ok_n}</b> 人",
+        f"<b>🌸 我的邀请进度</b>｜{html.escape(cname)}",
+        f"<b>邀请人</b>　{html.escape(my_name)} <code>{uid}</code>",
+        f"<b>已计入</b>　{ok_n} 人",
     ]
-    if left_n: lines.append(f"💀 已退群失效：<b>{left_n}</b> 人（不计排行）")
-    if pending_n: lines.append(f"⏳ 待审核/待达标：<b>{pending_n}</b> 人")
-    lines.append(f"🎁 累计邀请奖励：<b>{award_sum}</b> 分（每成功 1 位 +{INVITE_REWARD} 分）")
+    if left_n: lines.append(f"<b>已退群</b>　{left_n} 人（不计排行）")
+    if pending_n: lines.append(f"<b>待审核</b>　{pending_n} 人")
+    lines.append(f"<b>累计奖励</b>　{award_sum} 分（每成功 1 位 +{INVITE_REWARD} 分）")
     if mine:
         lines.append("")
-        lines.append(f"🔗 <b>我的专属链接：</b>\n{mine.get('link', '')}")
-        lines.append("💡 新朋友点链接 → 申请加入 → 管理员批准，即自动记账；退群自动失效。")
+        lines.append("<b>我的专属链接</b>")
+        lines.append(f"<code>{mine.get('link', '')}</code>")
     else:
         lines.append("")
         lines.append("📌 本群还没有你的专属链接，发「邀请」即可领取。")
@@ -4771,6 +4796,7 @@ async def on_button(update, context):
         _remember_name(update)
         if not is_auth(cid): await q.answer("未授权", show_alert=True); return
         if uid in BLACKLISTED_USERS and not is_bot_admin(uid): await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
+        if data == "noop": await q.answer(); return  # 占位按钮（售罄/页码），点了不报错
         
         # --- 21点 回调 ---
         if data.startswith("bj_"):
@@ -5057,7 +5083,70 @@ async def on_button(update, context):
             elif game.phase == "open_pending": await show_jinhua_action(game, context.application)
             else: await start_jinhua_turn_timer(game, context.application)
             return
+        # --- 积分商城：点蓝色按钮直接兑换 / 翻页 / 商品详情 ---
+        if data.startswith("mall_buy_") or data.startswith("mall_show_") or data.startswith("mall_page_"):
+            cid, uid = q.message.chat.id, q.from_user.id
+            if data.startswith("mall_show_"):
+                # 商品详情：弹出商品信息，1 秒后回到原列表
+                try: idx = int(data[len("mall_show_"):])
+                except ValueError: await q.answer(); return
+                items = [x for x in MALL_ITEMS if x.get("on", True)]
+                if not (1 <= idx <= len(items)): await q.answer("商品已下架", show_alert=True); return
+                it = items[idx - 1]
+                stk = it.get("stock")
+                stk_txt = "不限量" if not isinstance(stk, int) else (f"剩 {stk}" if stk > 0 else "已售罄")
+                await q.answer(f"#{idx} {it['name']}\n价格 {_mall_price(it)} 分｜{stk_txt}\n点 ✅ 立即兑换 直接购买", show_alert=True)
+                return
+            if data.startswith("mall_buy_"):
+                try: idx = int(data[len("mall_buy_"):])
+                except ValueError: await q.answer(); return
+                if not MALL_ENABLED: await q.answer("商城未开启", show_alert=True); return
+                items = [x for x in MALL_ITEMS if x.get("on", True)]
+                if not (1 <= idx <= len(items)): await q.answer("商品已下架", show_alert=True); return
+                it = items[idx - 1]
+                stk = it.get("stock")
+                if isinstance(stk, int) and stk <= 0: await q.answer("已售罄", show_alert=True); return
+                err = await _redeem_execute(context, cid, uid, it)
+                if err: await q.answer(err, show_alert=True)
+                else: await q.answer("🎉 兑换成功")
+                return
+            if data.startswith("mall_page_"):
+                try: page = int(data[len("mall_page_"):])
+                except ValueError: await q.answer(); return
+                # 在原按钮消息就地刷新为新页（编辑消息按钮）
+                items = [x for x in MALL_ITEMS if x.get("on", True)]
+                if not items: await q.answer("商城已空"); return
+                pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
+                page = max(1, min(page, pages))
+                chunk = items[(page - 1) * MALL_PAGE_SIZE: page * MALL_PAGE_SIZE]
+                new_rows = []
+                for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
+                    sb = item.get("stock")
+                    if isinstance(sb, int) and sb <= 0:
+                        new_rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
+                    else:
+                        new_rows.append([InlineKeyboardButton(f"🛒 {i}. {item['name']} — {_mall_price(item)}分", callback_data=f"mall_show_{i}"),
+                                         InlineKeyboardButton("✅ 立即兑换", callback_data=f"mall_buy_{i}")])
+                nav = []
+                if page > 1: nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
+                if pages > 1: nav.append(InlineKeyboardButton(f"📄 {page}/{pages}", callback_data="noop"))
+                if page < pages: nav.append(InlineKeyboardButton("➡ 下一页", callback_data=f"mall_page_{page+1}"))
+                if nav: new_rows.append(nav)
+                try:
+                    await q.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
+                except Exception: pass
+                await q.answer(f"已切到 {page}/{pages} 页")
+                return
         # --- 积分兑换：点蓝色商品按钮直接兑换 ---
+        if data.startswith("redeem_show_"):
+            try: idx = int(data[len("redeem_show_"):])
+            except ValueError: await q.answer(); return
+            items = [x for x in redeem_goods if x.get("on", True)]
+            if not (1 <= idx <= len(items)): await q.answer("商品已下架", show_alert=True); return
+            x = items[idx - 1]
+            left = int(x.get("left", 0) or 0)
+            await q.answer(f"#{idx} {x['name']}\n价格 {int(x.get('price', 0) or 0)} 分｜剩余 {'不限' if left <= 0 else left}\n点 ✅ 立即兑换 直接兑换", show_alert=True)
+            return
         if data.startswith("redeem_buy_"):
             try: idx = int(data[len("redeem_buy_"):])
             except ValueError:
@@ -5659,7 +5748,8 @@ async def _redeem_buy_cb(q, idx, context):
     gate = _redeem_gate()
     if gate:
         await q.answer(gate, show_alert=True); return
-    items = [x for x in redeem_goods if x.get("on", True)]
+    items = [x for x in redeem_goods if x.get("on", True)
+             and (not x.get("target_groups") or cid in x["target_groups"])]
     if not (1 <= idx <= len(items)):
         await q.answer("❌ 商品不存在或已下架，重新发「%s」看最新列表" % REDEEM_CMD, show_alert=True); return
     err = await _redeem_execute(context, cid, uid, items[idx - 1])
@@ -5678,24 +5768,29 @@ async def cmd_points_redeem(update, context):
     gate = _redeem_gate()
     if gate:
         await send_reply(update, context, gate); return
-    items = [x for x in redeem_goods if x.get("on", True)]
+    items = [x for x in redeem_goods if x.get("on", True)
+             and (not x.get("target_groups") or cid in x["target_groups"])]
     if not items:
-        await send_reply(update, context, "🎁 暂无兑换商品，管理员可在后台「积分系统 → 积分兑换」上架。"); return
+        await send_reply(update, context, "🎁 本群暂无可兑换商品，管理员可在后台「积分系统 → 积分兑换」给本群上架。"); return
     args = context.args or []
     if not args:  # 商品按钮列表：点蓝色按钮直接兑换
-        rows = []
+        _cn = chat_name_cache.get(cid) or ""
+        lines = [f"🎁 积分兑换｜{_cn}" if _cn else "🎁 积分兑换", "━" * 14]
         for i, x in enumerate(items, 1):
             left = int(x.get("left", 0) or 0)
-            label = _fmt_tpl("redeem_msg_list", goodsName=x["name"],
-                             pointNum=int(x.get("price", 0) or 0),
-                             leftNum=("不限" if left <= 0 else left))
-            rows.append([InlineKeyboardButton(label, callback_data=f"redeem_buy_{i}")])
-        text = (f"🎁 积分兑换\n{'━' * 14}\n点击蓝色商品按钮立即兑换"
-                f"\n💡 也可以发「{REDEEM_CMD} 编号/名称」兑换")
-        msg = await safe_send(context.bot, cid, text,
-                              reply_markup=InlineKeyboardMarkup(rows))
-        if msg and REPLY_DELETE_SECONDS > 0:
-            schedule_delete(context.application, cid, msg, REPLY_DELETE_SECONDS)
+            left_txt = "不限" if left <= 0 else str(left)
+            lines.append(f"{i}. {x['name']}　—　{int(x.get('price', 0) or 0)} 积分　剩余 {left_txt}")
+        lines.append("")
+        lines.append(f"💡 点下方【✅ 立即兑换】按钮直接兑换；也可发「{REDEEM_CMD} 编号/名称」")
+        rows = []
+        for i, x in enumerate(items, 1):
+            price = int(x.get("price", 0) or 0)
+            rows.append([
+                InlineKeyboardButton(f"🛒 {i}. {x['name']} — {price}分", callback_data=f"redeem_show_{i}"),
+                InlineKeyboardButton("✅ 立即兑换", callback_data=f"redeem_buy_{i}"),
+            ])
+        await safe_send(context.bot, cid, "\n".join(lines),
+                        reply_markup=InlineKeyboardMarkup(rows))
         return
     arg = args[0].strip()
     item = None
@@ -5725,13 +5820,35 @@ async def cmd_mall(update, context):
     lines = [f"🛒 积分商城（{page}/{pages} 页）", "━" * 14]
     for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
         desc = str(item.get("desc", "") or "").strip()
-        lines.append(f"{i}. {item['name']}　—　{_mall_price(item)} 积分" + (f"（{desc}）" if desc else ""))
+        stk_txt = ""
+        if isinstance(item.get("stock"), int):
+            stk_txt = f"  剩余 {item['stock']}" if item['stock'] else "  已售罄"
+        lines.append(f"{i}. {item['name']}　—　{_mall_price(item)} 积分{stk_txt}"
+                     + (f"\n  　{desc}" if desc else ""))
     lines.append("")
-    lines.append("💡 发「购买 编号」（如：购买 1）即可用积分兑换，管理员会尽快发货。")
-    msgs = await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines))
-    if msgs and REPLY_DELETE_SECONDS > 0:
-        for m_ in msgs:
-            schedule_delete(context.application, update.effective_chat.id, m_, REPLY_DELETE_SECONDS)
+    lines.append("💡 点击下方【立即兑换】按钮即可购买；翻页用【上一页/下一页】。")
+    # 内联按钮：每商品一行（商品名 / 立即兑换），底部翻页
+    rows = []
+    for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
+        stock_btn = item.get("stock")
+        if isinstance(stock_btn, int) and stock_btn <= 0:
+            rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
+        else:
+            rows.append([
+                InlineKeyboardButton(f"🛒 {i}. {item['name']} — {_mall_price(item)}分", callback_data=f"mall_show_{i}"),
+                InlineKeyboardButton("✅ 立即兑换", callback_data=f"mall_buy_{i}"),
+            ])
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(f"📄 {page}/{pages}", callback_data="noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("➡ 下一页", callback_data=f"mall_page_{page+1}"))
+    if nav: rows.append(nav)
+    kb = InlineKeyboardMarkup(rows) if rows else None
+    # 列表+按钮同条消息；不自动删（按钮要活到用户点完）
+    await send_reply(update, context, "\n".join(lines), kb=kb, delete_after=0)
 
 async def cmd_mall_buy(update, context):
     if not await need_auth(update, context): return
@@ -7094,19 +7211,65 @@ async def cmd_invite_link(update, context):
     cname = getattr(update.effective_chat, "title", "") or "本群"
     link = mine.get("link", "")
     text = (
-        f"🎟️ <b>我的专属邀请链接</b>\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"👤 邀请人：<b>{html.escape(my_name)}</b> <code>{uid}</code>\n"
-        f"🏘️ 群组：<b>{html.escape(cname)}</b>\n\n"
-        f"🔗 你的专属链接：\n{link}\n\n"
-        f"💎 每成功邀请 <b>1</b> 位新朋友进群，奖励 <b>{INVITE_REWARD}</b> 积分\n"
-        f"📊 你在本群已成功邀请 <b>{total}</b> 人\n\n"
-        f"📌 <b>使用说明</b>\n"
-        f"新朋友点链接 → 申请加入 → 管理员批准，即自动记账\n"
-        f"被邀请人退群自动失效，奖励已发不追回\n"
-        f"审核模式开启时进群只入册不发奖，到「邀请审核」通过才发"
+        f"<b>🎟️ 我的专属邀请链接</b>\n"
+        f"<b>邀请人</b>　{html.escape(my_name)} <code>{uid}</code>\n"
+        f"<b>群组</b>　　{html.escape(cname)}\n"
+        f"<b>已邀请</b>　{total} 人（每成功 +{INVITE_REWARD} 分）\n\n"
+        f"<b>你的专属链接</b>\n"
+        f"<code>{link}</code>\n\n"
+        f"📋 <b>使用说明</b>\n"
+        f"1. 把链接发给好友\n"
+        f"2. 好友点链接 → 申请加入\n"
+        f"3. 管理员批准 → 自动到账 +{INVITE_REWARD} 积分\n"
+        f"4. 退群自动失效，奖励已发不追回"
     )
     await send_reply(update, context, text)
+
+
+async def cmd_invite_test(update, context):
+    """自测邀请：模拟一个虚拟新成员通过本群你专属链接跑全流程（chat_join_request → 批准 → service message → 归因 → 奖励）。
+    不真发群消息、不真加好友；纯本地模拟，仅用于排查「链接明明创建了为啥不归因」。"""
+    if not await need_auth(update, context): return
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    if cid not in AUTHORIZED_GROUPS:
+        await send_reply(update, context, "❌ 本群未授权。"); return
+    mine = invite_links.get(cid, {}).get(uid)
+    if not mine:
+        await send_reply(update, context, "❌ 你还没有专属链接，先发「邀请」领。"); return
+    link = mine.get("link", "")
+    # 模拟一个虚拟受邀人（用负数 ID 避免与真用户冲突）
+    fake_uid = -int(time.time()) % (10 ** 9)
+    fake_name = f"测试受邀{str(fake_uid)[-4:]}"
+    # 1) 模拟入群申请（带专属链接）→ invite_pending 存起来
+    invite_pending[f"{cid}:{fake_uid}"] = link
+    _inv_dbg(cid, f"[测试] 模拟入群申请 uid={fake_uid}，存链接 …{link[-12:]}")
+    # 2) 模拟 service message 入群（带 invite_link）
+    class _FakeLink: link = link
+    class _FakeMember: pass
+    class _FakeCMU: pass
+    cmu = _FakeCMU()
+    setattr(cmu, "invite_link", _FakeLink())
+    nm = _FakeMember(); nm.user = type("U", (), {"id": fake_uid, "first_name": fake_name, "is_bot": False})()
+    setattr(cmu, "new_chat_member", nm)
+    await _invite_track_join(cmu, cid, fake_uid, fake_name, context)
+    # 3) 自查：看记录/积分是否真到账
+    key = f"{cid}:{fake_uid}"
+    rec = invite_records.get(key, {})
+    new_bal = game_chips[cid].get(uid, 0)
+    old_bal = max(0, new_bal - int(rec.get("award", 0) or 0))
+    msg_lines = [
+        "🧪 <b>邀请全流程自测完成</b>",
+        f"<b>模拟受邀人</b>　{fake_name} <code>{fake_uid}</code>",
+        f"<b>专属链接</b>　…{link[-12:]}",
+        "",
+        f"<b>归因结果</b>　{'✅ 命中：' + str(rec.get('inviter', '?')) if rec.get('inviter') == uid else '❌ 未归因，看调试日志'}",
+        f"<b>奖励到账</b>　{'✅ +' + str(rec.get('award', 0)) + ' 分' if rec.get('award') else '❌ 未发奖'}",
+        f"<b>你的当前积分</b>　{new_bal}（{old_bal} → {new_bal}）",
+        "",
+        "📝 详细链路已写入 /邀请调试 的「最近事件」",
+    ]
+    await send_reply(update, context, "\n".join(msg_lines))
 
 
 async def on_new_members_msg(update, context):
@@ -7158,7 +7321,7 @@ async def on_member_event(update, context):
         logger.exception("成员事件处理异常（已吞并）")
 
 async def on_join_request(update, context):
-    """入群申请记录（群需开启「申请加入」；批准在 Telegram 客户端原生操作）。"""
+    """入群申请：记录 + 存归因链接 + **自动批准**（bot 为管理员时秒批，人进群→service 事件→归因→发奖全自动）。"""
     try:
         req = update.chat_join_request
         if not req:
@@ -7173,6 +7336,13 @@ async def on_join_request(update, context):
         else:
             _inv_dbg(cid, f"入群申请 uid={uid}，⚠️ 申请未携带链接")
         save_data()
+        # 自动批准：不批准人永远进不了群，归因/发奖链路就断在这（此前靠管理员去 Telegram 手动点，没人点=数据一直空）
+        if INVITE_AUTO_APPROVE and is_auth(cid) and uid not in BLACKLISTED_USERS:
+            try:
+                await context.bot.approve_chat_join_request(cid, uid)
+                _inv_dbg(cid, f"✅ 已自动批准 uid={uid}（{name}），等进群事件触发归因发奖")
+            except TelegramError as exc:
+                _inv_dbg(cid, f"⚠️ 自动批准 uid={uid} 失败：{exc}（bot 需为群管理员且有人审批权限；可去 Telegram 手动批准）")
     except Exception:
         logger.exception("入群申请处理异常（已吞并）")
 
@@ -7376,14 +7546,26 @@ async def _auto_race_tick(app, now):
             and max(0, min(23, RACE_HOURLY_START)) <= now.hour <= max(0, min(23, RACE_HOURLY_END))):
         return
     for cid in list(AUTHORIZED_GROUPS):
-        if not hourly_race_enabled.get(cid, True): continue
-        if cid in active_horse_races: continue
-        mode = current_game_mode()
-        jackpot = race_jackpot.get(cid, 0) if mode == "official" else 0
-        race = HorseRace(cid, ADMIN_USER_ID, jackpot, mode); active_horse_races[cid] = race
-        msg = await safe_send(app.bot, cid, await race.view(app), reply_markup=race.buttons())
-        if msg: race.game_msg_id = msg.message_id
-        race.task = asyncio.create_task(race.run(app)); save_data()
+        if not hourly_race_enabled.get(cid, True):
+            race_skip_stats[cid]["群开关关闭"] += 1; continue
+        if cid in active_horse_races:
+            race_skip_stats[cid]["已有进行中赛车"] += 1; continue
+        try:
+            mode = current_game_mode()
+            jackpot = race_jackpot.get(cid, 0) if mode == "official" else 0
+            race = HorseRace(cid, ADMIN_USER_ID, jackpot, mode); active_horse_races[cid] = race
+            msg = await safe_send(app.bot, cid, await race.view(app), reply_markup=race.buttons())
+            if not msg:
+                race_skip_stats[cid]["safe_send返回None"] += 1
+                active_horse_races.pop(cid, None); continue
+            race.game_msg_id = msg.message_id
+            race.task = asyncio.create_task(race.run(app))
+            race_last_sent[cid] = now.strftime("%Y-%m-%d %H:%M")
+            save_data()
+        except Exception as exc:
+            logger.exception(f"自动开赛 群 {cid} 异常")
+            race_skip_stats[cid][f"异常:{type(exc).__name__}"] += 1
+            active_horse_races.pop(cid, None)
 
 
 async def hourly_race_scheduler(app):
@@ -7400,6 +7582,55 @@ async def hourly_race_scheduler(app):
         except Exception:
             logger.exception("hourly_race_scheduler 本轮异常（已吞并继续）")
             await asyncio.sleep(60)
+
+
+# ---------- 定时任务调试 ----------
+async def cmd_schedule_status(update, context):
+    """管理员一键打印所有调度任务状态 + 每群最近推送。"""
+    uid = update.effective_user.id if update.effective_user else 0
+    if not is_bot_admin(uid):
+        await send_reply(update, context, "⛔ 仅管理员可用。"); return
+    now = now_bj()
+    lines = ["<b>🕐 定时任务状态</b>", ""]
+
+    # 1) 整点赛车
+    lines.append(f"<b>1️⃣ 整点自动赛车</b>　总开关：{'✅ 开' if RACE_AUTO_ENABLED and RACE_ENABLED else '❌ 关'}　时段：{RACE_HOURLY_START:02d}:00–{RACE_HOURLY_END:02d}:59　开赛分钟：{RACE_HOURLY_MINUTE:02d} 分")
+    if AUTHORIZED_GROUPS:
+        for cid in sorted(AUTHORIZED_GROUPS):
+            on = "✅" if hourly_race_enabled.get(cid, True) else "⏸"
+            last = race_last_sent.get(cid) or "（暂无记录）"
+            skips = race_skip_stats.get(cid, {})
+            skip_txt = ""
+            if skips:
+                items = ", ".join(f"{k}×{v}" for k, v in skips.items())
+                skip_txt = f"　跳过：{items}"
+            lines.append(f"　{on} <code>{cid}</code> {html.escape(chat_name_cache.get(cid, '?'))}　最近推送：{last}{skip_txt}")
+    else:
+        lines.append("　（无授权群）")
+    lines.append("")
+
+    # 2) 每日重置
+    lines.append(f"<b>2️⃣ 每日重置</b>　时刻：{DAILY_RESET_TIME}　上次业务日：{last_business_date or '（未记录）'}")
+    lines.append("")
+
+    # 3) 自动备份
+    jq = getattr(context.application, "job_queue", None)
+    if jq is not None:
+        lines.append(f"<b>3️⃣ 自动备份</b>　间隔：{BACKUP_INTERVAL_HOURS} 小时　job_queue：✅ 运行中")
+    else:
+        lines.append(f"<b>3️⃣ 自动备份</b>　间隔：{BACKUP_INTERVAL_HOURS} 小时　job_queue：❌ 未启用（需 python-telegram-bot[job-queue]）")
+    lines.append("")
+
+    # 4) 赛季结算
+    if season_active:
+        end_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(season_end_ts))
+        lines.append(f"<b>4️⃣ 赛季结算</b>　当前赛季：<b>{html.escape(season_name)}</b>（ID {season_id}）　结束：{end_str}")
+    else:
+        lines.append("<b>4️⃣ 赛季结算</b>　无进行中的赛季")
+    lines.append("")
+
+    lines.append(f"⏱ 当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
+    await send_reply(update, context, "\n".join(lines))
 
 
 # ---------- 数据备份/恢复 ----------
@@ -7696,6 +7927,8 @@ CMD_ALIASES = {
     "link": cmd_invite_link, "邀请链接": cmd_invite_link, "邀请": cmd_invite_link,
     "my_invite": cmd_my_invite, "我的邀请": cmd_my_invite, "邀请进度": cmd_my_invite,
     "invite_debug": cmd_invite_debug, "邀请调试": cmd_invite_debug,
+    "invite_test": cmd_invite_test, "测试邀请": cmd_invite_test, "邀请自测": cmd_invite_test,
+    "schedule_status": cmd_schedule_status, "定时任务": cmd_schedule_status, "调度状态": cmd_schedule_status,
     "流水": cmd_points_flow, "积分流水": cmd_points_flow,
     "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
 }
@@ -9043,7 +9276,12 @@ def start_health_server():
                         on = bool(x.get("on", True))
                         st = "<span style='color:#6fd08c'>上架</span>" if on else "<span style='color:#8a89a0'>下架</span>"
                         left = int(x.get("left", 0) or 0)
-                        rd_rows += (f"<tr><td>{html.escape(str(x.get('name', '?')))}</td>"
+                        tg = x.get("target_groups") or []
+                        if not tg:
+                            tg_txt = "<span style='color:#6fd08c'>全部授权群</span>"
+                        else:
+                            tg_txt = "<br>".join(f"<code>{c}</code> {html.escape(chat_name_cache.get(c, '') or str(c))}" for c in tg)
+                        rd_rows += (f"<tr><td>{html.escape(str(x.get('name', '?')))}<div style='font-size:11px;color:#8a89a0;margin-top:2px'>作用群：{tg_txt}</div></td>"
                                     f"<td>{int(x.get('price', 0) or 0)}</td>"
                                     f"<td>{'不限' if left <= 0 else left}</td>"
                                     f"<td>{int(x.get('redeemed', 0) or 0)}</td><td>{st}</td>"
@@ -9065,16 +9303,26 @@ def start_health_server():
                     if not ro_rows:
                         ro_rows = ("<tr><td colspan='6' style='text-align:center;color:#6a6982'>暂无兑换订单</td></tr>")
                     cmd_esc = html.escape(str(REDEEM_CMD))
+                    # 作用群多选（空勾 = 全部授权群）
+                    tg_checks = ""
+                    for cid, cname in sorted(((c, chat_name_cache.get(c, str(c))) for c in AUTHORIZED_GROUPS), key=lambda kv: kv[1]):
+                        tg_checks += (f"<label style='display:inline-flex;align-items:center;gap:4px;margin-right:12px;color:#cfcfe8'>"
+                                      f"<input type='checkbox' name='cids' value='{cid}' checked> {html.escape(cname)} <code style='font-size:11px;color:#8a89a0'>{cid}</code></label>")
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>群内发「{cmd_esc}」看商品列表，发「{cmd_esc} 编号」立即兑换；剩余 0=不限，限量商品兑完自动下架</div>{msg}"
                             "<div class='card'><h3>🛒 兑换商品</h3>"
                             "<table class='tbl'><tr><th>商品</th><th>所需积分</th><th>剩余</th><th>已兑换</th><th>状态</th><th>操作</th></tr>"
                             + rd_rows + "</table>"
-                            "<form method='post' action='/redeem_add' style='display:flex;gap:10px;margin-top:12px'>"
+                            "<form method='post' action='/redeem_add' style='margin-top:12px'>"
+                            "<div style='display:flex;gap:10px'>"
                             "<input type='text' name='name' placeholder='商品名称' required style='flex:2'>"
                             "<input type='number' name='price' placeholder='所需积分' required min='1' style='flex:1'>"
                             "<input type='number' name='left' placeholder='剩余数量(0=不限)' min='0' style='flex:1'>"
                             "<input type='text' name='desc' placeholder='说明(可选)' style='flex:2'>"
-                            "<button style='margin:0'>➕ 新增商品</button></form></div>"
+                            "<button style='margin:0'>➕ 新增商品</button></div>"
+                            "<div style='margin-top:8px;padding:8px;background:#1a1a2e;border-radius:6px'>"
+                            "<div style='color:#8a89a0;font-size:12px;margin-bottom:6px'>📍 作用群（不勾 = 全部授权群；只勾部分 = 只在勾选群触发列表）</div>"
+                            + tg_checks +
+                            "</div></form></div>"
                             "<div class='card' style='margin-top:18px'><h3>🧾 最近兑换订单（防伪核对）</h3>"
                             "<table class='tbl'><tr><th>单号</th><th>时间</th><th>群</th><th>用户ID</th><th>商品</th><th>积分</th></tr>"
                             + ro_rows + "</table></div>"
@@ -9179,9 +9427,37 @@ def start_health_server():
                                        ("经营日报推送", ADMIN_REPORT_ENABLED)):
                         _rows += ("<div style='display:flex;justify-content:space-between;padding:7px 2px;"
                                   "border-bottom:1px solid #26273a'><span>" + _name + "</span>" + _badge(_on) + "</div>")
+                    # 整点赛车每群推送明细：一眼看出哪个群没收到 + 网页直接开关每群
+                    _race_rows = ""
+                    for _cid in sorted(AUTHORIZED_GROUPS):
+                        _on = bool(hourly_race_enabled.get(_cid, True))
+                        _badge = "<span style='color:#6fd08c'>✅ 开</span>" if _on else "<span style='color:#8a89a0'>⏸ 关</span>"
+                        _last = race_last_sent.get(_cid) or "（暂无）"
+                        _tg = "<a href='/racegrp/" + str(_cid) + "/toggle' style='margin-left:8px'>" + ("关闭" if _on else "开启") + "</a>"
+                        _race_rows += ("<tr><td>" + _badge + " <code>" + str(_cid) + "</code> " + html.escape(chat_name_cache.get(_cid, '?')) + _tg + "</td>"
+                                       "<td>" + _last + "</td></tr>")
+                    if not _race_rows:
+                        _race_rows = "<tr><td colspan='2' style='text-align:center;color:#6a6982'>无授权群</td></tr>"
+                    # 兑换商品作用群
+                    _redeem_rows = ""
+                    for _i, _x in enumerate(redeem_goods):
+                        _tg = _x.get("target_groups") or []
+                        if not _tg:
+                            _tg_txt = "<span style='color:#6fd08c'>全部授权群</span>"
+                        else:
+                            _tg_txt = "<br>".join(f"<code>{c}</code> {html.escape(chat_name_cache.get(c, '?'))}" for c in _tg)
+                        _redeem_rows += (f"<tr><td>{html.escape(str(_x.get('name', '?')))}</td><td>{_tg_txt}</td></tr>")
+                    if not _redeem_rows:
+                        _redeem_rows = "<tr><td colspan='2' style='text-align:center;color:#6a6982'>暂无兑换商品</td></tr>"
                     form_open = ("<div class='card'><h3>📋 当前任务状态</h3>"
                                  "<div class='sub' style='margin-bottom:8px'>与下方开关实时联动；关闭后到点不再执行，"
                                  "重新开启从下一个周期生效（自动备份开关即时生效）</div>" + _rows + "</div>"
+                                 "<div class='card' style='margin-top:18px'><h3>⏰ 整点赛车 · 每群推送明细</h3>"
+                                 "<div class='sub'>每行一个授权群：状态（开关）/最近成功推送时间；下方红色统计是跳过原因计数（重启清零）</div>"
+                                 "<table class='tbl'><tr><th>群（点右侧字开/关本群赛车）</th><th>最近成功推送</th></tr>" + _race_rows + "</table></div>"
+                                 "<div class='card' style='margin-top:18px'><h3>🎁 兑换商品 · 作用群</h3>"
+                                 "<div class='sub'>作用群空=全授权群；不勾选部分=只在该群触发</div>"
+                                 "<table class='tbl'><tr><th>商品</th><th>作用群</th></tr>" + _redeem_rows + "</table></div>"
                                  "<div class='card' style='margin-top:18px'>")
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
                         + form_open +
@@ -9317,6 +9593,13 @@ def start_health_server():
                             lst[idx]["on"] = not lst[idx].get("on", True)
                         save_settings({})
                     self._redirect(back); return
+                mm = re.fullmatch(r"/racegrp/(-?\d+)/toggle", path)
+                if mm:  # 网页直接开/关某群整点自动赛车
+                    rcid = int(mm.group(1))
+                    if rcid in AUTHORIZED_GROUPS:
+                        hourly_race_enabled[rcid] = not hourly_race_enabled.get(rcid, True)
+                        save_data()
+                    self._redirect("/page/schedule"); return
                 mm = re.fullmatch(r"/menu_move/([a-z0-9_]+)/(-?1)", path)
                 if mm:
                     g, d = mm.group(1), int(mm.group(2))
@@ -9803,9 +10086,18 @@ def start_health_server():
                         except ValueError: return dflt
                     name = (form.get("name", [""])[0] or "").strip()[:30]
                     if name:
+                        # 作用群：空列表 = 所有授权群（默认全群上架）；勾选则只发到这些群
+                        cids_raw = form.getlist("cids") if hasattr(form, "getlist") else form.get("cids", [])
+                        target_groups = []
+                        for c in cids_raw:
+                            try:
+                                x = int(c)
+                                if x in AUTHORIZED_GROUPS: target_groups.append(x)
+                            except (ValueError, TypeError): pass
                         redeem_goods.append({"name": name, "price": max(1, _ird("price", 1)),
                                              "left": max(0, _ird("left", 0)),
                                              "redeemed": 0,
+                                             "target_groups": target_groups,
                                              "desc": (form.get("desc", [""])[0] or "").strip()[:60], "on": True})
                         save_settings({})
                     self._redirect("/page/points/redeem"); return

@@ -556,6 +556,16 @@ guesses = {}                                         # cid -> 竞猜 {"q","a","b
 invite_links = {}                                    # cid -> {uid: {"link","invite_id","ts"}} 每人专属邀请链接
 invite_records = {}                                  # "cid:uid" -> {"cid","inviter","invitee","invitee_name","ts","audit","left","award","link"}
 invite_pending = {}                                  # "cid:uid" -> 进群申请携带的邀请链接（人审批后 join 事件常不带链接，靠这个兜底归因；内存态）
+invite_debug = defaultdict(list)                     # cid -> [最近10条邀请链路调试事件]（每环失败不再静默，/邀请调试 可查）
+
+
+def _inv_dbg(cid, msg):
+    """邀请链路调试事件：任何一环（发链接/申请/进群/归因）走到都记录，失败不再无声无息。"""
+    try:
+        invite_debug[cid].append(f"{now_bj().strftime('%H:%M:%S')} {msg}")
+        invite_debug[cid] = invite_debug[cid][-10:]
+    except Exception:
+        pass
 buy_orders = {}                                      # oid -> {"cid","uid","amount","ts"} 购买积分申请（管理员人工确认）
 warn_counts = defaultdict(lambda: defaultdict(int))  # warn_counts[cid][uid] = 警告次数（网页成员列表加减）
 redeem_goods = []                                    # 积分兑换商品 [{"name","price","left","redeemed","desc","on"}] left=0 不限
@@ -4325,6 +4335,31 @@ async def cmd_points_flow(update, context):
     await send_reply(update, context, "\n".join(lines))
 
 
+async def cmd_invite_debug(update, context):
+    """邀请链路自检（管理员）：一条命令看清链路断在哪一环。"""
+    if not await need_auth(update, context): return
+    if not is_bot_admin(update.effective_user.id):
+        await send_reply(update, context, "❌ 邀请调试仅管理员可用。"); return
+    cid = update.effective_chat.id
+    lines = ["🔧 邀请链路自检", "━━━━━━━━━━━━━━━━━"]
+    lines.append(f"开关：{ '开' if INVITE_ENABLED else '关' }｜本群已授权：{ '是' if cid in AUTHORIZED_GROUPS else '否' }")
+    links = invite_links.get(cid, {})
+    if links:
+        for i_uid, info in links.items():
+            lines.append(f"已存链接：邀请人 {i_uid} → …{str(info.get('link', ''))[-12:]}")
+    else:
+        lines.append("已存链接：无（本群还没人发过「邀请」）")
+    pend = {k: v for k, v in invite_pending.items() if k.startswith(f"{cid}:")}
+    lines.append(f"待归因申请：{pend if pend else '空'}")
+    dbg = invite_debug.get(cid)
+    if dbg:
+        lines.append("最近事件：")
+        lines += [f"　{d}" for d in dbg[-10:]]
+    else:
+        lines.append("最近事件：无（发「邀请」/申请进群/批准，任何一个动作发生都会在这里留痕）")
+    await send_reply(update, context, "\n".join(lines))
+
+
 async def cmd_end(update, context):
     if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
@@ -6864,32 +6899,41 @@ async def _invite_track_join(cmu, cid, uid, name, context):
     """邀请追踪：进群事件携带 invite_link 时匹配邀请人，记记录/发奖励/通知（所有异常吞并）。"""
     try:
         if not INVITE_ENABLED or uid <= 0 or cid not in AUTHORIZED_GROUPS:
+            _inv_dbg(cid, f"进群 uid={uid} 跳过：开关{INVITE_ENABLED}/授权{cid in AUTHORIZED_GROUPS}")
             return
         key = f"{cid}:{uid}"
         if key in invite_records:   # 重复进群不重复计，仅视为回归
             invite_records[key]["left"] = False
+            _inv_dbg(cid, f"进群 uid={uid} 重复（已有记录，视为回归）")
             return
         link = (getattr(getattr(cmu, "invite_link", None), "link", "")
                 or invite_pending.pop(f"{cid}:{uid}", ""))   # 入群申请兜底：审批后的 join 事件常不带链接
+        _inv_dbg(cid, f"进群 uid={uid} 事件链接：{link or '（无）'}")
         inviter = 0
         for i_uid, info in invite_links.get(cid, {}).items():
             if info.get("link") == link and i_uid != uid:
                 inviter = i_uid
                 break
         if not inviter:
-            if link and str(INVITE_INVALID_MSG).strip():
-                try:
-                    await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_invalid_msg", name=name))
-                except Exception:
-                    pass
+            if link:
+                _inv_dbg(cid, f"⚠️ 归因失败：链接不在已存表（已存：{[i.get('link','')[-12:] for i in invite_links.get(cid, {}).values()]}）")
+                if str(INVITE_INVALID_MSG).strip():
+                    try:
+                        await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_invalid_msg", name=name))
+                    except Exception:
+                        pass
+            else:
+                _inv_dbg(cid, "⚠️ 归因失败：事件和申请都没带链接（普通群无法归因，需超级群）")
             return
         if inviter == uid:
+            _inv_dbg(cid, f"uid={uid} 自己邀自己，跳过")
             if str(INVITE_SELF_MSG).strip():
                 try:
                     await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_self_msg", name=name))
                 except Exception:
                     pass
             return
+        _inv_dbg(cid, f"✅ 归因成功 uid={uid} → 邀请人 {inviter}")
         rec = {"cid": cid, "inviter": inviter, "invitee": uid, "invitee_name": name,
                "ts": now_bj().strftime("%Y-%m-%d %H:%M"), "audit": "ok", "left": False,
                "award": 0, "link": link}
@@ -6984,6 +7028,7 @@ async def cmd_invite_link(update, context):
         invite_links.setdefault(cid, {})[uid] = {"link": link_obj.invite_link,
                                                  "invite_id": link_obj.invite_link.rsplit("/", 1)[-1],
                                                  "ts": now_bj().strftime("%Y-%m-%d %H:%M")}
+        _inv_dbg(cid, f"创建专属链接 inviter={uid}：…{link_obj.invite_link[-12:]}")
         save_data()
         mine = invite_links[cid][uid]
     total = _invite_count(uid, cid)
@@ -7002,6 +7047,7 @@ async def on_new_members_msg(update, context):
         for member in message.new_chat_members:
             uid = member.id
             name = member.first_name or f"用户{uid}"
+            _inv_dbg(message.chat_id, f"服务消息进群 uid={uid}（new_chat_members 兜底）")
             await _invite_track_join(message, cid, uid, name, context)
     except Exception:
         logger.exception("message 入群事件处理异常（已吞并）")
@@ -7026,6 +7072,7 @@ async def on_member_event(update, context):
             leave_records[cid].append({"ts": ts, "uid": uid, "name": name, "join": True})
             leave_records[cid] = leave_records[cid][-100:]
             member_joined_at[cid][uid] = time.time()  # 观察期起点
+            _inv_dbg(cid, f"chat_member 进群事件 uid={uid}，事件链接：{(getattr(getattr(cmu, 'invite_link', None), 'link', '') or '（无）')}")
             await _invite_track_join(cmu, cid, uid, name, context)  # 邀请系统追踪（内部自吞异常）
             if WELCOME_ENABLED:
                 try:
@@ -7049,6 +7096,9 @@ async def on_join_request(update, context):
         join_requests[cid] = join_requests[cid][-100:]
         if getattr(req, "invite_link", None) and getattr(req.invite_link, "link", ""):
             invite_pending[f"{cid}:{uid}"] = req.invite_link.link   # 邀请归因兜底：批准后的 join 事件可能不带链接
+            _inv_dbg(cid, f"入群申请 uid={uid}，已存待归因链接 …{req.invite_link.link[-12:]}")
+        else:
+            _inv_dbg(cid, f"入群申请 uid={uid}，⚠️ 申请未携带链接")
         save_data()
     except Exception:
         logger.exception("入群申请处理异常（已吞并）")
@@ -7560,6 +7610,7 @@ CMD_ALIASES = {
     "竞猜结算": cmd_guess_settle, "竞猜撤销": cmd_guess_cancel,
     "充值": cmd_buy_points, "购买积分": cmd_buy_points, "topup": cmd_buy_points,
     "link": cmd_invite_link, "邀请链接": cmd_invite_link, "邀请": cmd_invite_link,
+    "invite_debug": cmd_invite_debug, "邀请调试": cmd_invite_debug,
     "流水": cmd_points_flow, "积分流水": cmd_points_flow,
     "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
 }

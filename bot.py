@@ -4406,28 +4406,58 @@ async def cmd_my_invite(update, context):
 
 
 async def cmd_invite_debug(update, context):
-    """邀请链路自检（管理员）：一条命令看清链路断在哪一环。"""
+    """邀请系统体检（管理员）：bot 自查权限/事件源/数据，一条命令定位「为什么进人不加分」。"""
     if not await need_auth(update, context): return
     if not is_bot_admin(update.effective_user.id):
         await send_reply(update, context, "❌ 邀请调试仅管理员可用。"); return
     cid = update.effective_chat.id
-    lines = ["🔧 邀请链路自检", "━━━━━━━━━━━━━━━━━"]
-    lines.append(f"开关：{ '开' if INVITE_ENABLED else '关' }｜本群已授权：{ '是' if cid in AUTHORIZED_GROUPS else '否' }")
+    L = ["🔧 邀请系统体检（本群）", "━━━━━━━━━━━━━━━━━"]
+    L.append(f"开关：{'开' if INVITE_ENABLED else '关'}｜自动批准：{'开' if INVITE_AUTO_APPROVE else '关'}")
+    L.append(f"本群已授权：{'是' if cid in AUTHORIZED_GROUPS else '否'}")
+
+    # ① bot 在群里的权限 —— 邀请系统能工作的硬前提
+    st = "unknown"
+    try:
+        me = await context.bot.get_me()
+        mem = await context.bot.get_chat_member(cid, me.id)
+        st = mem.status
+        if st == "administrator":
+            r = mem  # ChatMemberAdministrator
+            L.append(f"bot 身份：✅ 管理员（can_invite_users={bool(getattr(r, 'can_invite_users', True))}，can_restrict_members={bool(getattr(r, 'can_restrict_members', False))}）")
+        elif st == "member":
+            L.append("bot 身份：❌ 普通成员 —— 收不到申请/进出事件，邀请系统不可能工作")
+            L.append("👉 在群设置把 bot 设为管理员（需勾选「邀请用户」权限）")
+        elif st == "restricted":
+            L.append("bot 身份：⚠️ 受限成员（被限制），多半收不到事件")
+            L.append("👉 在群设置把 bot 设为管理员")
+        else:
+            L.append(f"bot 身份：❌ {st}（不在群里或被踢）—— 先拉回群并设管理员")
+    except Exception as exc:
+        L.append(f"查询 bot 权限失败：{type(exc).__name__}（网络？）")
+
+    # ② 归因数据现状
     links = invite_links.get(cid, {})
-    if links:
-        for i_uid, info in links.items():
-            lines.append(f"已存链接：邀请人 {i_uid} → …{str(info.get('link', ''))[-12:]}")
-    else:
-        lines.append("已存链接：无（本群还没人发过「邀请」）")
+    L.append(f"本群专属链接：{len(links)} 条" if links else "本群专属链接：无（还没人发过「邀请」）")
+    recs = {k: v for k, v in invite_records.items() if k.startswith(f"{cid}:") and not v.get("left")}
+    L.append(f"本群有效邀请记录：{len(recs)} 条")
     pend = {k: v for k, v in invite_pending.items() if k.startswith(f"{cid}:")}
-    lines.append(f"待归因申请：{pend if pend else '空'}")
-    dbg = invite_debug.get(cid)
+    L.append(f"待归因申请（等进群事件）：{len(pend)} 条")
+    dbg = invite_debug.get(cid) or []
     if dbg:
-        lines.append("最近事件：")
-        lines += [f"　{d}" for d in dbg[-10:]]
+        L.append("最近事件：")
+        L += [f"　{d}" for d in dbg[-12:]]
     else:
-        lines.append("最近事件：无（发「邀请」/申请进群/批准，任何一个动作发生都会在这里留痕）")
-    await send_reply(update, context, "\n".join(lines))
+        L.append("最近事件：无 —— 若 bot 是管理员且刚有人点链接进群仍无事件，把 /邀请调试 结果发管理员排查")
+
+    # ③ 给结论
+    L.append("━━━━━━━━━━━━━━━━━")
+    if st == "administrator":
+        L.append("✅ bot 是管理员，事件源就绪。请做一次真实测试：")
+        L.append("发「邀请」→ 复制链接 → 换一个号点链接 → 应自动批准并入群加分。")
+        L.append("若仍无事件，说明群里进的人不是通过 bot 专属链接（普通拉人/群链接不算邀请）。")
+    else:
+        L.append("❌ 结论：先到群设置把 bot 设为管理员再测，否则改代码没用。")
+    await send_reply(update, context, "\n".join(L))
 
 
 async def cmd_end(update, context):
@@ -7227,8 +7257,9 @@ async def cmd_invite_link(update, context):
 
 
 async def cmd_invite_test(update, context):
-    """自测邀请：模拟一个虚拟新成员通过本群你专属链接跑全流程（chat_join_request → 批准 → service message → 归因 → 奖励）。
-    不真发群消息、不真加好友；纯本地模拟，仅用于排查「链接明明创建了为啥不归因」。"""
+    """邀请归因预演（管理员）：只读模拟，不改任何数据、不发奖励。
+    演示两种真实场景会归因给谁：①事件带链接 ②事件漏链接(Telegram 常见)→宽松归因。
+    用于定位「进人不加分」到底是事件源断了，还是归因判定断了。"""
     if not await need_auth(update, context): return
     cid = update.effective_chat.id
     uid = update.effective_user.id
@@ -7238,38 +7269,40 @@ async def cmd_invite_test(update, context):
     if not mine:
         await send_reply(update, context, "❌ 你还没有专属链接，先发「邀请」领。"); return
     link = mine.get("link", "")
-    # 模拟一个虚拟受邀人（用负数 ID 避免与真用户冲突）
-    fake_uid = -int(time.time()) % (10 ** 9)
-    fake_name = f"测试受邀{str(fake_uid)[-4:]}"
-    # 1) 模拟入群申请（带专属链接）→ invite_pending 存起来
-    invite_pending[f"{cid}:{fake_uid}"] = link
-    _inv_dbg(cid, f"[测试] 模拟入群申请 uid={fake_uid}，存链接 …{link[-12:]}")
-    # 2) 模拟 service message 入群（带 invite_link）
-    class _FakeLink: link = link
-    class _FakeMember: pass
-    class _FakeCMU: pass
-    cmu = _FakeCMU()
-    setattr(cmu, "invite_link", _FakeLink())
-    nm = _FakeMember(); nm.user = type("U", (), {"id": fake_uid, "first_name": fake_name, "is_bot": False})()
-    setattr(cmu, "new_chat_member", nm)
-    await _invite_track_join(cmu, cid, fake_uid, fake_name, context)
-    # 3) 自查：看记录/积分是否真到账
-    key = f"{cid}:{fake_uid}"
-    rec = invite_records.get(key, {})
-    new_bal = game_chips[cid].get(uid, 0)
-    old_bal = max(0, new_bal - int(rec.get("award", 0) or 0))
-    msg_lines = [
-        "🧪 <b>邀请全流程自测完成</b>",
-        f"<b>模拟受邀人</b>　{fake_name} <code>{fake_uid}</code>",
-        f"<b>专属链接</b>　…{link[-12:]}",
-        "",
-        f"<b>归因结果</b>　{'✅ 命中：' + str(rec.get('inviter', '?')) if rec.get('inviter') == uid else '❌ 未归因，看调试日志'}",
-        f"<b>奖励到账</b>　{'✅ +' + str(rec.get('award', 0)) + ' 分' if rec.get('award') else '❌ 未发奖'}",
-        f"<b>你的当前积分</b>　{new_bal}（{old_bal} → {new_bal}）",
-        "",
-        "📝 详细链路已写入 /邀请调试 的「最近事件」",
-    ]
-    await send_reply(update, context, "\n".join(msg_lines))
+    n_links = len([i for i, info in invite_links.get(cid, {}).items() if str(info.get("link", "")).startswith("http") and i != uid])
+    fake_uid = 10 ** 12 + int(time.time() * 1000) % (10 ** 11)
+
+    def _judge(evt_link):
+        """与 _invite_track_join 同款判定：返回 (inviter, 说明)。虚拟受邀人是 fake_uid。"""
+        if evt_link:
+            for i_uid, info in invite_links.get(cid, {}).items():
+                if info.get("link") == evt_link and i_uid != fake_uid:
+                    return i_uid, "命中：事件携带的链接与" + ("你的" if i_uid == uid else "别人的") + "专属链接一致"
+            return 0, "⚠️ 链接不在已存表（进的人用的是别处链接？）"
+        cands = [i_uid for i_uid, info in invite_links.get(cid, {}).items()
+                 if str(info.get("link", "")).startswith("http") and i_uid != fake_uid]
+        if len(cands) == 1:
+            return cands[0], "宽松归因命中：事件漏链接，本群恰只有一条专属链接"
+        if len(cands) > 1:
+            return 0, f"⚠️ 宽松归因失效：本群有 {len(cands)} 条专属链接，事件漏链接时无法判定"
+        return 0, "⚠️ 事件漏链接且本群没有专属链接，无从归因"
+
+    L = ["🧪 邀请归因预演（只读，不改数据）", "━━━━━━━━━━━━━━━━━"]
+    L.append(f"你的专属链接：…{link[-12:]}")
+    L.append(f"本群专属链接数（含你的）：{n_links + 1} 条")
+    L.append("")
+    L.append("<b>场景① 事件带链接</b>（Telegram 正常提供时）")
+    a, b = _judge(link)
+    L.append(f"　→ 归因：{'✅ ' + str(a) if a else '❌ 失败'}")
+    L.append(f"　　{b}")
+    L.append("")
+    L.append("<b>场景② 事件漏链接</b>（Telegram 对部分 bot 不提供 invite_link）")
+    c_, d = _judge("")
+    L.append(f"　→ 归因：{'✅ ' + str(c_) if c_ else '❌ 失败'}")
+    L.append(f"　　{d}")
+    L.append("")
+    L.append("判定失败 ≠ 系统坏了：先发 /邀请调试 看 bot 是不是管理员、有没有真进群事件。")
+    await send_reply(update, context, "\n".join(L))
 
 
 async def on_new_members_msg(update, context):

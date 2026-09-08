@@ -2073,22 +2073,17 @@ async def poker_table_text(game, app):
     phase = {"preflop":"翻牌前", "flop":"翻牌圈", "turn":"转牌圈", "river":"河牌圈"}.get(game.phase, game.phase)
     lines = [
         f"{'🏆 排位赛｜' if game.season else '🃏 积分德州'}｜{phase}",
-        "",
-        "━━━━━━━━━━━━━━━━━",
         f"🃏 公牌：{'  '.join(card_str(card) for card in game.board) or '未发牌'}",
-        "",
-        f"💰 奖池：{game.pot}｜当前下注：{game.current_bet}",
-        "━━━━━━━━━━━━━━━━━",
+        f"💰 奖池 {game.pot}｜下注 {game.current_bet}",
     ]
     current = game.current()
     if current:
         lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需跟：{max(0, game.current_bet - game.round_bets[current])}")
-    lines.append("")
-    lines.append("👥 玩家状态")
-    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━")
     for index, uid in enumerate(game.players, 1):
         status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
-        lines.extend([f"{index}. {await get_name(app, uid)}", f"   {status}｜投入 {game.total_bet[uid]}｜余筹 {game.chips[uid]}", ""])
+        mark = "👉" if uid == current else ""
+        lines.append(f"{mark}{index}. {await get_name(app, uid)} {status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
     return "\n".join(lines)
 
 
@@ -2779,38 +2774,34 @@ async def update_blackjack_ui(game, app):
             if msg: game.game_msg_id = msg.message_id
     elif game.phase == "playing":
         curr_uid = game.players[game.current_player_idx]
-        text = f"🃏 <b>21点 进行中</b>\n\n🏛 <b>庄家</b>：{game.get_card_str(game.dealer_hand, True)}\n\n"
-        for uid in game.players:
-            mark = " 👈 <b>行动中</b>" if uid == curr_uid else ""
-            text += f"👤 <b>玩家</b>：{await get_name(app, uid)} | {game.get_card_str(game.hands[uid])} ({game.get_score(game.hands[uid])}){mark}\n\n"
-        
-        # 1. 原地更新主面板文字
-        await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=None, parse_mode="HTML")
-        
-        # 2. 动态发送/更新底部的操作按钮
-        await safe_delete(app.bot, game.chat_id, game.game_msg_id if game.phase == "waiting" else game.action_msg_id)
-        
         dealer_peek = game.get_card_str(game.dealer_hand, True)
         my_hand = game.get_card_str(game.hands[curr_uid])
         my_score = game.get_score(game.hands[curr_uid])
-        
-        action_text = (
-            f"⏰ <b>玩家</b>：{await get_name(app, curr_uid)}\n\n"
-            f"🏛 <b>庄家</b>：{dealer_peek}\n\n"
-            f"👤 <b>我的</b>：{my_hand} ({my_score}点)"
-        )
-        
+        # 单一权威面板：牌桌+操作按钮同一条消息，原地编辑不闪跳；信息不再写两遍
+        lines = ["🃏 <b>21点</b>", f"🏛 庄家：{dealer_peek}", "━━━━━━━━━━━━━━━━━"]
+        for i, uid in enumerate(game.players, 1):
+            mark = "👉" if uid == curr_uid else ""
+            lines.append(f"{mark}{i}. {await get_name(app, uid)} {game.get_card_str(game.hands[uid])} ({game.get_score(game.hands[uid])})")
+        lines.append(f"⏳ <b>{await get_name(app, curr_uid)}</b> 行动｜我 {my_hand} ({my_score}点)")
+        text = "\n".join(lines)
+
         kb_rows = [[
-            InlineKeyboardButton("🃏 要牌 (Hit)", callback_data=f"bj_hit_{curr_uid}"),
-            InlineKeyboardButton("✋ 停牌 (Stand)", callback_data=f"bj_stand_{curr_uid}")
+            InlineKeyboardButton("🃏 要牌", callback_data=f"bj_hit_{curr_uid}"),
+            InlineKeyboardButton("✋ 停牌", callback_data=f"bj_stand_{curr_uid}")
         ]]
-        
         wallet = game_chips
         if len(game.hands[curr_uid]) == 2 and wallet[game.chat_id][curr_uid] >= game.bets[curr_uid] and not game.is_blackjack(game.hands[curr_uid]):
-            kb_rows.append([InlineKeyboardButton("💰 双倍 (Double Down)", callback_data=f"bj_double_{curr_uid}")])
-        
-        msg = await safe_send(app.bot, game.chat_id, action_text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="HTML")
-        if msg: game.action_msg_id = msg.message_id
+            kb_rows.append([InlineKeyboardButton("💰 双倍", callback_data=f"bj_double_{curr_uid}")])
+        kb = InlineKeyboardMarkup(kb_rows)
+
+        edited = await safe_edit(app.bot, game.chat_id, game.game_msg_id, text, reply_markup=kb, parse_mode="HTML") if game.game_msg_id else None
+        if edited:
+            game.game_msg_id = edited.message_id
+        else:
+            await safe_delete(app.bot, game.chat_id, game.game_msg_id)
+            msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
+            if msg: game.game_msg_id = msg.message_id
+        game.action_msg_id = None
     elif game.phase == "dealer_turn":
         # 庄家补牌后直接进入结算（消息删除由 finished 分支统一处理，避免重复删除）
         game.dealer_play()
@@ -3431,24 +3422,25 @@ async def update_jinhua_waiting(game, app):
 async def jinhua_table_text(game, app):
     lines = [
         "🌸 炸金花",
-        f"💰 奖池：{game.pot}｜单注：{game.current_bet}" + ("（看牌者×2）" if JINHUA_SEEN_DOUBLE else ""),
+        f"💰 奖池 {game.pot}｜单注 {game.current_bet}" + ("（看牌者×2）" if JINHUA_SEEN_DOUBLE else ""),
     ]
     if game.last_action:
         lines.append(f"🔔 上一手：{game.last_action}")
-    lines.append("━━━━━━━━━━━━━━━━━")
     current = game.current() if game.phase == "betting" else None
     if current:
         lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需补：{max(0, game._target(current) - game.round_bets[current])}")
-    # 紧凑排版：每人 1 行（原每人 3 行，人多时牌桌消息过长）
+    lines.append("━━━━━━━━━━━━━━━━━")
+    # 紧凑排版：每人 1 行；👉 标记当前行动者（与德州/21点一致）
     for index, uid in enumerate(game.players, 1):
         status = "❌弃" if uid in game.folded else "🔥全下" if uid in game.all_in else "🟢"
         seen_mark = "👁" if uid in game.seen else "🎴"
-        lines.append(f"{index}. {await get_name(app, uid)}｜{seen_mark}{status}｜投 {game.total_bet[uid]}｜余 {game.chips[uid]}")
+        mark = "👉" if uid == current else ""
+        lines.append(f"{mark}{index}. {await get_name(app, uid)} {seen_mark}{status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
     return "\n".join(lines)
 
 
 def jinhua_buttons(game, uid):
-    """紧凑布局：非行动玩家仅「看牌」；行动玩家 3 行搞定（看牌/弃牌/跟注 → 加注/全下 → 比牌/刷新）。"""
+    """紧凑布局：非行动玩家仅「看牌」；行动玩家每行最多2按钮（看牌|弃牌 → 跟注|比牌 → 加注|刷新 → 全下）。"""
     if uid not in game.folded:
         label = "🃏 查看手牌" if uid in game.seen else "👁 看牌"
         if uid != game.current():
@@ -3456,24 +3448,20 @@ def jinhua_buttons(game, uid):
     else:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新界面", callback_data="jh_refresh")]])
     to_call = max(0, game._target(uid) - game.round_bets[uid])
-    # 行1：看牌 | 弃牌 | 跟注
+    # 每行最多2个按钮压宽度（面板宽度=最宽行）：看牌|弃牌 / 跟注|比牌 / 加注|刷新 / 全下独占
     rows = [[InlineKeyboardButton(label, callback_data="jh_see"),
-             InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold"),
-             InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}",
-                                  callback_data="jh_call")]]
-    # 行2：加注 | 全下（各自筹码不足时隐藏）
-    row2 = []
-    if uid not in game.raise_locked and game.chips[uid] >= to_call + JINHUA_BASE:
-        row2.append(InlineKeyboardButton(f"🔼 加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}"))
-    if game.chips[uid] > 0:
-        row2.append(InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="jh_allin"))
-    if row2: rows.append(row2)
-    # 行3：比牌 | 刷新
-    row3 = []
+             InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold")]]
+    row_call = [InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}", callback_data="jh_call")]
     if sum(1 for p in game.players if p not in game.folded) >= 2:
-        row3.append(InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"))
-    row3.append(InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh"))
-    rows.append(row3)
+        row_call.append(InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"))
+    rows.append(row_call)
+    row_raise = []
+    if uid not in game.raise_locked and game.chips[uid] >= to_call + JINHUA_BASE:
+        row_raise.append(InlineKeyboardButton(f"🔼 加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}"))
+    row_raise.append(InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh"))
+    rows.append(row_raise)
+    if game.chips[uid] > 0:
+        rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="jh_allin")])
     return InlineKeyboardMarkup(rows)
 
 

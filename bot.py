@@ -476,6 +476,7 @@ RP_LUCK_ENABLED = 1         # 1=拼手气随机拆分 0=平均分
 RP_LOG_ENABLED = 1          # 抢完公布手气排行
 MALL_ENABLED = 1            # 积分商城开关
 MALL_PAGE_SIZE = 10         # 商城列表每页商品数
+MALL_LIST_DELETE_SECONDS = 300  # 兑换/商城列表消息自动删除秒数（5 分钟；按钮要活所以不能 30 秒太短；0=不删）
 LEVEL_NOTIFY_ENABLED = 1    # 等级升降群内通知开关
 LEVEL_CMD = "我的等级"
 RANK_1_EMOJI = "🥇"
@@ -608,7 +609,14 @@ def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=Non
                "sidebar_order": sidebar_order,
                "chat_rules": list(chat_rules), "buy_packages": list(buy_packages),
                "point_levels": list(POINT_LEVELS), "mall_items": list(MALL_ITEMS),
-               "redeem_goods": list(redeem_goods)}
+               "redeem_goods": list(redeem_goods),
+               # 4 个调度任务的作用对象（json 不支持 set，存 list）
+               "schedule_targets": {
+                   "daily_reset_groups": sorted(daily_reset_groups),
+                   "leaderboard_groups": sorted(leaderboard_groups),
+                   "backup_admins": sorted(backup_admins),
+                   "admin_report_admins": sorted(admin_report_admins),
+               }}
     try:
         tmp = f"{SETTINGS_FILE}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -825,6 +833,22 @@ def load_settings():
             v = payload.get(key)
             if isinstance(v, list):
                 gl.clear(); gl.extend(x for x in v if isinstance(x, dict))
+        # 4 个调度任务的作用对象
+        st = payload.get("schedule_targets") or {}
+        if isinstance(st, dict):
+            try: daily_reset_groups.update(int(x) for x in st.get("daily_reset_groups", []) if str(x).lstrip("-").isdigit())
+            except Exception: pass
+            try: leaderboard_groups.update(int(x) for x in st.get("leaderboard_groups", []) if str(x).lstrip("-").isdigit())
+            except Exception: pass
+            try: backup_admins.update(int(x) for x in st.get("backup_admins", []) if str(x).lstrip("-").isdigit())
+            except Exception: pass
+            try: admin_report_admins.update(int(x) for x in st.get("admin_report_admins", []) if str(x).lstrip("-").isdigit())
+            except Exception: pass
+        # 懒填默认：空集合 = 默认全授权群/默认管理员
+        if not daily_reset_groups: daily_reset_groups.update(AUTHORIZED_GROUPS)
+        if not leaderboard_groups: leaderboard_groups.update(AUTHORIZED_GROUPS)
+        if not backup_admins: backup_admins.add(ADMIN_USER_ID)
+        if not admin_report_admins: admin_report_admins.add(ADMIN_USER_ID)
         # 从数据还原的：立刻回写设置文件，保证网页端与后续保存读到一致内容
         if origin == "data":
             _write_settings_file(payload.get("fields", {}), _web_password,
@@ -883,6 +907,11 @@ blackjack_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(i
 jinhua_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 race_jackpot = defaultdict(int)
 hourly_race_enabled = defaultdict(lambda: False)
+# 各调度任务的"作用对象"（网页可配）：每日重置/德州日榜=作用群；备份/日报=接收私聊的管理员
+daily_reset_groups = set()    # 默认全授权群，启动时懒填
+leaderboard_groups = set()
+backup_admins = set()         # 默认 {ADMIN_USER_ID}，启动时懒填
+admin_report_admins = set()
 # 调度任务调试：每群最后成功开赛时间 + 跳过原因计数（/定时任务 调试命令读这些）
 race_last_sent = {}                                  # cid -> "YYYY-MM-DD HH:MM"
 race_skip_stats = defaultdict(lambda: defaultdict(int))  # cid -> {reason: count}
@@ -1095,6 +1124,8 @@ def force_save_now():
                 "redeem_orders": redeem_orders[-500:],
                 "game_flows": game_flows[-2000:],
                 "invite_records": {k: dict(v) for k, v in invite_records.items() if isinstance(v, dict)},
+                "invite_pending": {k: v for k, v in invite_pending.items()},  # 待归因：容器重启也不丢
+                "invite_debug": {str(cid): list(v) for cid, v in invite_debug.items()},
                 "invite_links": {str(cid): {str(uid): dict(v) for uid, v in users.items()}
                                  for cid, users in invite_links.items()},
                 "warn_counts": {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in warn_counts.items()},
@@ -1299,6 +1330,10 @@ def load_data():
         invite_records.clear()
         for k, v in data.get("invite_records", {}).items():
             if isinstance(v, dict): invite_records[str(k)] = dict(v)
+        invite_pending.update(data.get("invite_pending", {}))
+        invite_debug.clear()
+        for cid, lst in data.get("invite_debug", {}).items():
+            invite_debug[int(cid)] = list(lst)[-10:]
         invite_links.clear()
         for cid, users in data.get("invite_links", {}).items():
             for uid, v in users.items():
@@ -4460,6 +4495,49 @@ async def cmd_invite_debug(update, context):
     await send_reply(update, context, "\n".join(L))
 
 
+async def cmd_invite_report(update, context):
+    """手动报备入群（管理员兜底）：当 chat_join_request / chat_member / service message 三路事件都丢时用。
+    用法：/报备入群 新人名字/uid → 拿 invite_pending 里本群最近一条申请链接，强制走 _invite_track_join 归因+发奖。
+    不传名字：列出本群待归因申请清单（每条 [归因] 按钮）。"""
+    if not await need_auth(update, context): return
+    if not is_bot_admin(update.effective_user.id):
+        await send_reply(update, context, "❌ 仅管理员可用。"); return
+    cid = update.effective_chat.id
+    pend = [(k, v) for k, v in invite_pending.items() if k.startswith(f"{cid}:")]
+
+    if not context.args:
+        if not pend:
+            await send_reply(update, context, "📭 本群没有待归因申请。\n（如果刚刚有人进群且调试无事件，先让 ta 再点一次链接走申请，再发「/报备入群 名字」）")
+            return
+        rows = []
+        L = ["<b>📋 本群待归因申请（点按钮强制归因）</b>"]
+        for i, (k, link) in enumerate(pend[:20], 1):
+            uid_str = k.split(":", 1)[1]
+            L.append(f"{i}. <code>{uid_str}</code>　链接 …{str(link)[-12:]}")
+            rows.append([InlineKeyboardButton(f"✅ 归因 #{i}", callback_data=f"invreport_{i}")])
+        L.append("\n用法：/报备入群 名字/uid 直接归给最近一条")
+        await send_reply(update, context, "\n".join(L), kb=InlineKeyboardMarkup(rows))
+        return
+
+    target = context.args[0].strip()
+    if not pend:
+        await send_reply(update, context, f"📭 本群无待归因申请，无法给「{html.escape(target)}」归因。\n让 ta 再点一次链接走申请流程，再发本命令。")
+        return
+    k, link = pend[-1]
+    uid_ = int(k.split(":", 1)[1])
+    _inv_dbg(cid, f"[手动报备] {target} → 用 invite_pending 的 {k}（链接 …{link[-12:]}）归因")
+    cmu = type("CMU", (), {})()
+    setattr(cmu, "invite_link", type("L", (), {"link": link})())
+    name = target.lstrip("@")
+    await _invite_track_join(cmu, cid, uid_, name, context)
+    key = f"{cid}:{uid_}"
+    rec = invite_records.get(key, {})
+    if rec.get("inviter"):
+        await send_reply(update, context, f"✅ 手动归因成功：<b>{html.escape(target)}</b> 算作 <code>{rec['inviter']}</code> 邀请，奖励 {rec.get('award', 0)} 分")
+    else:
+        await send_reply(update, context, f"⚠️ 归因未建记录，看调试：{invite_debug.get(cid, [])[-3:]}")
+
+
 async def cmd_end(update, context):
     if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
@@ -5155,8 +5233,7 @@ async def on_button(update, context):
                     if isinstance(sb, int) and sb <= 0:
                         new_rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
                     else:
-                        new_rows.append([InlineKeyboardButton(f"🛒 {i}. {item['name']} — {_mall_price(item)}分", callback_data=f"mall_show_{i}"),
-                                         InlineKeyboardButton("✅ 立即兑换", callback_data=f"mall_buy_{i}")])
+                        new_rows.append([InlineKeyboardButton(f"{i}. {item['name']} — {_mall_price(item)} 积分 ✅ 立即兑换", callback_data=f"mall_buy_{i}")])
                 nav = []
                 if page > 1: nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
                 if pages > 1: nav.append(InlineKeyboardButton(f"📄 {page}/{pages}", callback_data="noop"))
@@ -5182,6 +5259,21 @@ async def on_button(update, context):
             except ValueError:
                 await q.answer("无效商品", show_alert=True); return
             await _redeem_buy_cb(q, idx, context)
+            return
+        if data.startswith("invreport_"):
+            try: idx = int(data[len("invreport_"):])
+            except ValueError: await q.answer(); return
+            cid, uid = q.message.chat.id, q.from_user.id
+            if not is_bot_admin(uid): await q.answer("仅管理员", show_alert=True); return
+            pend = [(k, v) for k, v in invite_pending.items() if k.startswith(f"{cid}:")]
+            if not (1 <= idx <= len(pend)): await q.answer("已失效", show_alert=True); return
+            k, link = pend[idx - 1]
+            uid_ = int(k.split(":", 1)[1])
+            cmu = type("CMU", (), {})()
+            setattr(cmu, "invite_link", type("L", (), {"link": link})())
+            await _invite_track_join(cmu, cid, uid_, "报备入群", context)
+            rec = invite_records.get(f"{cid}:{uid_}", {})
+            await q.answer(f"✅ 已归因 奖励 {rec.get('award', 0)} 分" if rec.get('inviter') else "⚠️ 未建记录", show_alert=True)
             return
         if data.startswith("rp_grab_"):
             p = rp_packets.get(data[8:])
@@ -5811,16 +5903,19 @@ async def cmd_points_redeem(update, context):
             left_txt = "不限" if left <= 0 else str(left)
             lines.append(f"{i}. {x['name']}　—　{int(x.get('price', 0) or 0)} 积分　剩余 {left_txt}")
         lines.append("")
-        lines.append(f"💡 点下方【✅ 立即兑换】按钮直接兑换；也可发「{REDEEM_CMD} 编号/名称」")
+        mins = max(1, MALL_LIST_DELETE_SECONDS // 60)
+        lines.append(f"💡 点下方蓝色按钮兑换（{mins} 分钟后消息自动删除）；也可发「{REDEEM_CMD} 编号/名称」")
         rows = []
         for i, x in enumerate(items, 1):
             price = int(x.get("price", 0) or 0)
-            rows.append([
-                InlineKeyboardButton(f"🛒 {i}. {x['name']} — {price}分", callback_data=f"redeem_show_{i}"),
-                InlineKeyboardButton("✅ 立即兑换", callback_data=f"redeem_buy_{i}"),
-            ])
-        await safe_send(context.bot, cid, "\n".join(lines),
-                        reply_markup=InlineKeyboardMarkup(rows))
+            left = int(x.get("left", 0) or 0)
+            left_txt = "不限" if left <= 0 else str(left)
+            # 整行一个 button：与竞品一致——点商品行任何位置都直接兑换
+            rows.append([InlineKeyboardButton(f"{i}. {x['name']} — {price} 积分 剩余 {left_txt}  ✅ 立即兑换", callback_data=f"redeem_buy_{i}")])
+        msg = await safe_send(context.bot, cid, "\n".join(lines),
+                              reply_markup=InlineKeyboardMarkup(rows))
+        if msg and MALL_LIST_DELETE_SECONDS > 0:
+            schedule_delete(context.application, cid, msg, MALL_LIST_DELETE_SECONDS)
         return
     arg = args[0].strip()
     item = None
@@ -5864,10 +5959,8 @@ async def cmd_mall(update, context):
         if isinstance(stock_btn, int) and stock_btn <= 0:
             rows.append([InlineKeyboardButton(f"{i}. {item['name']}（已售罄）", callback_data="noop")])
         else:
-            rows.append([
-                InlineKeyboardButton(f"🛒 {i}. {item['name']} — {_mall_price(item)}分", callback_data=f"mall_show_{i}"),
-                InlineKeyboardButton("✅ 立即兑换", callback_data=f"mall_buy_{i}"),
-            ])
+            # 整行一个 button：与竞品一致——点商品行任何位置都直接兑换
+            rows.append([InlineKeyboardButton(f"{i}. {item['name']} — {_mall_price(item)} 积分 ✅ 立即兑换", callback_data=f"mall_buy_{i}")])
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))
@@ -5877,8 +5970,8 @@ async def cmd_mall(update, context):
         nav.append(InlineKeyboardButton("➡ 下一页", callback_data=f"mall_page_{page+1}"))
     if nav: rows.append(nav)
     kb = InlineKeyboardMarkup(rows) if rows else None
-    # 列表+按钮同条消息；不自动删（按钮要活到用户点完）
-    await send_reply(update, context, "\n".join(lines), kb=kb, delete_after=0)
+    # 列表+按钮同条消息；delete_after=MALL_LIST_DELETE_SECONDS 让按钮活到用完再清群
+    await send_reply(update, context, "\n".join(lines), kb=kb, delete_after=MALL_LIST_DELETE_SECONDS)
 
 async def cmd_mall_buy(update, context):
     if not await need_auth(update, context): return
@@ -7313,6 +7406,7 @@ async def on_new_members_msg(update, context):
         if not message or not message.new_chat_members:
             return
         cid = message.chat_id
+        _inv_dbg(cid, f"[svc] on_new_members_msg 触发 新成员数={len(message.new_chat_members)}")
         for member in message.new_chat_members:
             uid = member.id
             name = member.first_name or f"用户{uid}"
@@ -7329,6 +7423,7 @@ async def on_member_event(update, context):
         if not cmu:
             return
         cid = cmu.chat.id
+        _inv_dbg(cid, f"[evt] on_member_event 触发 cid={cid}")
         new, old = cmu.new_chat_member, cmu.old_chat_member
         uid, name = new.user.id, new.user.first_name or f"用户{new.user.id}"
         ts = now_bj().strftime("%Y-%m-%d %H:%M")
@@ -7360,6 +7455,7 @@ async def on_join_request(update, context):
         if not req:
             return
         cid = req.chat.id
+        _inv_dbg(cid, f"[req] on_join_request 触发 cid={cid}")
         uid, name = req.from_user.id, req.from_user.first_name or f"用户{req.from_user.id}"
         join_requests[cid].append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "uid": uid, "name": name})
         join_requests[cid] = join_requests[cid][-100:]
@@ -7416,6 +7512,10 @@ async def daily_reset_scheduler(app):
         await asyncio.sleep((target-now).total_seconds())
         if not DAILY_RESET_ENABLED:  # 后台「定时任务」开关：关闭期间到点不执行
             continue
+        # 懒填默认：空作用群 = 全授权群
+        if not daily_reset_groups: daily_reset_groups.update(AUTHORIZED_GROUPS)
+        target_groups = daily_reset_groups & AUTHORIZED_GROUPS
+        if not target_groups: continue
         try:
             today = now_bj().strftime("%Y-%m-%d")
             # 排位赛到点自动结算已移至独立的 season_settle_scheduler（精确到分钟），此处不再处理
@@ -7430,7 +7530,9 @@ async def daily_reset_scheduler(app):
                     if poker.season and poker.phase != "waiting":
                         season_protected.update((poker.chat_id, uid) for uid in poker.players)
                 day_key = (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")
-                for cid, users in season_points.items():
+                for cid in target_groups:  # 只重置作用群
+                    users = season_points.get(cid)
+                    if not users: continue
                     for uid in list(users.keys()):
                         if (cid, uid) in season_protected:
                             continue  # 进行中排位局跳过，等结算补重置
@@ -7439,7 +7541,8 @@ async def daily_reset_scheduler(app):
                             season_profit_by_date[day_key][cid][uid] += day_profit
                         users[uid] = SEASON_START_CHIPS
                 save_data()
-            for cid in race_daily_stats: race_daily_stats[cid] = [0] * HORSE_COUNT
+            for cid in target_groups:
+                if cid in race_daily_stats: race_daily_stats[cid] = [0] * HORSE_COUNT
             archive_old_profit_data()
             # 积分系统：清掉前天的聊天积分（保留当天用于跨午夜），过期红包退余款
             chat_today.pop((now_bj() - timedelta(days=2)).strftime("%Y-%m-%d"), None)
@@ -7476,6 +7579,9 @@ async def leaderboard_scheduler(app):
         await asyncio.sleep((target-now).total_seconds())
         if not LEADERBOARD_ENABLED:  # 后台「定时任务」开关：关闭期间到点不推送
             continue
+        if not leaderboard_groups: leaderboard_groups.update(AUTHORIZED_GROUPS)
+        target_groups = leaderboard_groups & AUTHORIZED_GROUPS
+        if not target_groups: continue
         try:
             # 只推送并清空德州当日榜；其他游戏榜保留累计（总数）
             date = now_bj().strftime("%Y-%m-%d"); texas_snapshot = poker_profit_by_date.pop(date, {})
@@ -7488,12 +7594,14 @@ async def leaderboard_scheduler(app):
                         texas_snapshot[c][u] = texas_snapshot.get(c, {}).get(u, 0) + a
             for cid, data in texas_snapshot.items():
                 if not data: continue
+                if cid not in target_groups: continue  # 只推目标群
                 lines = [f"🏆 德州当日排行榜（{date}）", "━"*14]
                 for i, (uid, amount) in enumerate(sorted(data.items(), key=lambda x:x[1], reverse=True)[:50], 1): lines.append(f"{rank_marker(i)} {await get_name(app, uid)}：{amount:+d}")
                 await safe_send_long(app.bot, cid, "\n".join(lines))
             # 排位赛每日 23:50 推送「当日分数」（每人每天从 2W 起始，当日分即当前分）
             if season_active:
                 for cid in list(season_points.keys()):
+                    if cid not in target_groups: continue  # 只推目标群
                     users = season_points.get(cid, {})
                     if not users: continue
                     day_standings = sorted(users.items(), key=lambda x: (-x[1], x[0]))
@@ -7551,7 +7659,7 @@ async def build_daily_report_text(app, yesterday):
 
 
 async def admin_report_scheduler(app):
-    """经营日报：每天定时把昨日经营数据私聊推送管理员（时间网页可配，改完即时生效）。"""
+    """经营日报：每天定时把昨日经营数据私聊推送给「配置的目标管理员」（时间网页可配，改完即时生效）。"""
     sent_date = None
     while True:
         now = now_bj()
@@ -7561,12 +7669,15 @@ async def admin_report_scheduler(app):
         await asyncio.sleep(max(1, (target - now).total_seconds()))
         if not ADMIN_REPORT_ENABLED:  # 后台「定时任务」开关：关闭期间到点不推送
             continue
+        if not admin_report_admins: admin_report_admins.add(ADMIN_USER_ID)
         try:
             yesterday = (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")
             if sent_date == yesterday: continue
             sent_date = yesterday
             text = await build_daily_report_text(app, yesterday)
-            await safe_send_long(app.bot, ADMIN_USER_ID, text)
+            for uid in list(admin_report_admins):
+                try: await safe_send_long(app.bot, uid, text)
+                except Exception as exc: logger.warning("日报推送 %s 失败: %s", uid, exc)
         except Exception:
             logger.exception("admin_report_scheduler 本轮异常（已吞并继续）")
 
@@ -7961,6 +8072,7 @@ CMD_ALIASES = {
     "my_invite": cmd_my_invite, "我的邀请": cmd_my_invite, "邀请进度": cmd_my_invite,
     "invite_debug": cmd_invite_debug, "邀请调试": cmd_invite_debug,
     "invite_test": cmd_invite_test, "测试邀请": cmd_invite_test, "邀请自测": cmd_invite_test,
+    "invite_report": cmd_invite_report, "报备入群": cmd_invite_report, "邀请报备": cmd_invite_report,
     "schedule_status": cmd_schedule_status, "定时任务": cmd_schedule_status, "调度状态": cmd_schedule_status,
     "流水": cmd_points_flow, "积分流水": cmd_points_flow,
     "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
@@ -9450,6 +9562,38 @@ def start_health_server():
                     return _admin_page(gkey, sub=first, saved=saved, bad=bad)
                 form_open = "<div class='card'>"
                 if gkey == "schedule":
+                    def _sched_card(title, task, items, selected, subtitle, path):
+                        """通用作用对象切换卡：items=(id, 显示名) 列表，selected=当前开启 id 集合。"""
+                        if not items:
+                            return ("<div class='card' style='margin-top:18px'><h3>" + title + "</h3>"
+                                    "<div class='sub'>无可配置对象</div></div>")
+                        rows = ""
+                        for rid, name in items:
+                            on = rid in selected
+                            badge = "<span style='color:#6fd08c'>✅ 开</span>" if on else "<span style='color:#8a89a0'>⏸ 关</span>"
+                            btn = "<a href='" + path + str(rid) + "/toggle' style='margin-left:8px'>" + ("关闭" if on else "开启") + "</a>"
+                            rows += "<tr><td>" + badge + " " + html.escape(str(name)) + " <code style='font-size:11px;color:#8a89a0'>" + str(rid) + "</code>" + btn + "</td></tr>"
+                        return ("<div class='card' style='margin-top:18px'><h3>" + title + "</h3>"
+                                "<div class='sub'>" + subtitle + "（未勾选的不参与；都未勾=不执行该任务）</div>"
+                                "<table class='tbl'>" + rows + "</table></div>")
+
+                    # 4 个调度任务的作用对象
+                    sched_cards = ""
+                    grp_items = [(cid, chat_name_cache.get(cid, str(cid))) for cid in sorted(AUTHORIZED_GROUPS)]
+                    uid_items = [(uid, user_names.get(uid, str(uid))) for uid in sorted({ADMIN_USER_ID, *BOT_ADMINS})]
+                    if not daily_reset_groups: daily_reset_groups.update(AUTHORIZED_GROUPS)
+                    if not leaderboard_groups: leaderboard_groups.update(AUTHORIZED_GROUPS)
+                    if not backup_admins: backup_admins.add(ADMIN_USER_ID)
+                    if not admin_report_admins: admin_report_admins.add(ADMIN_USER_ID)
+                    sched_cards += _sched_card("🔄 每日重置 · 作用群", "dailyreset", grp_items, daily_reset_groups,
+                                               f"每日 {DAILY_RESET_TIME} 清理这些群的排位赛当日分/聊天积分/赛车当日统计", "/sch_dailyreset_toggle/")
+                    sched_cards += _sched_card("🏆 德州日榜推送 · 作用群", "leaderboard", grp_items, leaderboard_groups,
+                                               f"每日 {LEADERBOARD_TIME} 向这些群推送德州当日排行榜", "/sch_leaderboard_toggle/")
+                    sched_cards += _sched_card("💾 自动备份 · 接收私聊的管理员", "backup", uid_items, backup_admins,
+                                               f"每 {BACKUP_INTERVAL_HOURS} 小时私聊发送 bot_data.json + bot_settings.json", "/sch_backup_admins_toggle/")
+                    sched_cards += _sched_card("📊 经营日报 · 接收私聊的管理员", "report", uid_items, admin_report_admins,
+                                               f"每日 {ADMIN_REPORT_TIME} 私聊发送昨日经营数据", "/sch_report_admins_toggle/")
+
                     # 定时任务状态总览：一眼看出哪些任务在跑（与下方开关实时联动）
                     def _badge(_on):
                         return ("<span style='color:#6fd08c;font-weight:700'>✅ 开启</span>" if _on
@@ -9488,6 +9632,7 @@ def start_health_server():
                                  "<div class='card' style='margin-top:18px'><h3>⏰ 整点赛车 · 每群推送明细</h3>"
                                  "<div class='sub'>每行一个授权群：状态（开关）/最近成功推送时间；下方红色统计是跳过原因计数（重启清零）</div>"
                                  "<table class='tbl'><tr><th>群（点右侧字开/关本群赛车）</th><th>最近成功推送</th></tr>" + _race_rows + "</table></div>"
+                                 + sched_cards +
                                  "<div class='card' style='margin-top:18px'><h3>🎁 兑换商品 · 作用群</h3>"
                                  "<div class='sub'>作用群空=全授权群；不勾选部分=只在该群触发</div>"
                                  "<table class='tbl'><tr><th>商品</th><th>作用群</th></tr>" + _redeem_rows + "</table></div>"
@@ -9632,6 +9777,24 @@ def start_health_server():
                     if rcid in AUTHORIZED_GROUPS:
                         hourly_race_enabled[rcid] = not hourly_race_enabled.get(rcid, True)
                         save_data()
+                    self._redirect("/page/schedule"); return
+                # 4 个调度任务的作用对象切换：/sch_<task>_toggle/<id>
+                mm = re.fullmatch(r"/sch_(dailyreset|leaderboard)_toggle/(-?\d+)", path)
+                if mm:
+                    task, rid = mm.group(1), int(mm.group(2))
+                    target = daily_reset_groups if task == "dailyreset" else leaderboard_groups
+                    if rid in AUTHORIZED_GROUPS:
+                        if rid in target: target.discard(rid)
+                        else: target.add(rid)
+                        save_settings({})
+                    self._redirect("/page/schedule"); return
+                mm = re.fullmatch(r"/sch_(backup|report)_admins_toggle/(-?\d+)", path)
+                if mm:
+                    task, rid = mm.group(1), int(mm.group(2))
+                    target = backup_admins if task == "backup" else admin_report_admins
+                    if rid in target: target.discard(rid)
+                    else: target.add(rid)
+                    save_settings({})
                     self._redirect("/page/schedule"); return
                 mm = re.fullmatch(r"/menu_move/([a-z0-9_]+)/(-?1)", path)
                 if mm:
@@ -10216,13 +10379,14 @@ def start_health_server():
 
 
 async def auto_backup(context):
-    """定时把数据文件发给管理员私聊，当作云端持久化备份。
+    """定时把数据文件发给配置的目标管理员私聊，当作云端持久化备份。
 
     无持久磁盘的平台容器重启会清空磁盘，有这份备份就能用 /restore 恢复，
     最坏只丢一个备份周期（30 分钟）的积分变动。
     """
     if not BACKUP_ENABLED:  # 后台「定时任务」开关：关了就不备份，保存即时生效
         return
+    if not backup_admins: backup_admins.add(ADMIN_USER_ID)
     try:
         ok = await asyncio.to_thread(force_save_now)
         if not ok:
@@ -10231,36 +10395,41 @@ async def auto_backup(context):
         if not os.path.exists(DATA_FILE):
             logger.warning("自动备份：数据文件不存在，跳过本次")
             return
-        with open(DATA_FILE, "rb") as f:
-            sent = await context.bot.send_document(
-                chat_id=ADMIN_USER_ID,
-                document=f,
-                filename=f"auto_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                caption="🤖 每日自动备份（需要恢复时：回复此文件发 /restore）",
-            )
-        # 备份轮换：只保留最近 7 份，删掉更早的备份文件消息（私聊里 bot 可删自己发的文件）
-        if sent:
-            backup_msg_ids.append(sent.message_id)
-            while len(backup_msg_ids) > 7:
-                old = backup_msg_ids.pop(0)
-                try: await context.bot.delete_message(chat_id=ADMIN_USER_ID, message_id=old)
-                except Exception: pass  # 消息可能已被手动删除，忽略
-        # 设置单独备份：只要设置、不要数据时（例如重新部署想全新开局但保留配置），
-        # 回复这份文件发 /restore 即可，无需连带恢复积分数据。
+        for _uid in list(backup_admins):
+            try:
+                with open(DATA_FILE, "rb") as f:
+                    sent = await context.bot.send_document(
+                        chat_id=_uid,
+                        document=f,
+                        filename=f"auto_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                        caption="🤖 每日自动备份（需要恢复时：回复此文件发 /restore）",
+                    )
+                if sent and _uid == ADMIN_USER_ID:
+                    backup_msg_ids.append(sent.message_id)
+                    while len(backup_msg_ids) > 7:
+                        old = backup_msg_ids.pop(0)
+                        try: await context.bot.delete_message(chat_id=ADMIN_USER_ID, message_id=old)
+                        except Exception: pass  # 消息可能已被手动删除，忽略
+            except Exception as exc:
+                logger.warning("自动备份推送 %s 失败: %s", _uid, exc)
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, "rb") as f:
-                sent_cfg = await context.bot.send_document(
-                    chat_id=ADMIN_USER_ID,
-                    document=f,
-                    filename=f"bot_settings_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                    caption="⚙️ 网页设置备份（只需恢复设置：回复此文件发 /restore）",
-                )
-            if sent_cfg:
-                settings_backup_msg_ids.append(sent_cfg.message_id)
-                while len(settings_backup_msg_ids) > 7:
-                    old = settings_backup_msg_ids.pop(0)
-                    try: await context.bot.delete_message(chat_id=ADMIN_USER_ID, message_id=old)
-                    except Exception: pass
+            for _uid in list(backup_admins):
+                try:
+                    with open(SETTINGS_FILE, "rb") as f:
+                        sent_cfg = await context.bot.send_document(
+                            chat_id=_uid,
+                            document=f,
+                            filename=f"bot_settings_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                            caption="⚙️ 网页设置备份（只需恢复设置：回复此文件发 /restore）",
+                        )
+                    if sent_cfg and _uid == ADMIN_USER_ID:
+                        settings_backup_msg_ids.append(sent_cfg.message_id)
+                        while len(settings_backup_msg_ids) > 7:
+                            old = settings_backup_msg_ids.pop(0)
+                            try: await context.bot.delete_message(chat_id=ADMIN_USER_ID, message_id=old)
+                            except Exception: pass
+                except Exception as exc:
+                    logger.warning("设置备份推送 %s 失败: %s", _uid, exc)
         logger.info("自动备份完成")
     except Exception:
         logger.exception("自动备份失败")
@@ -10293,7 +10462,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^/'), route_command))
     app.add_handler(CallbackQueryHandler(on_button)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_media))  # 自动删除规则中心：媒体类
-    app.add_handler(ChatMemberHandler(on_member_event))       # 退群/入群事件（bot 需群管理员）
+    # 关键：chat_member_types 必须显式传 ANY_CHAT_MEMBER（默认 -1=MY_CHAT_MEMBER 只听 bot 自身状态变化，
+    # 普通新成员入群/退群触发的 chat_member 更新会被静默丢弃，调试里"最近事件"无埋点）
+    app.add_handler(ChatMemberHandler(on_member_event, chat_member_types=ChatMemberHandler.ANY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members_msg))  # 普通群入群兜底
     app.add_handler(ChatJoinRequestHandler(on_join_request))  # 入群申请事件（群需开「申请加入」）
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)

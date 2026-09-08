@@ -244,6 +244,7 @@ SETTINGS_FIELDS = [
     ("autodel_executable",    "AUTODEL_EXECUTABLE",    "可执行文件(exe/apk/bat等)", "bool", 0, 1, "autodel"),
     ("autodel_contact",       "AUTODEL_CONTACT",       "删除分享联系人", "bool", 0, 1, "autodel"),
     ("autodel_service",       "AUTODEL_SERVICE",       "删除系统消息(入退群/改群名等)", "bool", 0, 1, "autodel"),
+    ("autodel_service_seconds", "AUTODEL_SERVICE_SECONDS", "系统消息删除延迟(秒,0=立即删)", "int", 0, 86400, "autodel"),
     ("autodel_premium_emoji", "AUTODEL_PREMIUM_EMOJI", "删除会员表情(自定义表情)", "bool", 0, 1, "autodel"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "members/join"),
     ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "members/join"),
@@ -331,9 +332,8 @@ SETTINGS_FIELDS = [
     ("invite_reward_times",     "INVITE_REWARD_TIMES",     "每人最多发放奖励次数",      "int",   1,   10000,   "invite/config"),
     ("invite_link_cmd",         "INVITE_LINK_CMD",         "邀请链接指令(不带斜杠)",    "cmd",   0,   0,       "invite/config"),
     ("invite_rank_admin_only",  "INVITE_RANK_ADMIN_ONLY",  "排行仅管理员可查开关",      "bool",  0,   1,       "invite/config"),
-    ("invite_rank_today_cmd",   "INVITE_RANK_TODAY_CMD",   "今日邀请排行指令",          "cmd",   0,   0,       "invite/config"),
-    ("invite_rank_month_cmd",   "INVITE_RANK_MONTH_CMD",   "本月邀请排行指令",          "cmd",   0,   0,       "invite/config"),
-    ("invite_rank_all_cmd",     "INVITE_RANK_ALL_CMD",     "总邀请排行指令",            "cmd",   0,   0,       "invite/config"),
+    # （2026-09-08 去重移除：今日/本月/总邀请排行指令三字段与「命令管理」页重复，
+    #   触发词改由别名层统一管理：今日邀请排行/本月邀请排行/总邀请排行 照常可用）
     ("invite_ok_group",         "INVITE_OK_GROUP",         "邀请成功群内通知模板",      "text",  0,   0,       "invite/config"),
     ("invite_link_msg",         "INVITE_LINK_MSG",         "邀请链接消息模板",          "text",  0,   0,       "invite/config"),
     ("invite_rank_today_msg",   "INVITE_RANK_TODAY_MSG",   "今日邀请排行标题模板",      "text",  0,   0,       "invite/config"),
@@ -489,6 +489,7 @@ AUTODEL_ARCHIVE = 0
 AUTODEL_EXECUTABLE = 1
 AUTODEL_CONTACT = 1
 AUTODEL_SERVICE = 1
+AUTODEL_SERVICE_SECONDS = 0  # 系统消息删除延迟秒数（0=立即删；N=命中后 N 秒再删）
 AUTODEL_PREMIUM_EMOJI = 0
 WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
 WELCOME_TPL = "🎉 欢迎 {name} 加入本群！\n积分游戏请在群内发送 /start 查看玩法。"
@@ -5782,11 +5783,16 @@ async def _autodel_enforce(update, context):
             return False
         if is_bot_admin(user.id):
             return False
-    if _autodel_text_hit(message, message.text or message.caption or "") or _autodel_media_hit(message):
-        try:
-            await message.delete()
-        except TelegramError:
-            pass
+    hit = _autodel_text_hit(message, message.text or message.caption or "") or _autodel_media_hit(message)
+    if hit:
+        if is_svc and AUTODEL_SERVICE_SECONDS > 0:
+            # 系统消息延迟删除：命中后 N 秒再撤（0=立即删）
+            schedule_delete(context.application, update.effective_chat.id, message, int(AUTODEL_SERVICE_SECONDS))
+        else:
+            try:
+                await message.delete()
+            except TelegramError:
+                pass
         return True
     return False
 
@@ -9351,10 +9357,11 @@ def start_health_server():
         def _login_page(err=""):
             msg = "<div class='err'>密码错误，请重试</div>" if err else ""
             # 仍是出厂默认密码 = 任何人猜到域名就能进后台，必须显著警告（但不阻断，避免把自己锁在门外）
+            # ⚠️ 绝不在页面上显示密码本身（用户多次要求）：知道值的人会更easy进，不知道的人也不需要知道
             if _pwd_ok(WEB_DEFAULT_PASSWORD):
-                msg += ("<div class='err' style='text-align:left;line-height:1.6'>⚠️ <b>当前仍是默认密码</b>（"
-                        + html.escape(str(WEB_DEFAULT_PASSWORD))
-                        + "）。知道后台地址的人都能直接登录并操作积分/数据，请立刻在「安全设置」里修改（至少 8 位，字母+数字）。</div>")
+                msg += ("<div class='err' style='text-align:left;line-height:1.6'>⚠️ <b>当前仍是初始默认密码</b>"
+                        "，任何知道后台地址的人都能直接登录并操作积分/数据，请立刻在「安全设置」里修改"
+                        "（至少 8 位，字母+数字）。</div>")
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     "<title>登录 - 机器人后台</title><style>"

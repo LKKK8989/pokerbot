@@ -345,6 +345,7 @@ SETTINGS_FIELDS = [
     # 合格邀请结算（2026-09-08 替代旧「进群前置」死字段）：被邀请人本群达标才算合格才发奖
     ("invite_qualify_enabled",  "INVITE_QUALIFY_ENABLED",  "合格结算开关(达标才发奖)",   "bool",  0,   1,       "invite/qualify"),
     ("invite_manual_count",     "INVITE_MANUAL_COUNT",     "手动拉人计入邀请(添加人=邀请人)", "bool", 0, 1,  "invite/qualify"),
+    ("invite_auto_approve",     "INVITE_AUTO_APPROVE",     "申请制链接自动批准(可归因申请)",  "bool", 0, 1,  "invite/qualify"),
     ("invite_qualify_msgs",     "INVITE_QUALIFY_MSGS",     "质量要求-本群发言≥N条(0=不限)", "int", 0,  100000,  "invite/qualify"),
     ("invite_qualify_points",   "INVITE_QUALIFY_POINTS",   "质量要求-本群净赚积分≥M(0=不限)", "int", 0, 1000000, "invite/qualify"),
     ("invite_qualify_avatar",   "INVITE_QUALIFY_AVATAR",   "质量要求-进群须有头像(无则拒)", "bool", 0,   1,      "invite/qualify"),
@@ -440,10 +441,11 @@ INVITE_ENABLED = 1          # 邀请系统总开关
 INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
 INVITE_REWARD = 50          # 每合格 1 人奖励积分（达到质量要求才发）
 INVITE_REWARD_TIMES = 10    # 单邀请人最多发放奖励次数（超额合格不再发，防白嫖）
-# 归因策略（2026-09-08 改）：/link 只发「直链」（不带 creates_join_request）→ 点链接直接进群，
-# chat_member 事件稳定携带 invite_link → 全串精确匹配归因。事件/申请都没带链接时一律不归因
-# （宁缺毋滥，绝不宽松猜测安错人；漏链接说明走的是申请制/直接拉人，不是 bot 专属直链）。
-# 无「自动批准」：直链进群不产生申请；申请制群的申请由管理员在 Telegram 或网页「成员/入群申请」手动批。
+# 归因策略（2026-09-08 二次改：申请制链接）：实测 chat_member 进群事件的 invite_link 字段
+# 经常为空（直链/主链/时序都踩过），导致归因恒 0。而 chat_join_request 事件由 API 保证携带
+# invite_link → /link 改发「申请制链接」（creates_join_request=True）：点链接 → 申请（带链接
+# 入 invite_pending）→ 批准 → 进群 → 从 pending 精确归因。事件/申请都没带链接时仍不归因（宁缺毋滥）。
+# 自动批准开关 INVITE_AUTO_APPROVE（默认 0=管理员手动批，可开 1=bot 对可归因申请自动批准）。
 INVITE_LINK_CMD = "link"    # 获取专属邀请链接指令
 INVITE_RANK_ADMIN_ONLY = 0  # 邀请排行仅管理员可查开关
 INVITE_RANK_TODAY_CMD = "今日邀请排行"
@@ -455,6 +457,7 @@ INVITE_RANK_ALL_CMD = "总邀请排行"
 # 达标检查事件驱动（发言/签到/刷新按钮兜底重判）；单邀请人发放次数 ≤ INVITE_REWARD_TIMES。
 INVITE_QUALIFY_ENABLED = 1   # 合格结算开关（1=达标才发奖；0=进群即发，兼容老行为）
 INVITE_MANUAL_COUNT = 0      # 手动拉人计入邀请（1=管理员/成员手动添加的人记到添加人名下；默认关，防拉小号刷奖励）
+INVITE_AUTO_APPROVE = 0      # 申请制链接自动批准（1=bot 自动批准携带链接的入群申请；0=管理员手动批，网页「成员/入群申请」可批）
 INVITE_QUALIFY_MSGS = 10     # 质量要求：被邀请人本群累计发言 ≥ N 条（0=不限）
 INVITE_QUALIFY_POINTS = 0    # 质量要求：被邀请人本群净赚积分 ≥ M（0=不限；净赚=余额-初始分）
 INVITE_QUALIFY_AVATAR = 0    # 质量要求：进群须有头像（无则拒绝，永不发；防小号）
@@ -7795,9 +7798,10 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                     except Exception:
                         pass
             else:
-                # 2026-09-08 起：事件/申请都没带链接 → 默认不归因（宁缺毋滥，绝不猜测安错人）。
-                # /link 发的是直链，正常进群事件必带链接；漏链接说明走的是申请制或直接拉人。
-                _inv_dbg(cid, "⚠️ 事件与申请均无链接 → 不归因（宁缺毋滥）：直链进群才带链接，群开「申请加入」会丢链接")
+                # 事件/申请都没带链接 → 不归因（宁缺毋滥，绝不猜测安错人）。
+                # /link 发的是申请制链接：正常路径 申请(chat_join_request 必带链接入 pending)→批准→进群，
+                # 进群事件即使漏链接也能从 pending 兜底归因；都查不到说明是手动拉人/直接搜索进群。
+                _inv_dbg(cid, "⚠️ 事件与申请均无链接 → 不归因（宁缺毋滥）：申请制路径应有 pending，查不到多为手动拉人/搜索进群")
                 # 手动拉人计入（可选开关）：chat_member 的 from_user = 造成本次进群的人（手动添加时即添加人）
                 adder = getattr(cmu, "from_user", None)
                 a_id = getattr(adder, "id", 0) if adder else 0
@@ -7911,10 +7915,11 @@ async def cmd_invite_link(update, context):
     cid = update.effective_chat.id
     uid = update.effective_user.id
     mine = invite_links.get(cid, {}).get(uid)
-    if not mine or mine.get("mode") != "direct":
-        # 直链（creates_join_request 缺省 = False）：点链接直接进群，chat_member 事件稳定携带
-        # invite_link → 全串精确匹配，无需再猜测。旧「申请制」链接升级时先吊销再换新，
-        # 防止旧链接继续把人带进申请流程（申请/审批事件会丢链接，无法精确归因）。
+    if not mine or mine.get("mode") != "request":
+        # 申请制链接（creates_join_request=True）：点链接产生 chat_join_request 申请，
+        # 该事件由 API 保证携带 invite_link → 先入 invite_pending，批准进群后从 pending
+        # 精确归因（直链的 chat_member.invite_link 实测经常为空，弃用）。旧直链/旧申请链
+        # 升级时先吊销再换新，防止旧链接继续把人带进不可归因的路径。
         old_link = mine.get("link") if mine else None
         if old_link:
             try:
@@ -7922,7 +7927,7 @@ async def cmd_invite_link(update, context):
             except Exception:
                 pass
         link_obj, last_err = None, None
-        for kw in ({"name": f"inv{uid}"}, {}):   # 直链逐级回退：带名字 → 不带名字
+        for kw in ({"name": f"inv{uid}", "creates_join_request": True}, {"creates_join_request": True}):
             try:
                 link_obj = await context.bot.create_chat_invite_link(chat_id=cid, **kw)
                 break
@@ -7935,8 +7940,8 @@ async def cmd_invite_link(update, context):
         invite_links.setdefault(cid, {})[uid] = {"link": link_obj.invite_link,
                                                  "invite_id": link_obj.invite_link.rsplit("/", 1)[-1],
                                                  "ts": now_bj().strftime("%Y-%m-%d %H:%M"),
-                                                 "mode": "direct"}
-        _inv_dbg(cid, f"创建直链 inviter={uid}：…{link_obj.invite_link[-12:]}")
+                                                 "mode": "request"}
+        _inv_dbg(cid, f"创建申请制链接 inviter={uid}：…{link_obj.invite_link[-12:]}")
         save_data()
         mine = invite_links[cid][uid]
     link = mine.get("link", "")
@@ -8080,10 +8085,13 @@ async def on_member_event(update, context):
         logger.exception("成员事件处理异常（已吞并）")
 
 async def on_join_request(update, context):
-    """入群申请（申请制群才有）：记录 + 存归因链接。不自动批准——直链进群不产生申请；
-    申请制群的新人需管理员在 Telegram 客户端或网页「成员/入群申请」页手动批准（权限交给管理员）。"""
+    """入群申请（申请制链接/申请制群才有）：记录 + 存归因链接。
+    INVITE_AUTO_APPROVE=1 时对携带链接（可归因）的申请自动批准；=0（默认）由管理员
+    在 Telegram 客户端或网页「成员/入群申请」页手动批准（批准后 join 事件从 pending 兜底归因）。"""
     try:
-        req = update.chat_join_request
+        req = getattr(update, "chat_join_request", None)
+        if req is None and hasattr(update, "from_user") and hasattr(update, "chat"):
+            req = update   # 兼容直接传入 request 对象（内部复用/测试）
         if not req:
             return
         cid = req.chat.id
@@ -8091,13 +8099,19 @@ async def on_join_request(update, context):
         uid, name = req.from_user.id, req.from_user.first_name or f"用户{req.from_user.id}"
         join_requests[cid].append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "uid": uid, "name": name})
         join_requests[cid] = join_requests[cid][-100:]
-        if getattr(req, "invite_link", None) and getattr(req.invite_link, "link", ""):
+        has_link = bool(getattr(req, "invite_link", None) and getattr(req.invite_link, "link", ""))
+        if has_link:
             invite_pending[f"{cid}:{uid}"] = req.invite_link.link   # 邀请归因兜底：批准后的 join 事件可能不带链接
             _inv_dbg(cid, f"入群申请 uid={uid}，已存待归因链接 …{req.invite_link.link[-12:]}")
         else:
             _inv_dbg(cid, f"入群申请 uid={uid}，⚠️ 申请未携带链接")
+        if has_link and INVITE_AUTO_APPROVE:
+            try:
+                await context.bot.approve_chat_join_request(chat_id=cid, user_id=uid)
+                _inv_dbg(cid, f"自动批准入群申请 uid={uid}（INVITE_AUTO_APPROVE=1）")
+            except Exception as e:
+                _inv_dbg(cid, f"自动批准失败 uid={uid}：{e!r}（转人工）")
         save_data()
-        # 不自动批准（2026-09-08 用户拍板）：放行权交给管理员——网页「成员/入群申请」页有 批准/拒绝 按钮。
     except Exception:
         logger.exception("入群申请处理异常（已吞并）")
 

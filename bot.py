@@ -610,6 +610,7 @@ _guess_tasks = set()                                 # 兜底任务的强引用�
 invite_links = defaultdict(dict)                     # cid -> {uid: {"link","invite_id","ts"}} 每人专属邀请链接（必须 defaultdict：恢复/写入走 [cid][uid] 两级，普通 dict 会 KeyError 被吞→整表丢失→归因全失败、邀请进度恒 0）
 invite_records = {}                                  # "cid:uid" -> {"cid","inviter","invitee","invitee_name","ts","qualified","rejected","left","award","link"}；旧存档可能带 audit(ok/pending/unmet/rejected) 兼容读取
 invite_pending = {}                                  # "cid:uid" -> 进群申请携带的邀请链接（人审批后 join 事件常不带链接，靠这个兜底归因；内存态）
+invite_confirmed = {}                                # "cid:uid" -> 邀请人 uid（deep-link START / 主动问按钮 锁定的归因；落盘持久化）
 invite_debug = defaultdict(list)                     # cid -> [最近10条邀请链路调试事件]（每环失败不再静默，/邀请调试 可查）
 
 
@@ -1209,6 +1210,7 @@ def force_save_now():
                 "game_flows": game_flows[-2000:],
                 "invite_records": {k: dict(v) for k, v in invite_records.items() if isinstance(v, dict)},
                 "invite_pending": {k: v for k, v in invite_pending.items()},  # 待归因：容器重启也不丢
+                "invite_confirmed": {k: int(v) for k, v in invite_confirmed.items()},  # deep-link/主动问 锁定的归因
                 "invite_debug": {str(cid): list(v) for cid, v in invite_debug.items()},
                 "invite_links": {str(cid): {str(uid): dict(v) for uid, v in users.items()}
                                  for cid, users in invite_links.items()},
@@ -1415,6 +1417,8 @@ def load_data():
         for k, v in data.get("invite_records", {}).items():
             if isinstance(v, dict): invite_records[str(k)] = dict(v)
         invite_pending.update(data.get("invite_pending", {}))
+        invite_confirmed.update({str(k): int(v) for k, v in (data.get("invite_confirmed", {}) or {}).items()
+                                 if str(v).lstrip("-").isdigit()})
         invite_debug.clear()
         for cid, lst in data.get("invite_debug", {}).items():
             invite_debug[int(cid)] = list(lst)[-10:]
@@ -2876,9 +2880,9 @@ async def require_group_chat(update, game_name, cmd, context=None):
     return True
 
 async def cmd_start(update, context):
+    """/start 只回一句你好（deep-link 邀请点 START 后发一屏帮助太刷屏）；完整帮助在 /help。"""
     if not await need_auth(update, context): return
-    # 私聊深链：群列表点「立即兑换」蓝色按钮 → t.me/<bot>?start=redeem_<cid>_<idx>
-    # 到这里 payload 形如 redeem_<cid>_<idx> / mall_<cid>_<idx>，走「是否兑换/积分不足」确认流
+    # 私聊深链：邀请 deep-link（t.me/<bot>?start=inv_<邀请人>_<群id>）等在此分流
     _args = context.args or []
     if _args:
         _a0 = _args[0]
@@ -2886,7 +2890,15 @@ async def cmd_start(update, context):
             await _deep_redeem_start(update, context, _a0); return
         if _a0.startswith("mall_"):
             await _deep_mall_start(update, context, _a0); return
-    text = "🎮 欢迎使用娱乐机器人！\n\n🎲 发起游戏：\n/开始 或 /菜单 - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n🎟️ 邀请有礼：\n/link - 领取本群专属邀请链接\n今日邀请排行 / 本月邀请排行 / 总邀请排行 - 查看邀请榜\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n流水 - 查自己的积分来源明细（红包/抽水/邀请奖励等；回复他人消息查对方仅限管理员）\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
+        if _a0.startswith("inv_"):
+            await _deep_invite_start(update, context, _a0); return
+    await send_reply(update, context, "👋 你好！我是娱乐机器人 🎮\n\n发 /help 查看全部功能（游戏 / 积分 / 邀请 / 数据）。")
+
+
+async def cmd_help(update, context):
+    """/help（帮助/菜单）：完整功能帮助；管理员追加管理命令段。"""
+    if not await need_auth(update, context): return
+    text = "🎮 娱乐机器人功能帮助\n\n🎲 发起游戏：\n/开始 或 /help - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n🎟️ 邀请有礼：\n/link - 领取本群专属邀请链接\n今日邀请排行 / 本月邀请排行 / 总邀请排行 - 查看邀请榜\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n流水 - 查自己的积分来源明细（红包/抽水/邀请奖励等；回复他人消息查对方仅限管理员）\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
     if is_bot_admin(update.effective_user.id):
         text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
     await send_reply(update, context, text)
@@ -4598,6 +4610,58 @@ async def _invite_send_progress_card(update, context, uid, cid, cname, link=None
         await send_reply(update, context, body, kb=kb, parse_mode="HTML")
 
 
+async def _deep_invite_start(update, context, payload):
+    """deep-link 邀请确认（t.me/<bot>?start=inv_<邀请人>_<群id>）：
+    新人私聊点 START 即锁定归因（参数由 bot 自己生成，不依赖任何群事件链接字段——
+    Telegram 公开群官方不保证把 invite_link 传给 bot，实测直链/申请制都丢）。
+    锁定后发「加入群组」按钮（一次性申请制链接，bot 收到申请自动秒批）。"""
+    try:
+        uid = update.effective_user.id
+        body = payload[len("inv_"):]
+        inviter_s, _, cid_s = body.rpartition("_")
+        inviter, cid = int(inviter_s), int(cid_s)
+    except (ValueError, AttributeError):
+        await send_reply(update, context, "⚠️ 邀请链接无效，请让邀请人重新发送「邀请」获取。")
+        return
+    if not INVITE_ENABLED or cid not in AUTHORIZED_GROUPS:
+        await send_reply(update, context, "⚠️ 该邀请链接对应的群暂未开放邀请。")
+        return
+    if uid == inviter:
+        await send_reply(update, context, "🙂 不能邀请自己哦。")
+        return
+    if f"{cid}:{uid}" in invite_records:
+        await send_reply(update, context, "ℹ️ 你已在邀请记录中（重复进群不重复计）。")
+        return
+    invite_confirmed[f"{cid}:{uid}"] = inviter   # 归因锁定（落盘持久化）
+    save_data()
+    _inv_dbg(cid, f"[deep-link] uid={uid} 确认邀请人 {inviter}（START 参数）")
+    inviter_name = await get_name(context.application, inviter, cid=cid)
+    cname = chat_name_cache.get(cid) or str(cid)
+    join_link, last_err = None, None
+    for kw in ({"name": f"inv{uid}", "creates_join_request": True, "member_limit": 1},
+               {"creates_join_request": True, "member_limit": 1},
+               {"creates_join_request": True}):
+        try:
+            link_obj = await context.bot.create_chat_invite_link(chat_id=cid, **kw)
+            join_link = link_obj.invite_link
+            break
+        except Exception as e:
+            last_err = e
+    if not join_link:
+        invite_confirmed.pop(f"{cid}:{uid}", None)   # 链接都发不出，归因不落
+        save_data()
+        _inv_dbg(cid, f"[deep-link] 创建进群链接失败 inviter={inviter}：{last_err!r}")
+        await send_reply(update, context,
+                         f"❌ 生成进群链接失败：{last_err!r}\n请让管理员确认机器人是群管理员并勾选「邀请用户」权限。")
+        return
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚪 加入群组（点击自动通过）", url=join_link)]])
+    await send_reply(update, context,
+                     f"🎟️ 你由 <b>{inviter_name}</b> 邀请加入「{cname}」\n\n"
+                     f"👇 点下方按钮进群，机器人会自动为你通过。\n"
+                     f"进群后邀请即计入 <b>{inviter_name}</b> 名下。",
+                     kb=kb, parse_mode="HTML")
+
+
 async def cmd_my_invite(update, context):
     """我的邀请合格结算进度：已计入/合格/已发放 + 刷新。群聊=本群；私聊=全部群合计。"""
     if not await need_auth(update, context): return
@@ -4627,7 +4691,7 @@ async def cmd_invite_debug(update, context):
         await send_reply(update, context, "❌ 邀请调试仅管理员可用。"); return
     cid = update.effective_chat.id
     L = ["🔧 邀请系统体检（本群）", "━━━━━━━━━━━━━━━━━"]
-    L.append(f"开关：{'开' if INVITE_ENABLED else '关'}｜入群申请需管理员手动批准（网页成员页可批）")
+    L.append(f"开关：{'开' if INVITE_ENABLED else '关'}｜归因=deep-link确认制（点专属链接→START→自动通过）；无确认申请：{'自动批(带链接+开关开)' if INVITE_AUTO_APPROVE else '管理员手动批(网页成员页)'}")
     L.append(f"本群已授权：{'是' if cid in AUTHORIZED_GROUPS else '否'}")
 
     # ① bot 在群里的权限 —— 邀请系统能工作的硬前提
@@ -5119,6 +5183,39 @@ async def on_button(update, context):
                 await q.answer("已刷新" + (f"：新发放 {new_awd} 次奖励 🎉" if new_awd else "：暂无新达标"))
             except Exception:
                 pass
+            return
+        # --- 邀请：主动问兜底按钮 inva_<cid>_<inviter>_<uid>（私聊回调，is_auth 之前处理） ---
+        if data.startswith("inva_"):
+            if uid in BLACKLISTED_USERS and not is_bot_admin(uid):
+                await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
+            body = data[len("inva_"):]
+            try:
+                choice_s = ""
+                if body.startswith("none_"):                 # inva_none_<cid>_<uid>：我自己进的
+                    choice_s = "none"; body = body[len("none_"):]
+                left, _, owner_s = body.rpartition("_")      # 末段 = 申请人 uid
+                cid_s, _, inviter_s = left.partition("_")    # 首段 = 群 id（负数），中段 = 邀请人
+                cid_, owner = int(cid_s), int(owner_s)
+                inviter = 0 if choice_s == "none" else int(inviter_s)
+            except ValueError:
+                await q.answer("按钮已过期", show_alert=True); return
+            rcid, uid_owner = cid_, owner
+            if uid != uid_owner:
+                await q.answer("只能由申请人本人确认", show_alert=True); return
+            if choice_s == "none":
+                await q.answer("好的，等管理员批准进群。", show_alert=False)
+                return
+            if inviter == uid or rcid not in AUTHORIZED_GROUPS or not INVITE_ENABLED:
+                await q.answer("该邀请不可用", show_alert=True); return
+            invite_confirmed[f"{rcid}:{uid}"] = inviter   # 归因锁定
+            save_data()
+            _inv_dbg(rcid, f"[主动问] uid={uid} 确认邀请人 {inviter} → 自动批准")
+            try:
+                await context.bot.approve_chat_join_request(chat_id=rcid, user_id=uid)
+                await q.answer("✅ 已确认，正在为你通过进群…", show_alert=False)
+            except Exception as e:
+                _inv_dbg(rcid, f"[主动问] 自动批准失败 uid={uid}：{e!r}（转人工，归因已锁定）")
+                await q.answer("✅ 邀请已记录，等管理员批准进群。", show_alert=False)
             return
         if not is_auth(cid): await q.answer("未授权", show_alert=True); return
         if uid in BLACKLISTED_USERS and not is_bot_admin(uid): await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
@@ -7771,7 +7868,9 @@ async def _invite_award(app, rec):
 
 
 async def _invite_track_join(cmu, cid, uid, name, context):
-    """邀请追踪：进群事件携带 invite_link 时匹配邀请人，记记录/发奖励/通知（所有异常吞并）。"""
+    """邀请追踪归因（优先级）：① invite_confirmed（deep-link/主动问确认，最可靠）
+    → ② 事件/申请携带的链接精确匹配 → ③ 都没有则不归因（宁缺毋滥）。
+    归因后记记录/发奖励/通知（所有异常吞并）。"""
     try:
         if not INVITE_ENABLED or uid <= 0 or cid not in AUTHORIZED_GROUPS:
             _inv_dbg(cid, f"进群 uid={uid} 跳过：开关{INVITE_ENABLED}/授权{cid in AUTHORIZED_GROUPS}")
@@ -7784,11 +7883,16 @@ async def _invite_track_join(cmu, cid, uid, name, context):
         link = (getattr(getattr(cmu, "invite_link", None), "link", "")
                 or invite_pending.pop(f"{cid}:{uid}", ""))   # 申请制兜底：审批后的 join 事件常不带链接
         _inv_dbg(cid, f"进群 uid={uid} 事件链接：{link or '（无）'}")
+        confirmed = invite_confirmed.pop(key, 0)
         inviter = 0
-        for i_uid, info in invite_links.get(cid, {}).items():
-            if info.get("link") == link and i_uid != uid:
-                inviter = i_uid
-                break
+        if confirmed:
+            inviter = confirmed   # deep-link START / 主动问按钮：归因最可靠，优先于一切链接字段
+            _inv_dbg(cid, f"✅ 归因成功 uid={uid} → 邀请人 {confirmed}（确认制）")
+        else:
+            for i_uid, info in invite_links.get(cid, {}).items():
+                if info.get("link") == link and i_uid != uid:
+                    inviter = i_uid
+                    break
         if not inviter:
             if link:
                 _inv_dbg(cid, f"⚠️ 归因失败：链接不在已存表（已存：{[i.get('link','')[-12:] for i in invite_links.get(cid, {}).values()]}）")
@@ -7833,7 +7937,8 @@ async def _invite_track_join(cmu, cid, uid, name, context):
         rec = {"cid": cid, "inviter": inviter, "invitee": uid, "invitee_name": name,
                "ts": now_bj().strftime("%Y-%m-%d %H:%M"), "qualified": False,
                "rejected": False, "left": False, "award": 0, "link": link,
-               "manual": not bool(link)}   # 手动拉人计入的记录带 manual 标记
+               "manual": not bool(link) and not confirmed,   # 手动拉人计入的记录带 manual 标记（确认制归因不算）
+               "source": "confirm" if confirmed else "link"}
         # 进群硬门槛（头像/用户名，进群瞬间检查一次；不满足直接拒绝，永不发奖）
         ju = _join_user_obj(cmu)
         if INVITE_QUALIFY_USERNAME and not getattr(ju, "username", None):
@@ -7906,7 +8011,9 @@ async def cmd_invite_rank_all(update, context):
 
 
 async def cmd_invite_link(update, context):
-    """获取本群专属邀请链接：/link，新朋友通过链接进群即计邀请。"""
+    """获取本群专属邀请链接：/link。生成的是 deep-link（t.me/<bot>?start=inv_邀请人_群id）：
+    新人点开 → bot 私聊点 START → 归因即时锁定（不依赖 Telegram 群事件带链接——公开群
+    官方就不保证给 bot 传 invite_link，实测直链/申请制两条路都丢链接）。"""
     if not await need_auth(update, context): return
     if not is_group_chat(update):
         await send_reply(update, context, "⚠️ 请在群聊中使用。"); return
@@ -7914,34 +8021,14 @@ async def cmd_invite_link(update, context):
         await send_reply(update, context, "❌ 邀请系统未开启（网页「群组设置 → 邀请系统」可开启）。"); return
     cid = update.effective_chat.id
     uid = update.effective_user.id
+    deep = f"https://t.me/{context.bot.username}?start=inv_{uid}_{cid}"
     mine = invite_links.get(cid, {}).get(uid)
-    if not mine or mine.get("mode") != "request":
-        # 申请制链接（creates_join_request=True）：点链接产生 chat_join_request 申请，
-        # 该事件由 API 保证携带 invite_link → 先入 invite_pending，批准进群后从 pending
-        # 精确归因（直链的 chat_member.invite_link 实测经常为空，弃用）。旧直链/旧申请链
-        # 升级时先吊销再换新，防止旧链接继续把人带进不可归因的路径。
-        old_link = mine.get("link") if mine else None
-        if old_link:
-            try:
-                await context.bot.revoke_chat_invite_link(chat_id=cid, invite_link=old_link)
-            except Exception:
-                pass
-        link_obj, last_err = None, None
-        for kw in ({"name": f"inv{uid}", "creates_join_request": True}, {"creates_join_request": True}):
-            try:
-                link_obj = await context.bot.create_chat_invite_link(chat_id=cid, **kw)
-                break
-            except Exception as e:
-                last_err = e
-        if not link_obj:
-            await send_reply(update, context,
-                             f"❌ 创建邀请链接失败：{last_err!r}\n请确认机器人是本群管理员，且管理员权限里勾选了「邀请用户（通过链接）」")
-            return
-        invite_links.setdefault(cid, {})[uid] = {"link": link_obj.invite_link,
-                                                 "invite_id": link_obj.invite_link.rsplit("/", 1)[-1],
+    if not mine or mine.get("mode") != "deeplink" or mine.get("link") != deep:
+        invite_links.setdefault(cid, {})[uid] = {"link": deep,
+                                                 "invite_id": f"inv_{uid}",
                                                  "ts": now_bj().strftime("%Y-%m-%d %H:%M"),
-                                                 "mode": "request"}
-        _inv_dbg(cid, f"创建申请制链接 inviter={uid}：…{link_obj.invite_link[-12:]}")
+                                                 "mode": "deeplink"}
+        _inv_dbg(cid, f"生成 deep-link inviter={uid}：…{deep[-24:]}")
         save_data()
         mine = invite_links[cid][uid]
     link = mine.get("link", "")
@@ -8085,9 +8172,11 @@ async def on_member_event(update, context):
         logger.exception("成员事件处理异常（已吞并）")
 
 async def on_join_request(update, context):
-    """入群申请（申请制链接/申请制群才有）：记录 + 存归因链接。
-    INVITE_AUTO_APPROVE=1 时对携带链接（可归因）的申请自动批准；=0（默认）由管理员
-    在 Telegram 客户端或网页「成员/入群申请」页手动批准（批准后 join 事件从 pending 兜底归因）。"""
+    """入群申请处理（三路归因，全部不依赖群事件的链接字段可靠性）：
+    ① deep-link/按钮 已锁定归因（invite_confirmed）→ 无条件自动批准秒进；
+    ② 申请自带链接且命中专属链接 → 存 invite_pending，按 INVITE_AUTO_APPROVE 开关决定是否自动批；
+    ③ 都没有（搜群/旧链接进的）→ bot 用 user_chat_id 主动私聊弹邀请人按钮（Bot API 5.5
+       文档保证 bot 管理员可主动联系发申请者），点按钮补归因后自动批。"""
     try:
         req = getattr(update, "chat_join_request", None)
         if req is None and hasattr(update, "from_user") and hasattr(update, "chat"):
@@ -8099,21 +8188,66 @@ async def on_join_request(update, context):
         uid, name = req.from_user.id, req.from_user.first_name or f"用户{req.from_user.id}"
         join_requests[cid].append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "uid": uid, "name": name})
         join_requests[cid] = join_requests[cid][-100:]
+        inviter = invite_confirmed.get(f"{cid}:{uid}")
         has_link = bool(getattr(req, "invite_link", None) and getattr(req.invite_link, "link", ""))
         if has_link:
-            invite_pending[f"{cid}:{uid}"] = req.invite_link.link   # 邀请归因兜底：批准后的 join 事件可能不带链接
+            invite_pending[f"{cid}:{uid}"] = req.invite_link.link   # 归因兜底：批准后的 join 事件可能不带链接
             _inv_dbg(cid, f"入群申请 uid={uid}，已存待归因链接 …{req.invite_link.link[-12:]}")
         else:
-            _inv_dbg(cid, f"入群申请 uid={uid}，⚠️ 申请未携带链接")
-        if has_link and INVITE_AUTO_APPROVE:
+            _inv_dbg(cid, f"入群申请 uid={uid}，申请未携带链接（归因{'已锁定 ' + str(inviter) if inviter else '未确认'}）")
+        if inviter:
             try:
                 await context.bot.approve_chat_join_request(chat_id=cid, user_id=uid)
-                _inv_dbg(cid, f"自动批准入群申请 uid={uid}（INVITE_AUTO_APPROVE=1）")
+                _inv_dbg(cid, f"归因已锁定（邀请人 {inviter}）→ 自动批准 uid={uid}")
+            except Exception as e:
+                _inv_dbg(cid, f"自动批准失败 uid={uid}：{e!r}（转人工）")
+        elif not has_link:
+            await _invite_ask_inviter(req, cid, uid, name, context)   # 主动问兜底（内部吞异常）
+        elif INVITE_AUTO_APPROVE:
+            try:
+                await context.bot.approve_chat_join_request(chat_id=cid, user_id=uid)
+                _inv_dbg(cid, f"申请带链接 + 开关开 → 自动批准 uid={uid}")
             except Exception as e:
                 _inv_dbg(cid, f"自动批准失败 uid={uid}：{e!r}（转人工）")
         save_data()
     except Exception:
         logger.exception("入群申请处理异常（已吞并）")
+
+
+async def _invite_ask_inviter(req, cid, uid, name, context):
+    """主动问兜底：无归因、无链接的入群申请 → bot 主动私聊申请者选邀请人。
+    Bot API 5.5+：bot 为群管理员（can_invite_users）时，可主动联系发入群申请的用户
+    （user_chat_id，24h 窗口），即使对方从未 /start。全程吞异常，失败不影响申请本身。"""
+    try:
+        candidates = [(i_uid, info) for i_uid, info in invite_links.get(cid, {}).items()
+                      if i_uid != uid and isinstance(info, dict) and info.get("link")]
+        if not candidates:
+            _inv_dbg(cid, f"[主动问] uid={uid} 本群无邀请人候选，跳过")
+            return
+        async def _nm(i):
+            try: return await get_name(context.application, i, cid=cid)
+            except Exception: return f"用户{i}"
+        rows, shown = [], 0
+        for i_uid, _info in candidates[:8]:
+            nm = _nm_r(await _nm(i_uid))
+            rows.append([InlineKeyboardButton(f"🎟️ {nm}", callback_data=f"inva_{cid}_{i_uid}_{uid}")])
+            shown += 1
+        if shown:
+            rows.append([InlineKeyboardButton("🚶 我是自己进的（不占邀请名额）",
+                                              callback_data=f"inva_none_{cid}_{uid}")])
+            await context.bot.send_message(
+                chat_id=getattr(req, "user_chat_id", uid),
+                text=f"👋 <b>{name}</b> 你好！你申请加入「{chat_name_cache.get(cid) or cid}」。\n\n"
+                     f"你是被谁邀请进群的？点一下邀请人（计入 TA 的邀请奖励）：",
+                reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
+            _inv_dbg(cid, f"[主动问] 已私聊 uid={uid} 选择邀请人（候选 {shown} 人）")
+    except Exception as e:
+        _inv_dbg(cid, f"[主动问] 私聊 uid={uid} 失败（吞并）：{e!r}")
+
+
+def _nm_r(n):
+    """按钮名压短：去 HTML 敏感字符并截断（callback 按钮 64 字节限制余量留给 data）。"""
+    return str(n or "?").replace("<", "‹").replace(">", "›").replace("&", "＆")[:16]
 
 
 
@@ -8580,7 +8714,7 @@ async def cmd_restore(update, context):
 
 # Telegram 原生 / 菜单（网页「命令管理」页可改，存 bot_settings.json 的 tg_menu；命令仅限英文小写/数字/下划线）
 DEFAULT_TG_MENU = [
-    ("start", "开始 / 菜单 / 帮助"), ("dz", "德州扑克"), ("sc", "赛车"), ("21", "21点"), ("mylv", "我的等级"), ("jifen", "积分兑换"),
+    ("start", "开始"), ("help", "功能帮助"), ("dz", "德州扑克"), ("sc", "赛车"), ("21", "21点"), ("mylv", "我的等级"), ("jifen", "积分兑换"),
     ("jinhua", "炸金花"), ("sign", "每日签到"), ("mypoints", "我的积分"), ("mall", "积分商城"),
     ("end", "结束当前游戏"), ("add", "加/减积分(正加负减)"), ("cx", "盈亏查询"), ("ph", "排行榜"),
     ("sq", "授权群组"), ("qxsh", "取消授权"), ("addadmin", "添加机器人管理员"), ("deladmin", "移除机器人管理员"),
@@ -8650,7 +8784,7 @@ async def post_shutdown(app):
 # 命令路由：支持中文命令（Telegram 命令菜单只认拉丁字符，故用 MessageHandler 解析 /中文）
 CMD_ALIASES = {
     # 中文命令
-    "开始": cmd_start, "菜单": cmd_start, "帮助": cmd_start,
+    "开始": cmd_start, "菜单": cmd_help, "帮助": cmd_help, "help": cmd_help,
     "德州": cmd_dz, "德州扑克": cmd_dz,
     "赛车": cmd_sm, "sc": cmd_sm,
     "21点": cmd_21, "二十一点": cmd_21,
@@ -8694,7 +8828,7 @@ CMD_ALIASES = {
     "佩戴": cmd_equip, "佩戴称号": cmd_equip, "equip": cmd_equip,
     "赛季分": cmd_season_points, "加赛季分": cmd_season_points, "减赛季分": cmd_season_points, "seasonpoints": cmd_season_points,
     # 旧英文/数字别名（保留兼容，仍可用）
-    "start": cmd_start, "dz": cmd_dz, "sm": cmd_sm,
+    "start": cmd_start, "help": cmd_help, "dz": cmd_dz, "sm": cmd_sm,
     "21": cmd_21, "end": cmd_end,
     "END": cmd_end, "add": cmd_add, "adddz": cmd_add,
     "cx": cmd_cx, "ph": cmd_ph, "sq": cmd_sq, "qxsh": cmd_qxshouquan,

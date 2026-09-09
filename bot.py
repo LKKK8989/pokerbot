@@ -11710,21 +11710,59 @@ async def auto_backup(context):
         logger.exception("自动备份失败")
 
 
+_net_err_log = []   # 最近网络类异常的时间戳（5 分钟滑动窗口，用于告警降噪）
+
+_NET_ERR_NAMES = ("NetworkError", "TimedOut", "ReadError", "ConnectError", "WriteError",
+                  "ReadTimeout", "ConnectTimeout", "PoolTimeout", "RemoteProtocolError")
+
+def _is_network_error(err):
+    """判断是否为网络层异常（平台抖动/容器重启瞬断，PTB 会自动重连，属无害噪音）。"""
+    if err is None:
+        return False
+    if type(err).__name__ in _NET_ERR_NAMES:
+        return True
+    s = f"{err!r}"
+    return any(k in s for k in ("httpx", "ReadError", "ConnectError", "Connection aborted",
+                                "Connection reset", "Server disconnected"))
+
+def _net_error_tick(window=300, threshold=3):
+    """记录一次网络异常，返回 True 表示达到告警门槛（窗口内第 threshold 次）。"""
+    now = time.time()
+    _net_err_log[:] = [t for t in _net_err_log if now - t < window]
+    _net_err_log.append(now)
+    return len(_net_err_log) >= threshold
+
+
 async def on_app_error(update, context):
     """全局错误兜底：任何 handler 抛出的未捕获异常都会进入这里。
 
     记录完整堆栈日志，给当事人一条可感知的提示（不再静默失败），并推送管理员。
+    网络类错误（httpx.ReadError / 平台抖动 / 容器重启瞬断）会自动重连，属无害噪音，
+    默认只写日志，5 分钟窗口内累计 3 次以上才私聊管理员，避免刷屏。
     自身全程吞异常——错误处理器绝不能二次抛错。
     """
-    logger.exception("未处理异常", exc_info=context.error)
+    err = context.error
+    logger.exception("未处理异常", exc_info=err)
+    net = _is_network_error(err)
+    if net:
+        hit = _net_error_tick()
+        if not hit:
+            logger.warning("网络类异常（自动重连，未打扰管理员）：%r（5分钟内第 %d 次）", err, len(_net_err_log))
+            return
     try:
         chat = getattr(update, "effective_chat", None) if update is not None else None
-        if chat is not None:
+        if chat is not None and not net:
             await context.bot.send_message(chat.id, "⚠️ 处理该操作时出错，请稍后重试；已通知管理员排查。")
     except Exception:
         pass
     try:
-        await context.bot.send_message(ADMIN_USER_ID, f"⚠️ bot 发生未处理异常：{context.error!r}")
+        if net:
+            await context.bot.send_message(
+                ADMIN_USER_ID,
+                f"⚠️ 网络异常持续发生（5 分钟内第 {len(_net_err_log)} 次）：{err!r}\n"
+                "多为平台网络抖动或容器重启，bot 一般会自动重连；若群内命令也无反应，请检查平台实例状态。")
+        else:
+            await context.bot.send_message(ADMIN_USER_ID, f"⚠️ bot 发生未处理异常：{err!r}")
     except Exception:
         pass
 
@@ -11740,7 +11778,17 @@ def main():
     
     # 资金系统：关闭并发更新，串行处理所有 update handler，消除「检查余额→扣款」之间的竞态
     # （后台任务如赛车动画、定时调度仍为并发；仅 handler 之间不再交错，杜绝并发负分）。
-    builder = Application.builder().token(token).concurrent_updates(False).post_init(post_init).post_shutdown(post_shutdown)
+    # 超时放大到 30s：默认 5s 在部分云平台（Railway 美西等）首次连 api.telegram.org 会
+    # 直接 ReadTimeout 导致启动即崩；get_updates_read_timeout 必须 > getUpdates 的 timeout(10s)
+    builder = (Application.builder().token(token)
+               .concurrent_updates(False)
+               .connect_timeout(30.0)
+               .read_timeout(30.0)
+               .write_timeout(30.0)
+               .get_updates_read_timeout(42)
+               .pool_timeout(10.0)
+               .post_init(post_init)
+               .post_shutdown(post_shutdown))
     app = builder.build()
 
     # 云平台保活：健康检查服务，供 UptimeRobot 定时 ping 防止休眠

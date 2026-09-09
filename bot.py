@@ -3,7 +3,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-2030"
+BOT_VERSION = "2026-09-09-2130"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -6496,6 +6496,26 @@ def _autodel_text_hit(message, text):
         return "premium_emoji"
     return None
 
+# 进群判定：目标状态白名单。**必须含 restricted** —— 群若开启「新成员默认限制」，
+# Telegram 推的入群事件 new.status 就是 restricted；只认 member 会把这类新人整条跳过
+# （不发验证、不记 member_joined_at → 观察期/强制订阅「只拦新人」也一起失效）。
+_JOIN_IN_CHAT = ("member", "restricted", "administrator", "creator")
+
+
+def _is_join_transition(new, old):
+    """是否属于「进入群聊」的状态变更（进群判定唯一入口）。
+
+    - new 在 _JOIN_IN_CHAT 且 old 是 left/kicked → 进群。
+    - **restricted → member 不算进群**：那是 bot 自己解除限制触发的状态变更，
+      若算进群会再次发验证 → 解限/发验证互相触发，死循环。
+    """
+    ns = str(getattr(new, "status", "") or "")
+    os_ = str(getattr(old, "status", "") or "")
+    if ns not in _JOIN_IN_CHAT:
+        return False
+    return os_ in ("left", "kicked")
+
+
 def _is_service_message(message):
     """判断是否为系统消息（入退群/改名/换头像/删头像/置顶/建群/迁移等）。
     系统消息的 effective_user 经常为 None（建群/迁移尤其），单独判定便于豁免 user 检查。
@@ -6617,6 +6637,69 @@ def _sensitive_hit(text):
         elif w.lower() in t.lower():
             return w
     return None
+
+
+async def _observe_enforce(update, context):
+    """新成员观察期：入群未满观察时长的成员发言即删并禁言至期满。返回 True=已拦截。
+
+    文本与媒体消息共用（此前只在 on_text 拦截 → 观察期内发个表情包就能照常发言）。
+    """
+    if not (OBSERVE_ENABLED and OBSERVE_SECONDS > 0):
+        return False
+    user, message = update.effective_user, update.effective_message
+    if not message or not user or user.is_bot:
+        return False
+    if not is_group_chat(update) or is_bot_admin(user.id):
+        return False
+    cid = update.effective_chat.id
+    _jt = member_joined_at.get(cid, {}).get(user.id, 0)
+    _elapsed = time.time() - _jt if _jt else 1e9
+    if _elapsed >= OBSERVE_SECONDS:
+        return False
+    try:
+        await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
+        await context.bot.restrict_chat_member(
+            cid, user.id, permissions=ChatPermissions(can_send_messages=False),
+            until_date=datetime.now(timezone.utc) + timedelta(seconds=OBSERVE_SECONDS - _elapsed + 1))
+    except TelegramError:
+        pass
+    return True
+
+
+async def _sensitive_enforce(update, context):
+    """敏感词过滤（文本与媒体 caption 共用）：命中即删，可按档禁言/踢出。返回 True=已拦截。
+
+    此前只有 on_text 调用、且只看 message.text → 图片/贴纸/视频的 caption 里的敏感词
+    永远不会被查（用户报障「敏感词设了不删」的一半根因）。
+    删除失败（bot 无删除权限）不再静默：私聊管理员告警，否则管理员只看到「设了没反应」。
+    """
+    if not SENSITIVE_ENABLED:
+        return False
+    user, message = update.effective_user, update.effective_message
+    if not message or not user or user.is_bot:
+        return False
+    if not is_group_chat(update) or is_bot_admin(user.id):
+        return False
+    cid = update.effective_chat.id
+    text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    if not _sensitive_hit(text):
+        return False
+    try:
+        await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
+    except Exception as e:
+        logger.warning("敏感词消息删除失败 cid=%s mid=%s：%r", cid, message.message_id, e)
+        try:
+            await context.bot.send_message(
+                ADMIN_USER_ID,
+                f"⚠️ 敏感词消息删除失败（请确认机器人有删除消息权限）：\n"
+                f"群 <code>{cid}</code> · 消息 <code>{message.message_id}</code> · 错误 <code>{html.escape(repr(e))}</code>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    if SENSITIVE_ACTION:
+        await _mod_punish(context, cid, user.id, SENSITIVE_ACTION, SENSITIVE_MUTE_SECONDS,
+                          user.first_name or f"用户{user.id}", "敏感词")
+    return True
 
 async def _mod_punish(context, cid, uid, action, mute_seconds, name, reason):
     """群管统一处罚：1=禁言 2=踢出（踢出用 ban+立即 unban，成员可自行回来）。异常全吞。"""
@@ -6817,7 +6900,12 @@ async def _join_verify_start(context, cid, uid, name):
         txt += "\n\n🧮 验证问题：" + (f"看图作答（{a} + {b} = ?）" if png is None else "请直接回复图中算式的结果（只发数字）")
     try:
         if png is not None:
-            msg = await context.bot.send_photo(cid, photo=png, caption=txt)
+            try:
+                msg = await context.bot.send_photo(cid, photo=png, caption=txt)
+            except Exception:
+                # 图片发不出去（群限制发图/权限异常）→ 降级文字题目，别让新人卡在看不见的验证里
+                logger.exception("入群验证：验证码图片发送失败，降级文字题目 cid=%s uid=%s", cid, uid)
+                msg = await context.bot.send_message(cid, txt + "\n（请直接回复算式结果，只发数字）")
         else:
             if mode == 0:
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton(str(o), callback_data=f"jv_{cid}_{uid}_{o}")
@@ -6831,6 +6919,10 @@ async def _join_verify_start(context, cid, uid, name):
         mid = getattr(msg, "message_id", 0) or 0
     except Exception:
         logger.exception("入群验证：发送验证消息失败 cid=%s uid=%s", cid, uid)
+    if not mid:
+        # 验证消息没发出去 → 不登记。否则用户看不到题目却会被超时禁言/踢出（静默处罚）。
+        logger.warning("入群验证：验证消息未能发出，跳过登记 cid=%s uid=%s", cid, uid)
+        return
     rec = {"ts": time.time(), "msg_id": mid, "name": str(name), "mode": mode}
     if mode in (0, 1):
         rec.update({"a": a, "b": b, "wrong": 0})
@@ -7163,7 +7255,17 @@ async def on_media(update, context):
             try: await update.effective_message.delete()
             except Exception: pass
             return
+        # 强制订阅：媒体消息（表情包/图片/视频等）也必须拦——此前只在 on_text 拦截，
+        # 未订阅的新人发个表情包就能照常聊天（用户报障「只删文字，不删表情包那些」）
+        if await _forcesub_enforce(update, context):
+            return
+        # 观察期：媒体消息同样要拦（同一条漏口，一并收口）
+        if await _observe_enforce(update, context):
+            return
         if await _autodel_enforce(update, context):
+            return
+        # 敏感词：媒体消息的 caption 同样要查（此前只查文本 → 表情包/图片配文里的敏感词漏网）
+        if await _sensitive_enforce(update, context):
             return
     except Exception:
         logger.exception("自动删除(媒体)异常（已吞并）")
@@ -7181,13 +7283,6 @@ async def on_text(update, context):
             _remember_name(update)
         except Exception:
             return
-        # 入群验证（图片算术）：待验证者发言优先当答案处理，不进命令/游戏逻辑
-        try:
-            if await _join_verify_handle_text(context, cid, user.id, text):
-                return
-        except Exception:
-            logger.exception("入群验证答题处理异常（已吞并）")
-
         # 拉黑拦截：被封禁用户（非管理员）禁止使用全部功能，连帮助都看不到
         if update.effective_user.id in BLACKLISTED_USERS and not is_bot_admin(update.effective_user.id):
             await send_reply(update, context, "🚫 你已被禁止使用本机器人，如有疑问请联系管理员。"); return
@@ -7197,34 +7292,24 @@ async def on_text(update, context):
             return
 
         # 新成员观察期：入群未满观察时长的成员发言即删，并禁言至观察期结束（管理员豁免）
-        if OBSERVE_ENABLED and OBSERVE_SECONDS > 0 and is_group_chat(update) and not is_bot_admin(user.id):
-            _jt = member_joined_at.get(cid, {}).get(user.id, 0)
-            _elapsed = time.time() - _jt if _jt else 1e9
-            if _elapsed < OBSERVE_SECONDS:
-                try:
-                    await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
-                    await context.bot.restrict_chat_member(
-                        cid, user.id, permissions=ChatPermissions(can_send_messages=False),
-                        until_date=datetime.now(timezone.utc) + timedelta(seconds=OBSERVE_SECONDS - _elapsed + 1))
-                except TelegramError: pass
-                return
+        if await _observe_enforce(update, context):
+            return
 
         # 自动删除规则中心：链接/超长/会员表情（媒体消息走 on_media；管理员豁免）
         if await _autodel_enforce(update, context):
             return
 
         # 敏感词过滤（默认关；管理员豁免）：命中即删，可叠加禁言/踢出
-        if SENSITIVE_ENABLED and is_group_chat(update) and not is_bot_admin(user.id):
-            _sw = _sensitive_hit(text)
-            if _sw:
-                try:
-                    await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
-                except TelegramError:
-                    pass
-                if SENSITIVE_ACTION:
-                    await _mod_punish(context, cid, user.id, SENSITIVE_ACTION, SENSITIVE_MUTE_SECONDS,
-                                      user.first_name or f"用户{user.id}", "敏感词")
+        if await _sensitive_enforce(update, context):
+            return
+
+        # 入群验证答题：放在过滤之后 —— 图片模式待验证者不禁言，若这里先消费掉发言，
+        # 敏感词/订阅/观察期等规则对「正在验证的人」全部失效（用户报截图中的人连发违禁词未被处理）。
+        try:
+            if await _join_verify_handle_text(context, cid, user.id, text):
                 return
+        except Exception:
+            logger.exception("入群验证答题处理异常（已吞并）")
 
         # 定时刷屏识别：复读机 + 定时器特征（管理员豁免；内容太短不参与统计防误伤闲聊）
         if (ANTISPAM_ENABLED and is_group_chat(update) and not is_bot_admin(user.id)
@@ -9529,8 +9614,10 @@ async def on_new_members_msg(update, context):
             if not member.is_bot and not is_bot_admin(uid):
                 _gate_ok = await _join_gate_check(context, cid, member, name)    # 硬门槛：不满足直接移出
                 await _raid_on_join(context, cid, uid)                           # 防突袭计数（按人去重）
+                # 入群时间无条件记录：观察期起点与「强制订阅只拦新人」都依赖它，
+                # 只在验证开启时才记 → 验证关着时这两项全部静默失效。
+                member_joined_at[cid][uid] = time.time()
                 if _gate_ok and (JOIN_VERIFY_ENABLED or _raid_active(cid)):
-                    member_joined_at[cid][uid] = time.time()   # 普通群无 chat_member 事件，这里补观察期起点
                     await _join_verify_start(context, cid, uid, name)
     except Exception:
         logger.exception("message 入群事件处理异常（已吞并）")
@@ -9589,7 +9676,7 @@ async def on_member_event(update, context):
             join_verify_pending.pop(f"{cid}:{uid}", None)  # 退群清待验证：防幽灵记录（重进可重新验证）
             raid_counted.pop(f"{cid}:{uid}", None)         # 退群清计数：重进算新一次
             await _cleanup_left_member_games(context.application, cid, uid)  # ⑭ 从等待房移除，防幽灵开局
-        elif new.status in ("member", "administrator") and old.status in ("left", "kicked"):
+        elif _is_join_transition(new, old):
             leave_records[cid].append({"ts": ts, "uid": uid, "name": name, "join": True})
             leave_records[cid] = leave_records[cid][-100:]
             member_joined_at[cid][uid] = time.time()  # 观察期起点
@@ -12258,10 +12345,16 @@ def start_health_server():
                                        - {"sensitive_enabled", "sensitive_words", "sensitive_action",
                                           "sensitive_mute_seconds", "link_whitelist_enabled", "link_whitelist",
                                           "sep_mod_word"})
+                    # 主表单也声明 _fields：被剔除的键（如敏感词已移入弹窗）不进「补 0」名单，
+                    # 否则用户只改个验证方式就把敏感词总开关静默清零（2026-09-09 报障真凶）
+                    _form_fields = (f"<input type='hidden' name='_fields' value=\""
+                                    f"{html.escape(','.join(sorted(_field_keys)), quote=True)}\">"
+                                    if _field_keys is not None else "")
                     body = (f"<h1>{gicon} {gname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
                             + form_open +
                             "<form method='post' action='/save'>"
                             f"<input type='hidden' name='group' value='{gkey}'>"
+                            + _form_fields
                             + _field_rows(gkey, keys=_field_keys) +
                             _savebar() + "</form>" + _modals + "</div>")
                 else:

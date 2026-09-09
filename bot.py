@@ -3,7 +3,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-1450"
+BOT_VERSION = "2026-09-09-1955"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -48,6 +48,7 @@ GAME_STARTING_CHIPS = 50000  # 统一积分初始值（首次使用自动获得�
 MIN_ENTRY_CHIPS = 200
 EMERGENCY_CHIPS = 2000
 EMERGENCY_MAX_USES = 3
+EMERGENCY_MIN_GAMES = 0     # 归零赠送要求「累计玩过 N 局」（0=不限）；防小号纯靠归零薅分
 
 # 游戏时间配置 (秒)
 TURN_TIMEOUT = 60          # 德州/21点单回合思考时间
@@ -309,8 +310,8 @@ SETTINGS_FIELDS = [
     ("join_verify_enabled",   "JOIN_VERIFY_ENABLED",   "入群验证开关",            "bool", 0, 1, "mod"),
     ("join_verify_seconds",   "JOIN_VERIFY_SECONDS",   "验证超时(秒)",            "int",  10, 3600, "mod"),
     ("join_verify_action",    "JOIN_VERIFY_ACTION",    "超时处理(0=只提醒 1=禁言 2=踢出 3=封禁)", "int", 0, 3, "mod"),
-    ("join_verify_mode",      "JOIN_VERIFY_MODE",      "验证方式(0=点按钮 1=图片算术)", "int", 0, 1, "mod"),
-    ("join_verify_max_wrong", "JOIN_VERIFY_MAX_WRONG", "图片算术答错N次按超时档处理(0=不限)", "int", 0, 20, "mod"),
+    ("join_verify_mode",      "JOIN_VERIFY_MODE",      "验证方式(0=按钮选答案 1=图片算术 2=一键通过)", "int", 0, 2, "mod"),
+    ("join_verify_max_wrong", "JOIN_VERIFY_MAX_WRONG", "验证答错N次按超时档处理(0=不限)", "int", 0, 20, "mod"),
     ("join_verify_msg",       "JOIN_VERIFY_MSG",       "验证提示({name} {seconds})", "text", 0, 0, "mod"),
     ("join_verify_ok_msg",    "JOIN_VERIFY_OK_MSG",    "验证通过提示({name})",    "text", 0, 0, "mod"),
     ("sep_mod_word",          None, "② 敏感词与域名白名单", "sep", 0, 0, "mod"),
@@ -349,6 +350,7 @@ SETTINGS_FIELDS = [
     ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "members/join"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
     ("emergency_max_uses",      "EMERGENCY_MAX_USES",      "归零每日赠送次数",          "int",   0,   99,      "general"),
+    ("emergency_min_games",     "EMERGENCY_MIN_GAMES",     "归零赠送要求累计玩过局数(0=不限)", "int", 0, 9999, "general"),
     ("season_start_chips",      "SEASON_START_CHIPS",      "每人起始分",                "int",   100, 1000000, "season"),
     ("season_min_players",      "SEASON_MIN_PLAYERS",      "最少开赛人数",              "int",   2,   50,      "season"),
     ("season_min_games",        "SEASON_MIN_GAMES",        "结算最少局数",              "int",   0,   999,     "season"),
@@ -395,9 +397,9 @@ SETTINGS_FIELDS = [
     ("rp_msg_poor",             "RP_MSG_POOR",             "发红包积分不足提示",        "text",  0,   0,       "points/rp"),
     ("rp_msg_target",           "RP_MSG_TARGET",           "专属红包非目标提示",        "text",  0,   0,       "points/rp"),
     ("rp_msg_log",              "RP_MSG_LOG",              "拼手气日志(每行,{rank}=名次)", "text", 0, 0,       "points/rp"),
-    ("level_notify_enabled",    "LEVEL_NOTIFY_ENABLED",    "等级升降群内通知开关",      "bool",  0,   1,       "points/level"),
+    ("level_notify_enabled",    "LEVEL_NOTIFY_ENABLED",    "等级升级群内通知开关",      "bool",  0,   1,       "points/level"),
     ("level_up_msg_tpl",        "LEVEL_UP_MSG_TPL",        "用户升级通知",              "text",  0,   0,       "points/level"),
-    ("level_down_msg_tpl",      "LEVEL_DOWN_MSG_TPL",      "用户降级通知",              "text",  0,   0,       "points/level"),
+    ("level_down_msg_tpl",      "LEVEL_DOWN_MSG_TPL",      "用户降级通知(已弃用:等级只升不降)", "text",  0,   0,       "points/level"),
     ("point_levels",            "POINT_LEVELS",            "积分等级表",               "levels", 0, 0,      "points/level_hidden"),
     ("mall_items",              "MALL_ITEMS",              "商城商品表",               "items", 0, 0,       "points/mall_hidden"),
     ("mall_enabled",            "MALL_ENABLED",            "开启积分商城",              "bool",  0,   1,       "points/mall"),
@@ -552,8 +554,8 @@ JOIN_VERIFY_SECONDS = 120   # 验证超时（秒）
 JOIN_VERIFY_ACTION = 0      # 超时处理：0=只提醒 1=禁言 2=踢出
 JOIN_VERIFY_MSG = "👋 {name} 欢迎进群！请在 {seconds} 秒内点下方按钮完成验证，超时将按群规处理。"
 JOIN_VERIFY_OK_MSG = "✅ {name} 验证通过，已解除限制，畅聊吧！"
-JOIN_VERIFY_MODE = 0       # 验证方式：0=点按钮 1=图片算术验证码（直接回复数字答案；未装 Pillow 自动降级文本算式）
-JOIN_VERIFY_MAX_WRONG = 0  # 图片算术答错 N 次按超时档处理（0=不限次数）
+JOIN_VERIFY_MODE = 0       # 验证方式：0=按钮选答案（题目+5个选项，点对的通过，默认）/ 1=图片算术（打字回复，未装 Pillow 降级文字算式）/ 2=一键通过
+JOIN_VERIFY_MAX_WRONG = 0  # 验证答错 N 次按超时档处理（0=不限次数）
 JOIN_GATE_USERNAME = 0     # 进群硬门槛：须有用户名（不满足直接移出，不进验证流程）
 JOIN_GATE_PREMIUM = 0      # 进群硬门槛：须 Telegram Premium
 JOIN_GATE_BIO = 0          # 进群硬门槛：须有简介（需额外查 API；查询失败宁放过不误杀）
@@ -580,6 +582,7 @@ RAID_THRESHOLD = 5          # 窗口内 N 人进群视为突袭
 RAID_COOLDOWN = 600         # 人墙持续秒数，到期自动解除
 raid_joins = {}             # cid -> [进群时间戳,...]（滑动窗口，重启清零即可）
 raid_until = {}             # cid -> 人墙解除时间戳
+raid_counted = {}           # "cid:uid" -> 进群时间戳（同一次进群双事件源只计一次）
 FORCE_SUB_ENABLED = 0       # 强制订阅频道：未订阅者发言即删+提示（默认关，网页手动开启）
 FORCE_SUB_CHANNELS = []     # 须订阅的频道（@用户名 或 -100 开头频道 id；订阅其一即可）
 FORCE_SUB_ONLY_NEW = 0      # 只检测新用户（入群 10 分钟内），关=所有人
@@ -1287,6 +1290,11 @@ season_lobby_msg = {}                                       # season_lobby_msg[c
 season_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # season_profit_by_date[date][cid][uid] = 当日盈亏（赛季每日重置成 2W 前记录；赛季总排行=7日累计之和）
 season_exchange_daily = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # season_exchange_daily[date][cid][uid] = 当日已消耗的聊天积分（兑换每日上限用）
 season_exchange_bonus = defaultdict(lambda: defaultdict(int))  # season_exchange_bonus[cid][uid] = 本赛季累计兑换得到的排位分（「额外底分」：每日重置保留、不计入盈亏榜）
+# 累计获得账本（只增不减）：等级按它算，兑换实物/商城消费不掉级
+# 语义：玩家在本群「历史累计赚到过多少积分」——不含游戏退款/下注返还等原路退回，
+#       也不含转赠收到的分（那是他人分的转移，不是新产出）。
+total_earned = defaultdict(lambda: defaultdict(int))   # total_earned[cid][uid] = 累计获得
+games_played = defaultdict(lambda: defaultdict(int))   # games_played[cid][uid] = 累计参与局数（归零赠送门槛用）
 # ---------- 赌神称号（全局唯一，跨群共享荣誉） ----------
 user_titles = {}               # user_titles[uid] = {"🎰赌神", ...}  每人拥有的称号集合（赌神全局唯一，其余称号可叠加）
 champions_history = []         # [{"season_id","uid","name","score","streak"}] 历届荣誉墙
@@ -1458,6 +1466,9 @@ def force_save_now():
                 "season_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in season_profit_by_date.items()},
                 "season_exchange_daily": {date: {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in chats.items()} for date, chats in season_exchange_daily.items()},
                 "season_exchange_bonus": {str(cid): dict(users) for cid, users in season_exchange_bonus.items()},
+                # 累计获得账本 + 累计局数（等级按累计获得算，消费不掉级；局数用于归零门槛）
+                "total_earned": {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in total_earned.items()},
+                "games_played": {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in games_played.items()},
                 "user_titles": {str(uid): sorted(t) for uid, t in user_titles.items()},
                 "title_expiry": {str(uid): {t: int(exp) for t, exp in ts.items()} for uid, ts in title_expiry.items()},
                 "title_equipped": {str(uid): t for uid, t in title_equipped.items()},
@@ -1634,6 +1645,11 @@ def load_data():
                     except (ValueError, TypeError): continue
         season_exchange_bonus.clear()
         restore_nested(season_exchange_bonus, data.get("season_exchange_bonus", {}))
+        # 累计获得账本 + 累计局数：老存档没有这两个键，留空由 _earn_get 用余额兜底（不会掉级）
+        total_earned.clear()
+        restore_nested(total_earned, data.get("total_earned", {}))
+        games_played.clear()
+        restore_nested(games_played, data.get("games_played", {}))
         # 赌神称号恢复
         user_titles.clear()
         for uid, t in data.get("user_titles", {}).items():
@@ -1880,15 +1896,55 @@ async def _warm_group_names(app):
             logger.warning("群名预热失败 cid=%s（bot 可能已不在该群）", cid)
 
 
-def _group_admins_get(cid, max_age=300):
-    """群主/管理员缓存（5 分钟）：返回 {uid: "owner"|"admin"}。
+def _in_bot_loop():
+    """当前线程是否就在 bot 主事件循环里。
 
-    供「群组成员列表」显示身份徽章；bot 不在群/接口失败返回上次缓存或空 dict，绝不炸页面。
+    用于同步函数判断「能不能跨线程回投」——在循环里跨线程回投同一个循环 = 自己等自己，
+    必然等到超时（群管响应慢 8 秒/条的元凶）。
+    """
+    if not _bot_loop:
+        return False
+    try:
+        return asyncio.get_running_loop() is _bot_loop
+    except RuntimeError:
+        return False   # 当前线程没有运行中的循环 → 不在 bot 循环里
+
+
+async def _group_admins_get_async(cid, max_age=300):
+    """群主/管理员缓存（5 分钟）·异步版：返回 {uid: "owner"|"admin"}。
+
+    【handler 内必须用这个】直接 await，不走 run_coroutine_threadsafe，
+    因此不会出现「循环里等循环」的自锁。bot 不在群/接口失败返回上次缓存或空 dict。
     """
     rec = _group_admins_cache.get(cid)
     now = time.time()
     if rec and now - float(rec[0]) < max_age:
         return rec[1]
+    try:
+        out = {}
+        for a in await _bot_app.bot.get_chat_administrators(cid):
+            out[a.user.id] = "owner" if getattr(a, "status", "") == "creator" else "admin"
+        _group_admins_cache[cid] = (now, out)
+        return out
+    except Exception:
+        logger.warning("拉取群管理员失败 cid=%s（按无徽章展示）", cid)
+    return rec[1] if rec else {}
+
+
+def _group_admins_get(cid, max_age=300):
+    """群主/管理员缓存（5 分钟）·同步版：返回 {uid: "owner"|"admin"}。
+
+    仅供「网页后台线程」等非异步上下文调用（跨线程投递到 bot 循环）。
+    若当前已在 bot 主循环里，绝不能跨线程回投（会自锁 8 秒）——
+    此时只返回缓存、不主动拉取；需要拉取的异步 handler 请用 _group_admins_get_async。
+    """
+    rec = _group_admins_cache.get(cid)
+    now = time.time()
+    if rec and now - float(rec[0]) < max_age:
+        return rec[1]
+    if _in_bot_loop():
+        # 自锁防护：在 bot 循环内不跨线程回投，直接用现有缓存（下次异步路径会刷新）
+        return rec[1] if rec else {}
     if _bot_app and _bot_loop:
         try:
             async def _fetch():
@@ -2199,15 +2255,32 @@ def calc_rake(nets):
 
 
 async def commit_rake(app, cid, rake_per, label):
-    """抽水落账：从钱包扣除 + 写台账。不再单独发群消息——抽水在结算面板里直接体现为「实收」。"""
+    """抽水落账：从钱包扣除 + 写台账。不再单独发群消息——抽水在结算面板里直接体现为「实收」。
+
+    修复（P1④ 记账边界）：此前先 max(0, 余额-抽水) 扣款、却把**应抽金额**写进台账，
+    余额不足时（结算与抽水之间有 await，玩家可能已转出/被并发扣款）会出现
+    「台账记了 X、钱包只扣了 Y<X」的账实不符。现在按**实际扣到的金额**记账，
+    余额不足时少收多少就记多少，台账与钱包永远一致。
+    """
     if not rake_per:
         return 0
     total = 0
     for uid, amt in rake_per.items():
+        try:
+            amt = int(amt or 0)
+        except (TypeError, ValueError):
+            continue
+        if amt <= 0:
+            continue
         async with wallet_locks[uid]:
-            game_chips[cid][uid] = max(0, game_chips[cid].get(uid, 0) - amt)
-        ledger_add(cid, uid, 0, amt, f"抽水-{label}")
-        total += amt
+            bal = int(game_chips[cid].get(uid, 0) or 0)
+            real = min(amt, bal) if bal > 0 else 0
+            if real <= 0:
+                logger.warning("抽水跳过：cid=%s uid=%s 余额 %s 不足以支付抽水 %s（%s）", cid, uid, bal, amt, label)
+                continue
+            game_chips[cid][uid] = bal - real
+        ledger_add(cid, uid, 0, real, f"抽水-{label}")
+        total += real
     if total:
         save_data()
     return total
@@ -2254,8 +2327,12 @@ async def emergency_if_needed(cid, uid, app, wallet=None, poker=None):
     used = daily_emergency_used[cid][uid]
     wallet = wallet or game_chips
     if wallet[cid][uid] != 0 or used >= EMERGENCY_MAX_USES: return False
+    # 参与门槛：纯靠归零白嫖的小号不给（本群累计玩过 EMERGENCY_MIN_GAMES 局才发）
+    if int(EMERGENCY_MIN_GAMES or 0) > 0 and int(games_played[cid][uid] or 0) < int(EMERGENCY_MIN_GAMES):
+        return False
     wallet[cid][uid] = EMERGENCY_CHIPS
     if poker and uid in poker.chips: poker.chips[uid] += EMERGENCY_CHIPS
+    _earn_add(cid, uid, EMERGENCY_CHIPS)   # 归零赠送属于「白给分」，计入累计获得
     daily_emergency_used[cid][uid] = used + 1; save_data()
     remaining = EMERGENCY_MAX_USES - daily_emergency_used[cid][uid]
     await safe_send(app.bot, cid, f"🆘 {await get_name(app, uid)} 积分归零，已赠送 {EMERGENCY_CHIPS} 应急积分（今日已补充 {daily_emergency_used[cid][uid]}/{EMERGENCY_MAX_USES} 次，剩余 {remaining} 次）。")
@@ -2839,6 +2916,18 @@ async def settle_poker(game, app):
             record_game_flows(game.chat_id, _nets, "德州")
             await commit_rake(app, game.chat_id, rake_per, "德州")
 
+        # 官方局：累计参与局数（归零赠送门槛）+ 赢分计入累计获得 + 升级通知
+        if game.mode == "official" and not game.season:
+            for uid in game.players:
+                if uid < 0: continue
+                games_played[game.chat_id][uid] += 1
+                # 实际到手 = 净赢 - 本局抽水（抽水已在上面扣除），记账才与实际余额一致
+                _gain = (game.chips[uid] - game.initial_chips.get(uid, 0)) - int(rake_per.get(uid, 0) or 0)
+                if _gain > 0:
+                    _oe = _earn_get(game.chat_id, uid)
+                    _earn_add(game.chat_id, uid, _gain)
+                    await _check_level_change(app, game.chat_id, uid, _oe, _earn_get(game.chat_id, uid))
+
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（排位赛不播）
         if game.mode == "official" and not game.season:
             top_uid, top_net = None, 0
@@ -3233,6 +3322,15 @@ class HorseRace:
                     await broadcast_big_win(app, self.chat_id, best[0], "🏎️ 赛车大赛", best[5], detail)
                 if self.mode == "official":
                     await commit_rake(app, self.chat_id, rake_per, "赛车")
+                    # 累计参与局数（归零门槛）+ 赢分计入累计获得 + 升级通知
+                    for uid, _nm, _stake, _bow, _pay, _net, _odd in settlements:
+                        games_played[self.chat_id][uid] += 1
+                        # 实际到手 = 净赢 - 本局抽水（抽水已在上面扣除）
+                        _gain = _net - int(rake_per.get(uid, 0) or 0)
+                        if _gain > 0:
+                            _oe = _earn_get(self.chat_id, uid)
+                            _earn_add(self.chat_id, uid, _gain)
+                            await _check_level_change(app, self.chat_id, uid, _oe, _earn_get(self.chat_id, uid))
 
                 available_pool = self.jackpot + self.pool
                 supplement = max(0, total_payout - available_pool)
@@ -3543,6 +3641,15 @@ async def update_blackjack_ui(game, app):
                 best = max(payout_plan, key=lambda x: x[2])
                 if best[2] > 0: await broadcast_big_win(app, game.chat_id, best[0], "♠️ 21点", best[2])
                 await commit_rake(app, game.chat_id, rake_per, "21点")
+                # 累计参与局数（归零门槛）+ 赢分计入累计获得 + 升级通知
+                for uid, _payout, _net in payout_plan:
+                    games_played[game.chat_id][uid] += 1
+                    # 实际到手 = 净赢 - 本局抽水（抽水已在上面扣除）
+                    _gain = _net - int(rake_per.get(uid, 0) or 0)
+                    if _gain > 0:
+                        _oe = _earn_get(game.chat_id, uid)
+                        _earn_add(game.chat_id, uid, _gain)
+                        await _check_level_change(app, game.chat_id, uid, _oe, _earn_get(game.chat_id, uid))
 
             # 记录庄家历史 (仅记录本局主要趋势)
             if game.mode == "official":
@@ -4289,6 +4396,16 @@ async def settle_jinhua(game, app):
         if game.mode == "official":
             record_game_flows(game.chat_id, _nets, "金花")
             await commit_rake(app, game.chat_id, rake_per, "金花")
+            # 累计参与局数（归零门槛）+ 赢分计入累计获得 + 升级通知
+            for uid in game.players:
+                if uid < 0: continue
+                games_played[game.chat_id][uid] += 1
+                # 实际到手 = 净赢 - 本局抽水（抽水已在上面扣除）
+                _gain = (game.chips[uid] - game.initial_chips.get(uid, 0)) - int(rake_per.get(uid, 0) or 0)
+                if _gain > 0:
+                    _oe = _earn_get(game.chat_id, uid)
+                    _earn_add(game.chat_id, uid, _gain)
+                    await _check_level_change(app, game.chat_id, uid, _oe, _earn_get(game.chat_id, uid))
         # 大奖战报：官方模式单局净赢超阈值 → 广播其他授权群（豹子特别标注）
         if game.mode == "official":
             top_uid, top_net = None, 0
@@ -5493,13 +5610,16 @@ async def cmd_add(update, context):
     async with wallet_locks[uid]:
         if amount < 0 and game_chips[cid][uid] < -amount:
             await send_reply(update, context, "❌ 玩家积分不足。"); return
-        old_bal = game_chips[cid][uid]
-        game_chips[cid][uid] += amount; save_data()
+        old_earned = _earn_get(cid, uid)
+        game_chips[cid][uid] += amount
+        if amount > 0:
+            _earn_add(cid, uid, amount)   # 管理员加分算「获得」；扣分不回退累计（只增不减）
+        save_data()
     verb = "添加" if amount > 0 else "扣除"
     msg = _fmt_tpl("add_msg_tpl", target=await get_name(context.application, uid),
                    verb=verb, amount=abs(amount), balance=game_chips[cid][uid])
     await send_reply(update, context, msg)
-    await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    await _check_level_change(context.application, cid, uid, old_earned, _earn_get(cid, uid))
 
 
 
@@ -5826,20 +5946,31 @@ async def on_button(update, context):
                 _inv_dbg(rcid, f"[主动问] 自动批准失败 uid={uid}：{e!r}（转人工，归因已锁定）")
                 await q.answer("✅ 邀请已记录，等管理员批准进群。", show_alert=False)
             return
-        # --- 入群验证：新人点「✅ 点击完成验证」解除限制（群授权前处理，未验证者也得能点） ---
+        # --- 入群验证：按钮选答案 / 一键通过（群授权前处理，未验证者也得能点） ---
         if data.startswith("jv_"):
-            body = data[len("jv_"):]
-            cid_s, _, uid_s = body.partition("_")     # 首段=群 id（负数），末段=待验证用户 id
+            parts = data[len("jv_"):].split("_")     # [群id, 用户id] 或 [群id, 用户id, 选项值]
             try:
-                cid_v, uid_v = int(cid_s), int(uid_s)
-            except ValueError:
+                cid_v, uid_v = int(parts[0]), int(parts[1])
+                pick = parts[2] if len(parts) > 2 else ""
+            except (ValueError, IndexError):
                 await q.answer("按钮已过期", show_alert=True); return
             if uid != uid_v and not is_bot_admin(uid):
                 await q.answer("❌ 这不是你的验证按钮", show_alert=True); return
-            if f"{cid_v}:{uid_v}" not in join_verify_pending:
+            rec_v = join_verify_pending.get(f"{cid_v}:{uid_v}")
+            if not rec_v:
                 await q.answer("✅ 你已通过验证", show_alert=False); return
-            await _join_verify_pass(context, cid_v, uid_v, q.from_user.first_name or f"用户{uid_v}",
-                                    getattr(q.message, "message_id", 0))
+            name_v = str(rec_v.get("name") or q.from_user.first_name or f"用户{uid_v}")
+            ans_v = rec_v.get("ans")
+            if ans_v is not None and not str(pick).strip():
+                await q.answer("请点下方选项按钮作答", show_alert=True); return   # 按钮模式不接受无选项回调
+            if pick:
+                if str(pick).strip() != str(ans_v):
+                    wrong_v, over_v = await _jv_wrong_hit(context, cid_v, uid_v, name_v, rec_v)
+                    await q.answer("❌ 答案不对，再选一次" + (f"（已错 {wrong_v} 次）" if not over_v else ""),
+                                   show_alert=not over_v)
+                    return
+            await _join_verify_pass(context, cid_v, uid_v, name_v,
+                                    int(rec_v.get("msg_id", 0) or 0) or getattr(q.message, "message_id", 0))
             await q.answer("✅ 验证通过，可以发言了", show_alert=False)
             return
         if not is_auth(cid): await q.answer("未授权", show_alert=True); return
@@ -6542,7 +6673,7 @@ async def _forcesub_enforce(update, context):
         return False
     cid = update.effective_chat.id
     try:
-        if _group_admins_get(cid).get(user.id):
+        if (await _group_admins_get_async(cid)).get(user.id):
             return False
     except Exception:
         pass
@@ -6631,11 +6762,43 @@ def _captcha_render(a, b):
         logger.exception("验证码图片生成失败（降级文本算式）")
         return None
 
+def _jv_options(a, b, n=5):
+    """按钮验证候选答案：正确答案 + (n-1) 个干扰项，随机顺序、互不重复、非负。"""
+    ans = a + b
+    opts = {ans}
+    for _ in range(400):
+        if len(opts) >= n:
+            break
+        v = ans + random.choice((-5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6, -6))
+        if v >= 0:
+            opts.add(v)
+    v = 0
+    while len(opts) < n:      # 极端兜底：补足数量
+        if v not in opts:
+            opts.add(v)
+        v += 1
+    opts = list(opts)
+    random.shuffle(opts)
+    return opts
+
+
 async def _join_verify_start(context, cid, uid, name):
-    """入群验证：mode=0 先限制发言 → 点按钮解锁；mode=1 不限制（否则没法回复答案），
-    答题期间发言全部被 _join_verify_handle_text 消费，答对/超时由巡检兜底。"""
+    """入群验证：mode=0 按钮选答案（默认）/ 1 图片算术打字回复 / 2 一键通过。
+
+    0/2 先限制发言（防打字绕过），点按钮解锁；1 不限制（否则没法回复答案），
+    答题期间发言全部被 _join_verify_handle_text 消费，答对/超时由巡检兜底。
+
+    去重：超级群同一次进群会同时收到 chat_member 与 NEW_CHAT_MEMBERS 两个事件源，
+    两个 handler 都在 group 2（不同类型互不排斥）→ 这里必须只发一条验证消息。
+    """
     key = f"{cid}:{uid}"
-    if int(JOIN_VERIFY_MODE) != 1:
+    old = join_verify_pending.get(key)
+    if old:
+        if int(old.get("msg_id", 0) or 0):
+            return                       # 已登记且验证消息已发出 → 第二个事件源直接跳过
+        join_verify_pending.pop(key, None)   # 上一条验证消息没发出去（异常）→ 允许补发
+    mode = int(JOIN_VERIFY_MODE)
+    if mode != 1:
         try:
             await context.bot.restrict_chat_member(
                 cid, uid, permissions=ChatPermissions(can_send_messages=False))
@@ -6643,8 +6806,12 @@ async def _join_verify_start(context, cid, uid, name):
             logger.exception("入群验证：限制发言失败 cid=%s uid=%s（继续发验证消息）", cid, uid)
     txt = (str(JOIN_VERIFY_MSG).replace("{name}", html.escape(str(name)))
            .replace("{seconds}", str(int(JOIN_VERIFY_SECONDS))))
-    mid, png, a, b = 0, None, 0, 0
-    if int(JOIN_VERIFY_MODE) == 1:
+    mid, png, a, b, opts = 0, None, 0, 0, []
+    if mode == 0:
+        a, b = random.randint(1, 9), random.randint(1, 9)
+        opts = _jv_options(a, b)
+        txt += f"\n\n🧮 验证问题：{a} + {b} = ?\n点下方正确答案按钮完成验证。"
+    elif mode == 1:
         a, b = random.randint(2, 9), random.randint(2, 9)
         png = _captcha_render(a, b)
         txt += "\n\n🧮 验证问题：" + (f"看图作答（{a} + {b} = ?）" if png is None else "请直接回复图中算式的结果（只发数字）")
@@ -6652,19 +6819,49 @@ async def _join_verify_start(context, cid, uid, name):
         if png is not None:
             msg = await context.bot.send_photo(cid, photo=png, caption=txt)
         else:
-            msg = await context.bot.send_message(cid, txt, reply_markup=None if int(JOIN_VERIFY_MODE) == 1 else
-                                                 InlineKeyboardMarkup([[InlineKeyboardButton(
-                                                     "✅ 点击完成验证", callback_data=f"jv_{cid}_{uid}")]]))
+            if mode == 0:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(str(o), callback_data=f"jv_{cid}_{uid}_{o}")
+                                            for o in opts]])
+            elif mode == 2:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "✅ 点击完成验证", callback_data=f"jv_{cid}_{uid}")]])
+            else:
+                kb = None
+            msg = await context.bot.send_message(cid, txt, reply_markup=kb)
         mid = getattr(msg, "message_id", 0) or 0
     except Exception:
         logger.exception("入群验证：发送验证消息失败 cid=%s uid=%s", cid, uid)
-    rec = {"ts": time.time(), "msg_id": mid, "name": str(name)}
-    if int(JOIN_VERIFY_MODE) == 1:
-        rec.update({"mode": 1, "a": a, "b": b, "wrong": 0})
+    rec = {"ts": time.time(), "msg_id": mid, "name": str(name), "mode": mode}
+    if mode in (0, 1):
+        rec.update({"a": a, "b": b, "wrong": 0})
+        if mode == 0:
+            rec["ans"] = a + b
     join_verify_pending[key] = rec
 
+async def _jv_wrong_hit(context, cid, uid, name, rec):
+    """记一次验证答错；达到上限按超时档处理。返回 (累计错次, 是否已达上限)。"""
+    rec["wrong"] = int(rec.get("wrong", 0) or 0) + 1
+    if int(JOIN_VERIFY_MAX_WRONG) > 0 and rec["wrong"] >= int(JOIN_VERIFY_MAX_WRONG):
+        join_verify_pending.pop(f"{cid}:{uid}", None)
+        if JOIN_VERIFY_ACTION == 0:
+            try:
+                await context.bot.send_message(
+                    cid, f"❌ {html.escape(str(name))} 答错 {rec['wrong']} 次未通过验证，请管理员留意。")
+            except Exception:
+                pass
+        else:
+            await _mod_punish(context, cid, uid, JOIN_VERIFY_ACTION, SENSITIVE_MUTE_SECONDS, name, "验证答错超限")
+            try:
+                await context.bot.send_message(
+                    cid, f"❌ {html.escape(str(name))} 验证答错超限，已"
+                         f"{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群' if JOIN_VERIFY_ACTION == 2 else '封禁'}。")
+            except Exception:
+                pass
+        return rec["wrong"], True
+    return rec["wrong"], False
+
 async def _join_verify_handle_text(context, cid, uid, text):
-    """入群验证（图片算术）：待验证成员的发言优先当答案处理。返回 True=消息已消费，不再进命令/游戏逻辑。"""
+    """入群验证（图片算术 mode=1）：待验证成员的发言优先当答案处理。返回 True=消息已消费，不再进命令/游戏逻辑。"""
     rec = join_verify_pending.get(f"{cid}:{uid}")
     if not rec or int(rec.get("mode", 0) or 0) != 1:
         return False
@@ -6673,26 +6870,10 @@ async def _join_verify_handle_text(context, cid, uid, text):
     if ans.isdigit() and int(ans) == int(rec.get("a", 0)) + int(rec.get("b", 0)):
         await _join_verify_pass(context, cid, uid, name, int(rec.get("msg_id", 0) or 0))
         return True
-    rec["wrong"] = int(rec.get("wrong", 0) or 0) + 1
-    if int(JOIN_VERIFY_MAX_WRONG) > 0 and rec["wrong"] >= int(JOIN_VERIFY_MAX_WRONG):
-        join_verify_pending.pop(f"{cid}:{uid}", None)
-        if JOIN_VERIFY_ACTION == 0:
-            try:
-                await context.bot.send_message(
-                    cid, f"❌ {html.escape(name)} 答错 {rec['wrong']} 次未通过验证，请管理员留意。")
-            except Exception:
-                pass
-        else:
-            await _mod_punish(context, cid, uid, JOIN_VERIFY_ACTION, SENSITIVE_MUTE_SECONDS, name, "验证答错超限")
-            try:
-                await context.bot.send_message(
-                    cid, f"❌ {html.escape(name)} 验证答错超限，已"
-                         f"{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群' if JOIN_VERIFY_ACTION == 2 else '封禁'}。")
-            except Exception:
-                pass
-    else:
+    wrong, over = await _jv_wrong_hit(context, cid, uid, name, rec)
+    if not over:
         try:
-            await context.bot.send_message(cid, f"❌ 答案不对，请再试一次（已错 {rec['wrong']} 次）。")
+            await context.bot.send_message(cid, f"❌ 答案不对，请再试一次（已错 {wrong} 次）。")
         except Exception:
             pass
     return True
@@ -6808,8 +6989,12 @@ async def _raid_recover(context, cid):
         except Exception:
             pass
 
-async def _raid_on_join(context, cid):
-    """防突袭：滑窗计数进群人数；超阈值 → 临时人墙（期间新人强制验证禁言），到期自动解除。"""
+async def _raid_on_join(context, cid, uid=0):
+    """防突袭：滑窗计数进群人数；超阈值 → 临时人墙（期间新人强制验证禁言），到期自动解除。
+
+    去重：同一次进群会同时到 chat_member 与服务消息两个事件源，若按事件计数，阈值实际被腰斩。
+    uid 相同且在窗口内的重复上报只计一次。
+    """
     if not RAID_ENABLED:
         return
     try:
@@ -6817,6 +7002,15 @@ async def _raid_on_join(context, cid):
     except Exception:
         logger.exception("防突袭恢复检查异常（已吞并）")
     now = time.time()
+    if uid:
+        ckey = f"{cid}:{uid}"
+        last = float(raid_counted.get(ckey, 0) or 0)
+        if last and now - last < max(30, int(RAID_WINDOW)):
+            return          # 同一个人同一次进群的第二个事件源，不重复计数
+        raid_counted[ckey] = now
+        if len(raid_counted) > 2000:
+            for k in [k for k, t in raid_counted.items() if now - float(t) > 3600]:
+                raid_counted.pop(k, None)
     arr = [t for t in raid_joins.get(cid, []) if now - float(t) < int(RAID_WINDOW)]
     arr.append(now)
     raid_joins[cid] = arr[-300:]
@@ -7197,6 +7391,35 @@ async def on_text(update, context):
 
 
 # ---------- 积分系统（统一钱包） ----------
+# 累计获得账本：所有「真产出」入口调用 _earn_add 记账；等级按累计获得算，
+# 因此花积分兑换实物/商城消费不会掉级（此前按余额算，消费即降级 = 反激励）。
+def _earn_add(cid, uid, amount):
+    """记一笔「累计获得」。amount<=0 忽略；异常全吞（记账失败绝不影响主流程）。"""
+    try:
+        amount = int(amount or 0)
+        if amount > 0:
+            total_earned[cid][uid] = int(total_earned[cid][uid] or 0) + amount
+    except Exception:
+        logger.exception("累计获得记账异常 cid=%s uid=%s（已吞并）", cid, uid)
+
+def _earn_get(cid, uid):
+    """取「累计获得」。老玩家账本为空时用「当前余额」兜底，避免升级后一夜掉级。"""
+    try:
+        got = int(total_earned[cid][uid] or 0)
+    except Exception:
+        got = 0
+    if got > 0:
+        return got
+    try:
+        return max(0, int(game_chips[cid][uid] or 0))
+    except Exception:
+        return 0
+
+def _level_of(cid, uid):
+    """按「累计获得」返回 (等级名, 累计获得值)。等级判定唯一口径。"""
+    got = _earn_get(cid, uid)
+    return _get_level(got), got
+
 def _get_level(balance):
     """按积分等级表返回当前等级名，表为空返回空串。"""
     lv = ""
@@ -7212,23 +7435,26 @@ def _level_rank(lv_name):
             return i
     return -1
 
-async def _check_level_change(app, cid, uid, old_bal, new_bal):
-    """余额变动后检查积分等级升降并发群内通知（LEVEL_NOTIFY_ENABLED 控制）。
+async def _check_level_change(app, cid, uid, old_earned, new_earned, balance=None):
+    """「累计获得」变动后检查等级升降并发群内通知（LEVEL_NOTIFY_ENABLED 控制）。
 
-    接入点：签到 / 管理员加减分 / 转赠双方 / 商城兑换 / 红包领取。
+    old_earned/new_earned 是**累计获得**（不是余额）——花积分不会掉级，所以消费点
+    不该再调本函数（此前兑换/商城误传余额，导致花分就发降级公告）。
+
+    接入点：签到 / 管理员加分 / 转赠收款 / 红包领取 / 邀请奖励 / 竞猜派彩 / 游戏结算 / 归零赠送。
     聊天积分小额高频，刻意不接（避免刷屏）。
     """
     try:
-        if not LEVEL_NOTIFY_ENABLED or new_bal == old_bal or not POINT_LEVELS:
+        if not LEVEL_NOTIFY_ENABLED or not POINT_LEVELS:
             return
-        old_lv, new_lv = _get_level(old_bal), _get_level(new_bal)
+        if int(new_earned or 0) <= int(old_earned or 0):
+            return   # 只可能升不可能降（累计账本只增）
+        old_lv, new_lv = _get_level(int(old_earned or 0)), _get_level(int(new_earned or 0))
         if old_lv == new_lv:
             return
         name = await get_name(app, uid, cid=cid)
-        if _level_rank(new_lv) > _level_rank(old_lv):
-            await send_settle(app, cid, _fmt_tpl("level_up_msg_tpl", name=name, level=new_lv, balance=new_bal))
-        elif old_lv:
-            await send_settle(app, cid, _fmt_tpl("level_down_msg_tpl", name=name, level=new_lv or "无等级", balance=new_bal))
+        show_bal = game_chips[cid][uid] if balance is None else balance
+        await send_settle(app, cid, _fmt_tpl("level_up_msg_tpl", name=name, level=new_lv, balance=show_bal))
     except Exception:
         logger.exception("等级变动通知失败（已忽略）")
 
@@ -7246,14 +7472,15 @@ async def cmd_my_level(update, context):
     if not POINT_LEVELS:
         await send_reply(update, context, "ℹ️ 积分等级未配置（后台「积分系统 → 积分等级」添加）。"); return
     bal = game_chips[cid][uid]
-    lv = _get_level(bal)
+    lv, earned = _level_of(cid, uid)   # 等级按「累计获得」算，兑换花分不掉级
     next_lv, next_val = "", None
     for item in POINT_LEVELS:
-        if item["value"] > bal and (next_val is None or item["value"] < next_val):
+        if item["value"] > earned and (next_val is None or item["value"] < next_val):
             next_lv, next_val = item["name"], item["value"]
-    nxt = f"\n⬆️ 下一等级：{next_lv}（还差 {next_val - bal} 积分）" if next_lv else "\n🏆 你已是最高等级！"
+    nxt = f"\n⬆️ 下一等级：{next_lv}（还差 {next_val - earned} 积分）" if next_lv else "\n🏆 你已是最高等级！"
     await send_reply(update, context,
-                     f"🎖 {await get_name(context.application, uid)} 的等级：{lv or '无'}\n💰 积分：{bal}{nxt}")
+                     f"🎖 {await get_name(context.application, uid)} 的等级：{lv or '无'}\n"
+                     f"💰 当前积分：{bal}\n📈 累计获得：{earned}（等级按此计算，消费不降级）{nxt}")
 
 def _award_chat_points(cid, uid, text):
     """聊天积分：优先走网页配置的规则表（阿福式：文字/长度条件 → 分值，命中即停）；
@@ -7296,6 +7523,7 @@ def _award_chat_points(cid, uid, text):
             return
     today[uid] = earned + gain
     game_chips[cid][uid] += gain
+    _earn_add(cid, uid, gain)   # 聊天积分计入累计获得（等级口径），但不发升级通知（高频防刷屏）
 
 async def cmd_sign(update, context):
     if not await need_auth(update, context): return
@@ -7312,15 +7540,16 @@ async def cmd_sign(update, context):
     streak = info.get("streak", 0) + 1 if info.get("last") == yesterday else 1
     reward = SIGN_BASE_REWARD + (SIGN_STREAK_BONUS if streak % 7 == 0 else 0)
     async with wallet_locks[uid]:
-        old_bal = game_chips[cid][uid]
+        old_earned = _earn_get(cid, uid)
         game_chips[cid][uid] += reward
+        _earn_add(cid, uid, reward)
         sign_data[cid][uid] = {"last": today, "streak": streak}
         save_data()
     bonus = "（含连续7天额外奖励）" if streak % 7 == 0 else ""
     msg = _fmt_tpl("sign_msg_tpl", name=await get_name(context.application, uid),
                    streak=streak, reward=reward, bonus=bonus, balance=game_chips[cid][uid])
     await send_reply(update, context, msg)
-    await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    await _check_level_change(context.application, cid, uid, old_earned, _earn_get(cid, uid))
     # 合格邀请结算（事件驱动）：被邀请人签到加分后也即时判定是否达标
     try:
         if INVITE_ENABLED:
@@ -7347,7 +7576,7 @@ async def cmd_my_points(update, context):
     today_chat = chat_today.get(date, {}).get(cid, {}).get(uid, 0)
     streak = sign_data.get(cid, {}).get(uid, {}).get("streak", 0)
     signed = "✅ 已签" if sign_data.get(cid, {}).get(uid, {}).get("last") == date else "❌ 未签"
-    lv = _get_level(balance)
+    lv, earned = _level_of(cid, uid)   # 等级按累计获得，与「我的等级」口径一致
     lv_line = f"🎖 等级：{lv}\n" if lv else ""
     msg = _fmt_tpl("query_msg_tpl", name=await get_name(context.application, uid),
                    balance=balance, level_line=lv_line, signed=signed, streak=streak, today_chat=today_chat)
@@ -7365,7 +7594,7 @@ async def cmd_points_rank(update, context):
     cid = update.effective_chat.id
     lines = ["💰 积分排行榜", "━" * 14]
     for i, (uid, value) in enumerate(sorted(game_chips[cid].items(), key=lambda x: x[1], reverse=True)[:20], 1):
-        lv = _get_level(value)
+        lv = _level_of(cid, uid)[0]   # 等级按累计获得（与我的等级一致）
         tag = f"｜{lv}" if lv else ""
         lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value}{tag}")
     msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
@@ -7398,7 +7627,6 @@ async def _redeem_execute(context, cid, uid, item):
         return f"❌ 每人限兑 {REDEEM_MAX_PER_USER} 次，你已用完额度。"
     price = int(item.get("price", 0) or 0)
     left = int(item.get("left", 0) or 0)
-    old_bal = game_chips[cid][uid]
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
             return f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"
@@ -7421,7 +7649,7 @@ async def _redeem_execute(context, cid, uid, item):
     await send_settle(context.application, cid, _fmt_tpl("redeem_msg_ok_group",
         name=uname, goodsName=item["name"], pointNum=price,
         balance=game_chips[cid][uid]))
-    await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    # 消费点不再检查等级：等级按「累计获得」算，花分不掉级（此前误传余额 → 花分即降级公告）
     try:
         await context.bot.send_message(uid, _fmt_tpl("redeem_msg_ok_dm", goodsName=item["name"], pointNum=price)
                                        + f"\n🔎 防伪单号 {order_no}（管理员发货凭此号核对）")
@@ -7512,7 +7740,6 @@ async def _mall_dm_ok(context, cid, uid, idx):
                 if uid in (chats.get(cid) or {}): active_days.add(d)
         if len(active_days) < MALL_MIN_ACTIVE_DAYS:
             return False, f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"
-    old_bal = game_chips[cid][uid]
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
             return False, f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"
@@ -7524,7 +7751,7 @@ async def _mall_dm_ok(context, cid, uid, idx):
         save_data()
     await send_settle(context.application, cid, _fmt_tpl("mall_msg_buy",
         name=await get_name(context.application, uid), item=item["name"], price=price, balance=game_chips[cid][uid]))
-    await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    # 消费点不再检查等级：等级按「累计获得」算，花分不掉级（此前误传余额 → 花分即降级公告）
     try:
         await context.bot.send_message(ADMIN_USER_ID,
             f"🛒 积分商城订单\n群：{chat_name_cache.get(cid, cid)}\n"
@@ -7784,7 +8011,6 @@ async def cmd_mall_buy(update, context):
                 if uid in (chats.get(cid) or {}): active_days.add(d)
         if len(active_days) < MALL_MIN_ACTIVE_DAYS:
             await send_reply(update, context, f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"); return
-    old_bal = game_chips[cid][uid]
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
             await send_reply(update, context, f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"); return
@@ -7796,7 +8022,7 @@ async def cmd_mall_buy(update, context):
         save_data()
     await send_reply(update, context, _fmt_tpl("mall_msg_buy",
         name=await get_name(context.application, uid), item=item["name"], price=price, balance=game_chips[cid][uid]))
-    await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    # 消费点不再检查等级：等级按「累计获得」算，花分不掉级（此前误传余额 → 花分即降级公告）
     try:
         await context.bot.send_message(ADMIN_USER_ID,
             f"🛒 积分商城订单\n群：{chat_name_cache.get(cid, cid)}\n"
@@ -8388,7 +8614,6 @@ async def _rp_grab(p, pid, uid, context, q):
             await q.answer(_fmt_tpl("rp_msg_target", name=await get_name(context.application, tgt, cid=cid)), show_alert=True); return
         if p["left_n"] <= 0:
             await q.answer(_fmt_tpl("rp_msg_none"), show_alert=True); return
-        old_bal = game_chips[cid][uid]
         if p["left_n"] == 1:
             amt = p["left_amt"]
         elif RP_LUCK_ENABLED:  # 拼手气：随机拆分；关闭则平均分
@@ -8399,10 +8624,11 @@ async def _rp_grab(p, pid, uid, context, q):
             p["grabbed"][uid] = amt
             p["left_amt"] -= amt; p["left_n"] -= 1
             game_chips[cid][uid] += amt
+            # 红包是「人对人转移」不产生新积分 → 不写入 total_earned（防小号对倒刷等级）
             ledger_add(cid, p["from"], uid, amt, "红包")  # 资金流台账：发包人→领取人
             save_data()
     await q.answer(_fmt_tpl("rp_msg_grab", amount=amt, balance=game_chips[cid][uid]))
-    await _check_level_change(context.application, cid, uid, old_bal, game_chips[cid][uid])
+    # 等级只看真实产出，转移类不动 → 无需检查
     total, count = sum(p["grabbed"].values()), len(p["grabbed"])
     if p["left_n"] <= 0:
         if RP_LOG_ENABLED:  # 手气排行：按金额降序，前三名带奖牌表情
@@ -8452,7 +8678,6 @@ async def cmd_inherit(update, context):
         used = inherit_daily[today][cid].get(uid, 0)
         if used + amount > INHERIT_DAILY_LIMIT:
             await send_reply(update, context, f"❌ 超出每日转赠上限：今日已转出 {used}，上限 {INHERIT_DAILY_LIMIT}（网页「积分继承」可调）。"); return
-    old_self, old_tgt = game_chips[cid][uid], game_chips[cid][target]
     # 必须同时锁住收款方：只锁付款方的话，收款方此刻若有 /add、结算等持锁写操作，转入会被覆盖丢失
     async with user_wallet_locks([uid, target]):
         if game_chips[cid][uid] < amount:
@@ -8467,8 +8692,8 @@ async def cmd_inherit(update, context):
     await send_reply(update, context, _fmt_tpl("inherit_msg_ok",
         name=await get_name(context.application, uid), target=await get_name(context.application, target, cid=cid),
         amount=amount, fee=fee_txt, recv=recv, balance=game_chips[cid][uid]))
-    await _check_level_change(context.application, cid, uid, old_self, game_chips[cid][uid])
-    await _check_level_change(context.application, cid, target, old_tgt, game_chips[cid][target])
+    # 转赠是「人对人转移」，不产生新积分 → 不写入 total_earned（否则小号互转即可刷等级）
+    # 因此这里不做等级变动检查：等级只看真实获得，不看分在谁手上。
 
 
 # ---------- 积分竞猜：管理开局面两方下注，封盘后按比例瓜分奖池 ----------
@@ -8598,8 +8823,7 @@ async def _guess_do_settle(app, cid, winner):
             _r = rake_per.get(uid, 0)
             _r_txt = f"（实收 {_net - _r}，含抽水{_r}）" if _r else ""
             lines += f"\n🎉 {await get_name(app, uid, cid=cid)} 押 {stake} → 分得 {amt}｜净 {_net:+d}{_r_txt}"
-        for uid, _s, _amt, old in paid:  # 等级联动（按派付后余额）
-            await _check_level_change(app, cid, uid, old, game_chips[cid].get(uid, 0))
+        # 竞猜是「人对人瓜分」不产生新积分 → 不写入 total_earned（防对倒下注刷等级）
     else:
         lines = "\n（无人猜中，奖池沉没）"
     try:
@@ -8748,11 +8972,18 @@ async def _buy_settle(context, oid, ok, q):
     if not o:
         await q.answer("该申请已处理过", show_alert=True); return
     if ok:
-        game_chips[o["cid"]][o["uid"]] += o["amount"]
+        _cid, _uid = o["cid"], o["uid"]
+        old_earned = _earn_get(_cid, _uid)
+        game_chips[_cid][_uid] += o["amount"]
+        _earn_add(_cid, _uid, o["amount"])   # 购买到账是系统新产出，计入累计获得
         try:
             await context.bot.send_message(o["cid"], f"✅ 你的购买申请（{o['amount']} 积分）已确认到账，当前积分 {game_chips[o['cid']][o['uid']]}。")
         except Exception:
             pass
+        try:
+            await _check_level_change(context.application, _cid, _uid, old_earned, _earn_get(_cid, _uid))
+        except Exception:
+            logger.exception("购买到账等级通知失败（已吞并）")
     save_data()
     await q.answer("已确认到账" if ok else "已取消")
 
@@ -9038,9 +9269,12 @@ async def _invite_award(app, rec):
         # 必须持锁：两名被邀请人同时达标时，两次"读 old + 写 old+reward"会互相覆盖，只到账一份
         async with wallet_locks[inviter]:
             old = game_chips[cid].get(inviter, 0)
+            old_earned = _earn_get(cid, inviter)
             game_chips[cid][inviter] = old + reward
+            _earn_add(cid, inviter, reward)   # 邀请奖励是系统新产出，计入累计获得
         rec["award"] = reward
         ledger_add(cid, 0, inviter, reward, "邀请奖励")
+        await _check_level_change(app, cid, inviter, old_earned, _earn_get(cid, inviter))
     inviter_name = await get_name(app, inviter, cid=cid)
     if INVITE_NOTIFY:
         try:
@@ -9294,7 +9528,7 @@ async def on_new_members_msg(update, context):
             _gate_ok = True
             if not member.is_bot and not is_bot_admin(uid):
                 _gate_ok = await _join_gate_check(context, cid, member, name)    # 硬门槛：不满足直接移出
-                await _raid_on_join(context, cid)                                # 防突袭计数
+                await _raid_on_join(context, cid, uid)                           # 防突袭计数（按人去重）
                 if _gate_ok and (JOIN_VERIFY_ENABLED or _raid_active(cid)):
                     member_joined_at[cid][uid] = time.time()   # 普通群无 chat_member 事件，这里补观察期起点
                     await _join_verify_start(context, cid, uid, name)
@@ -9352,6 +9586,8 @@ async def on_member_event(update, context):
             leave_records[cid] = leave_records[cid][-100:]
             rec = invite_records.get(f"{cid}:{uid}")
             if rec: rec["left"] = True   # 邀请记录：退群即失效（不再计入排行）
+            join_verify_pending.pop(f"{cid}:{uid}", None)  # 退群清待验证：防幽灵记录（重进可重新验证）
+            raid_counted.pop(f"{cid}:{uid}", None)         # 退群清计数：重进算新一次
             await _cleanup_left_member_games(context.application, cid, uid)  # ⑭ 从等待房移除，防幽灵开局
         elif new.status in ("member", "administrator") and old.status in ("left", "kicked"):
             leave_records[cid].append({"ts": ts, "uid": uid, "name": name, "join": True})
@@ -9362,7 +9598,7 @@ async def on_member_event(update, context):
             _gate_ok = True
             if not new.user.is_bot and not is_bot_admin(uid):
                 _gate_ok = await _join_gate_check(context, cid, new.user, name)  # 硬门槛：不满足直接移出
-                await _raid_on_join(context, cid)                                # 防突袭计数
+                await _raid_on_join(context, cid, uid)                           # 防突袭计数（按人去重）
                 if _gate_ok and (JOIN_VERIFY_ENABLED or _raid_active(cid)):
                     await _join_verify_start(context, cid, uid, name)            # 入群验证（默认关/突袭期强制）
             if WELCOME_ENABLED:
@@ -11607,7 +11843,7 @@ def start_health_server():
                     if not lv_rows:
                         lv_rows = ("<tr><td colspan='3' style='text-align:center;color:#6a6982'>"
                                    "暂无等级数据，先新增等级</td></tr>")
-                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>积分达到最低积分即获得该等级；升降级自动群内通知（下方可开关）。保存立即生效</div>{msg}"
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>按「累计获得」判定等级（消费不掉级，只升不降）；升级自动群内通知（下方可开关）。保存立即生效</div>{msg}"
                             "<div class='card'><h3>🎖 等级列表（按最低积分升序）</h3>"
                             "<table class='tbl'><tr><th>等级名称</th><th>最低积分</th><th>操作</th></tr>"
                             + lv_rows + "</table>"
@@ -11659,7 +11895,8 @@ def start_health_server():
                             + "）</td></tr>"
                             f"<tr><th>转赠</th><td>{'开启' if INHERIT_ENABLED else '关闭'}，把积分转给群内成员{fee}</td></tr>"
                             "<tr><th>等级</th><td>"
-                            + " ≥ ".join(f"{x['name']} {x['value']}分" for x in POINT_LEVELS) + "</td></tr>"
+                            + " ≥ ".join(f"{x['name']} {x['value']}分" for x in POINT_LEVELS)
+                            + "<br><span class='sub'>按「累计获得」计算：消费/兑换不掉级，只有真实产出（签到/游戏赢分/邀请/红包等）才涨</span></td></tr>"
                             "</table></div>")
                     # 阿福式聊天积分规则表：逐条「条件→积分」，命中即停；空表回退「每N字符」旧规则
                     def _m_desc(m):

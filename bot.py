@@ -3,7 +3,21 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-1135"
+BOT_VERSION = "2026-09-09-1300"
+# 主题色：key -> (主色, 深主色, 强色上的文字色)；网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化
+_UI_THEMES = {
+    "purple": ("#8b5cf6", "#6d3fd4", "#ffffff"),
+    "blue":   ("#3b82f6", "#2563eb", "#ffffff"),
+    "cyan":   ("#06b6d4", "#0e7490", "#ffffff"),
+    "green":  ("#10b981", "#047857", "#ffffff"),
+    "rose":   ("#f43f5e", "#be123c", "#ffffff"),
+    "amber":  ("#f59e0b", "#d97706", "#ffffff"),
+    "black":  ("#7b8194", "#3f4453", "#ffffff"),   # 黑：石墨灰黑
+    "white":  ("#dbe0ea", "#aab2c2", "#1f2430"),   # 白：银白（强色上用深色文字保证可读）
+}
+# 成员列表首字母头像色环（按 uid 取模固定颜色，同人永远同色）
+_AV_COLORS = ("#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#f43f5e", "#06b6d4", "#ec4899", "#a3e635")
+_group_admins_cache = {}   # cid -> (拉取时间戳, {uid: "owner"|"admin"})，网页成员列表徽章用（5 分钟缓存）
 import logging
 import math
 import os
@@ -114,7 +128,7 @@ SETTINGS_GROUPS = [
     ("commands",  "命令管理",   "⌨️"),
     ("tpls",      "话术库",     "💬"),
     ("general",   "通用与应急", "⚙️"),
-    ("admin",     "管理员中心", "🛡️"),
+    ("admin",     "管理员中心", "👑"),
     ("security",  "安全",       "🔒"),
 ]
 # 子页面制：有子页的分组在侧边栏折叠展开（照阿福模板）。None=未开通占位页
@@ -122,11 +136,13 @@ SIDEBAR_ORDER = []   # 侧边栏自定义排序（组键列表，网页「群体
 SIDEBAR_CHILDREN = {"texas": ["season"]}  # 把某些独立组折叠进父组显示（路由不变）：排位赛归入德州
 # 群管中心（跨组聚合页）直接内嵌的高频开关；新增群管功能时往这里加键即可
 MOD_PAGE_FIELDS = []
-# 侧边栏三大节（照阿福：节标题 + 节内菜单项）。不在任何节里的组保持原样渲染在最后。
+# 侧边栏四大节（照阿福/方丈：节标题 + 节内菜单项）。不在任何节里的组保持原样渲染在最后。
+# 排序逻辑：机器人日常 → 群治理(成员/群管/删除) → 增长与经济(邀请/积分/抽奖) → 娱乐游戏 → 系统管理殿后
 SIDEBAR_SECTIONS = [
-    ("🤖 机器人设置", ["dashboard", "schedule", "commands", "tpls", "general", "admin", "security"]),
-    ("👥 群组设置",   ["members", "mod", "autodel", "points", "lottery", "invite"]),
+    ("🤖 机器人设置", ["dashboard", "schedule", "commands", "tpls", "general"]),
+    ("👥 群组设置",   ["members", "mod", "autodel", "invite", "points", "lottery"]),
     ("🎲 娱乐功能",   ["texas", "blackjack", "jinhua", "race", "rake"]),
+    ("🛠 系统管理",   ["admin", "security"]),
 ]
 SUBPAGES = {
     "points": [
@@ -278,10 +294,6 @@ SETTINGS_FIELDS = [
     ("join_verify_max_wrong", "JOIN_VERIFY_MAX_WRONG", "图片算术答错N次按超时档处理(0=不限)", "int", 0, 20, "mod"),
     ("join_verify_msg",       "JOIN_VERIFY_MSG",       "验证提示({name} {seconds})", "text", 0, 0, "mod"),
     ("join_verify_ok_msg",    "JOIN_VERIFY_OK_MSG",    "验证通过提示({name})",    "text", 0, 0, "mod"),
-    ("sep_mod_gate",          None, "④ 进群硬门槛（不满足直接移出，不进验证流程）", "sep", 0, 0, "mod"),
-    ("join_gate_username",    "JOIN_GATE_USERNAME",    "须有用户名",              "bool", 0, 1, "mod"),
-    ("join_gate_premium",     "JOIN_GATE_PREMIUM",     "须 Telegram Premium",     "bool", 0, 1, "mod"),
-    ("join_gate_bio",         "JOIN_GATE_BIO",         "须有简介(需查API，失败放行)", "bool", 0, 1, "mod"),
     ("sep_mod_word",          None, "② 敏感词与域名白名单", "sep", 0, 0, "mod"),
     ("sensitive_enabled",     "SENSITIVE_ENABLED",     "敏感词过滤开关",          "bool", 0, 1, "mod"),
     ("sensitive_words",       "SENSITIVE_WORDS",       "敏感词(逗号分隔；/正则/ 形式支持正则)", "names", 0, 0, "mod"),
@@ -294,6 +306,10 @@ SETTINGS_FIELDS = [
     ("observe_check_msgs",    "OBSERVE_CHECK_MSGS",    "发言少于N条视为不活跃",   "int",  0, 1000, "mod"),
     ("observe_check_avatar",  "OBSERVE_CHECK_AVATAR",  "无头像也算不活跃(查API，仅零发言者)", "bool", 0, 1, "mod"),
     ("observe_check_action",  "OBSERVE_CHECK_ACTION",  "处理方式(0=提醒管理员 1=禁言 2=踢出)", "int", 0, 2, "mod"),
+    ("sep_mod_gate",          None, "④ 进群硬门槛（不满足直接移出，不进验证流程）", "sep", 0, 0, "mod"),
+    ("join_gate_username",    "JOIN_GATE_USERNAME",    "须有用户名",              "bool", 0, 1, "mod"),
+    ("join_gate_premium",     "JOIN_GATE_PREMIUM",     "须 Telegram Premium",     "bool", 0, 1, "mod"),
+    ("join_gate_bio",         "JOIN_GATE_BIO",         "须有简介(需查API，失败放行)", "bool", 0, 1, "mod"),
     ("sep_mod_lurker",        None, "⑤ 潜水号清理（老成员长期不冒泡）", "sep", 0, 0, "mod"),
     ("lurker_enabled",        "LURKER_ENABLED",        "潜水清理开关",            "bool", 0, 1, "mod"),
     ("lurker_days",           "LURKER_DAYS",           "入群超过N天才纳入扫描",    "int",  1, 365, "mod"),
@@ -304,6 +320,12 @@ SETTINGS_FIELDS = [
     ("raid_window",           "RAID_WINDOW",           "检测窗口(秒)",            "int",  10, 600, "mod"),
     ("raid_threshold",        "RAID_THRESHOLD",        "窗口内N人进群视为突袭",    "int",  3, 50, "mod"),
     ("raid_cooldown",         "RAID_COOLDOWN",         "人墙持续秒数(到期自动解除)", "int", 60, 86400, "mod"),
+    ("sep_mod_forcesub",      None, "⑦ 强制订阅频道（未订阅者发言即删+提示，管理员豁免）", "sep", 0, 0, "mod"),
+    ("force_sub_enabled",     "FORCE_SUB_ENABLED",     "强制订阅开关",            "bool", 0, 1, "mod"),
+    ("force_sub_channels",    "FORCE_SUB_CHANNELS",    "须订阅的频道(@用户名 或 频道id，多个逗号/回车分隔，订阅其一即可)", "names", 0, 0, "mod"),
+    ("force_sub_only_new",    "FORCE_SUB_ONLY_NEW",    "只检测新用户(入群10分钟内)", "bool", 0, 1, "mod"),
+    ("force_sub_warn_seconds","FORCE_SUB_WARN_SECONDS","提示自动删除(秒,0=不删)",  "int",  0, 3600, "mod"),
+    ("force_sub_warn_tpl",    "FORCE_SUB_WARN_TPL",    "订阅提示({name} {channels} {seconds})", "text", 0, 0, "mod"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "members/join"),
     ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "members/join"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
@@ -522,6 +544,12 @@ RAID_THRESHOLD = 5          # 窗口内 N 人进群视为突袭
 RAID_COOLDOWN = 600         # 人墙持续秒数，到期自动解除
 raid_joins = {}             # cid -> [进群时间戳,...]（滑动窗口，重启清零即可）
 raid_until = {}             # cid -> 人墙解除时间戳
+FORCE_SUB_ENABLED = 0       # 强制订阅频道：未订阅者发言即删+提示（默认关，网页手动开启）
+FORCE_SUB_CHANNELS = []     # 须订阅的频道（@用户名 或 -100 开头频道 id；订阅其一即可）
+FORCE_SUB_ONLY_NEW = 0      # 只检测新用户（入群 10 分钟内），关=所有人
+FORCE_SUB_WARN_SECONDS = 60 # 订阅提示自动删除秒数，0=不删
+_fsub_ok_cache = defaultdict(dict)  # _fsub_ok_cache[cid][uid] = (判定时间, 是否已订阅)
+_fsub_invite_cache = {}     # 频道id -> 邀请链接（私有频道 get_chat 结果缓存，避免每条消息打 API）
 ANNOUNCE_ENABLED = 0        # 定时群公告：每天到点向全部授权群推一条
 ANNOUNCE_TIME = "09:00"     # 推送时间（时:分，北京时间）
 ANNOUNCE_TEXT = ""          # 公告内容（支持 {date}=当天日期）
@@ -642,6 +670,7 @@ MSG_TPL_DEFAULTS = {
     "invite_rank_line_fmt": "{i}. {name}｜邀请 {count} 人",
     "invite_invalid_msg": "⚠️ {name} 的邀请链接无效，请让邀请人重新生成",
     "invite_self_msg": "😅 不能邀请自己哦",
+    "force_sub_warn_tpl": "📢 {name}，请先订阅我们的频道再发言～\n订阅后重新发一次消息即可正常聊天。\n（本提示 {seconds} 秒后自动消失）",
 }
 INVITE_OK_GROUP = MSG_TPL_DEFAULTS["invite_ok_group"]
 INVITE_RANK_TODAY_MSG = MSG_TPL_DEFAULTS["invite_rank_today_msg"]
@@ -667,6 +696,7 @@ INHERIT_MSG_OK = MSG_TPL_DEFAULTS["inherit_msg_ok"]
 REDEEM_MSG_LIST = MSG_TPL_DEFAULTS["redeem_msg_list"]
 REDEEM_MSG_OK_GROUP = MSG_TPL_DEFAULTS["redeem_msg_ok_group"]
 REDEEM_MSG_OK_DM = MSG_TPL_DEFAULTS["redeem_msg_ok_dm"]
+FORCE_SUB_WARN_TPL = MSG_TPL_DEFAULTS["force_sub_warn_tpl"]
 
 def _fmt_tpl(key, **kw):
     """按网页模板渲染消息；模板非法/为空时回退默认，绝不因占位符写错而崩。"""
@@ -1009,6 +1039,21 @@ def apply_settings(cfg: dict):
                 continue
             globals()[gname] = vals
             applied[key] = vals
+        elif ftype == "emoji":
+            # 表情列表（如赛马表情）：每条 ≤4 字符；条数联动校验走下方赛马三件套
+            if parts and all(0 < len(p) <= 4 and not any(ch in p for ch in "<>&") for p in parts):
+                globals()[gname] = parts
+                applied[key] = parts
+        else:
+            # 通用词表（敏感词/域名白名单等）：每条 ≤64 字符；删光提交空=清空词表。
+            # 此前缺失本分支，导致保存被静默丢弃且页面永远提示「已跳过」——敏感词形同虚设的真 bug。
+            if parts:
+                if all(0 < len(p) <= 64 and not any(ch in p for ch in "<>&") for p in parts):
+                    globals()[gname] = parts
+                    applied[key] = parts
+            else:
+                globals()[gname] = []
+                applied[key] = []
     return applied
 
 def _load_settings_payload():
@@ -1731,6 +1776,30 @@ async def _warm_group_names(app):
                 chat_name_cache[cid] = ch.title
         except Exception:
             logger.warning("群名预热失败 cid=%s（bot 可能已不在该群）", cid)
+
+
+def _group_admins_get(cid, max_age=300):
+    """群主/管理员缓存（5 分钟）：返回 {uid: "owner"|"admin"}。
+
+    供「群组成员列表」显示身份徽章；bot 不在群/接口失败返回上次缓存或空 dict，绝不炸页面。
+    """
+    rec = _group_admins_cache.get(cid)
+    now = time.time()
+    if rec and now - float(rec[0]) < max_age:
+        return rec[1]
+    if _bot_app and _bot_loop:
+        try:
+            async def _fetch():
+                out = {}
+                for a in await _bot_app.bot.get_chat_administrators(cid):
+                    out[a.user.id] = "owner" if getattr(a, "status", "") == "creator" else "admin"
+                return out
+            out = asyncio.run_coroutine_threadsafe(_fetch(), _bot_loop).result(8)
+            _group_admins_cache[cid] = (now, out)
+            return out
+        except Exception:
+            logger.warning("拉取群管理员失败 cid=%s（按无徽章展示）", cid)
+    return rec[1] if rec else {}
 
 
 async def get_name(app, uid, with_title=True, cid=None):
@@ -6072,6 +6141,102 @@ async def _mod_punish(context, cid, uid, action, mute_seconds, name, reason):
     except Exception:
         logger.exception("群管处罚失败 cid=%s uid=%s action=%s（已吞并）", cid, uid, action)
 
+
+async def _fsub_links(context):
+    """把 FORCE_SUB_CHANNELS 转成 [(显示名, 链接)]：@用户名→公开 t.me 链接；数字 id→get_chat 邀请链接（缓存）。"""
+    out = []
+    for ch in FORCE_SUB_CHANNELS:
+        ch = str(ch).strip()
+        if not ch:
+            continue
+        if ch.startswith("@"):
+            out.append((ch, f"https://t.me/{ch.lstrip('@')}"))
+        elif "t.me/" in ch:
+            out.append((f"@{ch.split('t.me/')[-1].strip('/')}", f"https://t.me/{ch.split('t.me/')[-1].strip('/')}"))
+        else:
+            try:
+                if ch in _fsub_invite_cache:
+                    out.append((f"频道 {ch}", _fsub_invite_cache[ch]))
+                    continue
+                chat = await context.bot.get_chat(int(ch))
+                url = getattr(chat, "invite_link", None) or (f"https://t.me/{chat.username}" if getattr(chat, "username", "") else "")
+                if url:
+                    _fsub_invite_cache[ch] = url
+                    out.append((getattr(chat, "title", None) or f"频道 {ch}", url))
+            except Exception:
+                continue
+    return out
+
+
+async def _forcesub_enforce(update, context):
+    """强制订阅频道：未订阅任一频道的成员发言即删+提示（带订阅按钮）。
+
+    返回 True=已拦截（消息已处理，调用方直接 return）。管理员/群管/Bot 管理员豁免；
+    已订阅判定缓存 30 分钟、未订阅缓存 60 秒（订阅后一分钟内自动放行），避免每条消息打 API。
+    """
+    if not FORCE_SUB_ENABLED or not FORCE_SUB_CHANNELS:
+        return False
+    message, user = update.effective_message, update.effective_user
+    if not message or not user or user.is_bot or not is_group_chat(update) or is_bot_admin(user.id):
+        return False
+    cid = update.effective_chat.id
+    try:
+        if _group_admins_get(cid).get(user.id):
+            return False
+    except Exception:
+        pass
+    if FORCE_SUB_ONLY_NEW:
+        _jt = member_joined_at.get(cid, {}).get(user.id, 0)
+        if not _jt or time.time() - _jt > 600:
+            return False
+    now = time.time()
+    _hit = _fsub_ok_cache.get(cid, {}).get(user.id)
+    if _hit and (_hit[1] and now - _hit[0] < 1800):
+        return False          # 已订阅，缓存期内直接放行
+    ok = False
+    for ch in FORCE_SUB_CHANNELS:
+        ch = str(ch).strip()
+        if not ch:
+            continue
+        try:
+            _m = await context.bot.get_chat_member(ch if ch.startswith("@") else int(ch), user.id)
+            if getattr(_m, "status", "left") in ("member", "administrator", "creator"):
+                ok = True
+                break
+        except Exception:
+            continue
+    _fsub_ok_cache[cid][user.id] = (now, ok)
+    if ok:
+        return False
+    # 未订阅：删消息 + 发提示（订阅其一即可；提示可自动删除）
+    try:
+        await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
+    except Exception:
+        pass
+    _prev = _fsub_ok_cache[cid].get(f"warned:{user.id}")
+    if not (_prev and now - _prev < 60):   # 60 秒内只发一次提示，不刷屏
+        try:
+            links = await _fsub_links(context)
+            txt = _fmt_tpl("force_sub_warn_tpl",
+                           name=user_names.get(user.id) or user.first_name or f"用户{user.id}",
+                           channels="、".join(l for l, _u in links) or "、".join(str(c) for c in FORCE_SUB_CHANNELS),
+                           seconds=FORCE_SUB_WARN_SECONDS)
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"📢 订阅 {l}", url=u)] for l, u in links]) or None
+            sent = await context.bot.send_message(cid, txt, reply_markup=kb)
+            _fsub_ok_cache[cid][f"warned:{user.id}"] = now
+            if FORCE_SUB_WARN_SECONDS > 0:
+                async def _del_warn():
+                    await asyncio.sleep(FORCE_SUB_WARN_SECONDS)
+                    try:
+                        await context.bot.delete_message(chat_id=cid, message_id=sent.message_id)
+                    except Exception:
+                        pass
+                asyncio.create_task(_del_warn())
+        except Exception:
+            logger.exception("强制订阅提示发送失败 cid=%s（已吞并）", cid)
+    return True
+
+
 def _captcha_render(a, b):
     """画一张 a+b 算术验证码 PNG（带噪点/干扰线）；未装 Pillow 返回 None（调用方降级为文本算式）。"""
     try:
@@ -6471,6 +6636,10 @@ async def on_text(update, context):
         # 拉黑拦截：被封禁用户（非管理员）禁止使用全部功能，连帮助都看不到
         if update.effective_user.id in BLACKLISTED_USERS and not is_bot_admin(update.effective_user.id):
             await send_reply(update, context, "🚫 你已被禁止使用本机器人，如有疑问请联系管理员。"); return
+
+        # 强制订阅频道（默认关；管理员豁免）：未订阅者发言即删+提示，订阅后一分钟内自动放行
+        if await _forcesub_enforce(update, context):
+            return
 
         # 新成员观察期：入群未满观察时长的成员发言即删，并禁言至观察期结束（管理员豁免）
         if OBSERVE_ENABLED and OBSERVE_SECONDS > 0 and is_group_chat(update) and not is_bot_admin(user.id):
@@ -9752,6 +9921,9 @@ def start_health_server():
         def _page(title, sidebar_active, body):
             """阿福风格布局：左侧深色菜单栏（分组可折叠子页面）+ 右侧内容区，窄屏折叠为顶部横排。"""
             sidebar_active = sidebar_active or ""
+            _thm_key = SETTINGS_SNAPSHOT.get("ui_theme") if SETTINGS_SNAPSHOT.get("ui_theme") in _UI_THEMES else "purple"
+            _ac, _ac2, _actx = _UI_THEMES[_thm_key]
+            _acr = ",".join(str(int(_ac[i:i + 2], 16)) for i in (1, 3, 5))   # 主色的 R,G,B（供 rgba(var(--acr),x)）
             items = []
             child_of = {ck: pk for pk, cks in SIDEBAR_CHILDREN.items() for ck in cks}
             meta = {g[0]: (g[1], g[2]) for g in SETTINGS_GROUPS}
@@ -9803,6 +9975,7 @@ def start_health_server():
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     f"<title>{title} - 机器人后台</title><style>"
+                    f":root{{--ac:{_ac};--ac2:{_ac2};--acr:{_acr};--ac-tx:{_actx}}}"
                     "*{box-sizing:border-box}"
                     "html,body{height:100%}"
                     "body{background:radial-gradient(1100px 520px at 85% -8%,rgba(139,92,246,.10),transparent 60%),"
@@ -9832,9 +10005,9 @@ def start_health_server():
                     ".side a{display:flex;align-items:center;gap:10px;color:#a9a8bd;font-size:15px;"
                     "padding:9px 12px;border-radius:8px;margin-bottom:1px;transition:background .12s,color .12s}"
                     ".side a:hover{background:#262038;color:#fff}"
-                    ".side a.active{background:linear-gradient(135deg,#8b5cf6 0%,#6d3fd4 100%);color:#fff;"
-                    "box-shadow:0 4px 14px rgba(139,92,246,.30)}"
-                    ".side a.active .badge{background:rgba(255,255,255,.18);color:#fff}"
+                    ".side a.active{background:linear-gradient(135deg,var(--ac) 0%,var(--ac2) 100%);color:var(--ac-tx);"
+                    "box-shadow:0 4px 14px rgba(var(--acr),.30)}"
+                    ".side a.active .badge{background:rgba(127,127,140,.25);color:var(--ac-tx)}"
                     ".side details{margin-bottom:1px}"
                     ".side summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;"
                     "font-size:15px;color:#a9a8bd;padding:10px 12px;border-radius:8px;user-select:none;"
@@ -9862,15 +10035,15 @@ def start_health_server():
                     "label{display:block;font-size:14px;color:#a9a8bd;margin:14px 0 6px}"
                     "input,select,textarea{width:100%;background:#191527;border:1px solid #352e4d;color:#e8e6f2;"
                     "border-radius:9px;padding:10px 13px;font-size:15px;font-family:inherit;transition:border-color .12s}"
-                    "input:focus,select:focus,textarea:focus{outline:none;border-color:#8b5cf6;"
-                    "box-shadow:0 0 0 3px rgba(139,92,246,.15)}"
+                    "input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ac);"
+                    "box-shadow:0 0 0 3px rgba(var(--acr),.15)}"
                     "textarea{font-family:ui-monospace,Consolas,monospace;line-height:1.5}"
-                    "button{background:linear-gradient(135deg,#8b5cf6 0%,#6d3fd4 100%);color:#fff;border:none;"
+                    "button{background:linear-gradient(135deg,var(--ac) 0%,var(--ac2) 100%);color:var(--ac-tx);border:none;"
                     "border-radius:9px;padding:10px 24px;font-size:15px;cursor:pointer;font-weight:500;"
-                    "transition:transform .1s,box-shadow .12s;box-shadow:0 2px 10px rgba(139,92,246,.25)}"
-                    "button:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(139,92,246,.4)}"
+                    "transition:transform .1s,box-shadow .12s;box-shadow:0 2px 10px rgba(var(--acr),.25)}"
+                    "button:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(var(--acr),.4)}"
                     "button:active{transform:translateY(0)}"
-                    "button.danger{background:linear-gradient(135deg,#e06666 0%,#b94545 100%);"
+                    "button.danger{background:linear-gradient(135deg,#e06666 0%,#b94545 100%);color:#fff;"
                     "box-shadow:0 2px 8px rgba(224,102,102,.2)}"
                     # 提示
                     ".ok{color:#6fd08c;font-size:14px;padding:10px 14px;background:rgba(111,208,140,.08);"
@@ -9882,14 +10055,14 @@ def start_health_server():
                     ".stat{background:linear-gradient(135deg,#241f38 0%,#2b2444 100%);border:1px solid #3a3358;"
                     "border-radius:14px;padding:18px 20px;transition:transform .15s,border-color .15s,"
                     "box-shadow .15s;box-shadow:0 6px 18px rgba(0,0,0,.18)}"
-                    ".stat:hover{transform:translateY(-2px);border-color:#5a4a8e;box-shadow:0 10px 26px rgba(139,92,246,.18)}"
+                    ".stat:hover{transform:translateY(-2px);border-color:var(--ac2);box-shadow:0 10px 26px rgba(var(--acr),.18)}"
                     ".stat .v{font-size:24px;font-weight:500;margin-top:6px;color:#fff}"
                     ".stat .t{font-size:13px;color:#8a89a0;display:flex;align-items:center;gap:6px}"
                     # 快捷入口
                     ".q{display:inline-flex;align-items:center;gap:5px;margin:5px 6px 0 0;"
-                    "background:rgba(139,92,246,.14);border:1px solid rgba(139,92,246,.22);color:#d6d2f5;"
+                    "background:rgba(var(--acr),.14);border:1px solid rgba(var(--acr),.22);color:#d6d2f5;"
                     "font-size:14px;padding:9px 15px;border-radius:9px;transition:background .12s,color .12s,border-color .12s}"
-                    ".q:hover{background:#8b5cf6;border-color:#8b5cf6;color:#fff}"
+                    ".q:hover{background:var(--ac);border-color:var(--ac);color:var(--ac-tx)}"
                     # 行
                     ".row{display:flex;align-items:center;justify-content:space-between;gap:16px;"
                     "padding:12px 0;border-bottom:1px solid #2d2740}"
@@ -9898,26 +10071,53 @@ def start_health_server():
                     ".row .lbl small{display:block;color:#8a89a0;font-size:13px;margin-top:3px;font-weight:400;line-height:1.5}"
                     ".row input[type=number],.row input[type=text],.row select{width:240px;flex-shrink:0}"
                     ".row textarea{width:100%;margin-top:8px}"
+                    # 简单输入双列紧凑（照阿福：数字/短文本参数两列排布）
+                    ".grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));"
+                    "column-gap:30px;row-gap:2px}"
+                    ".grid2 .row{border-bottom:none;padding:9px 0}"
+                    ".grid2 .row .lbl{font-size:14px}"
+                    ".grid2 .row .lbl small{font-size:12px}"
+                    ".grid2 .row input[type=number],.grid2 .row input[type=text],.grid2 .row select{width:100%}"
+                    # 吸底保存条：滚到哪都能看到保存按钮（照阿福的受控保存区）
+                    ".savebar{position:sticky;bottom:0;z-index:20;display:flex;align-items:center;gap:14px;"
+                    "margin:18px -24px -22px;padding:12px 24px;background:rgba(26,22,40,.92);"
+                    "backdrop-filter:blur(10px);border-top:1px solid #352e4d;border-radius:0 0 14px 14px}"
+                    ".savebar button{min-width:150px}"
+                    ".savebar .hint{font-size:13px;color:#8a89a0;margin-left:auto}"
+                    # 词表标签输入（照方丈：回车即添加下一个，✕ 删除，退格删末尾）
+                    ".tagbox{display:flex;flex-wrap:wrap;gap:6px;align-items:center;width:240px;flex-shrink:0;"
+                    "background:#191527;border:1px solid #352e4d;border-radius:9px;padding:6px 8px;"
+                    "min-height:42px;cursor:text;transition:border-color .12s}"
+                    ".tagbox:focus-within{border-color:var(--ac);box-shadow:0 0 0 3px rgba(var(--acr),.15)}"
+                    ".tagbox .chip{display:inline-flex;align-items:center;background:rgba(var(--acr),.16);"
+                    "border:1px solid rgba(var(--acr),.35);border-radius:6px;padding:3px 4px 3px 9px;"
+                    "font-size:13px;color:#d6d2f5}"
+                    ".tagbox .chip b{font-weight:400}"
+                    ".tagbox .chip i{font-style:normal;cursor:pointer;color:#8a89a0;padding:0 5px;font-size:12px}"
+                    ".tagbox .chip i:hover{color:#f09595}"
+                    ".tagbox input[type=text]{flex:1;min-width:80px;background:transparent;border:none;"
+                    "padding:4px 2px;color:#e8e6f2;font-size:14px;box-shadow:none!important}"
+                    ".grid2 .tagbox{width:100%}"
                     # 开关
                     ".tg{position:relative;width:44px;height:24px;flex-shrink:0}"
                     ".tg input{opacity:0;width:0;height:0;position:absolute}"
                     ".tg .sl{position:absolute;inset:0;background:#34354a;border-radius:24px;transition:.2s;cursor:pointer}"
                     ".tg .sl:before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;"
                     "background:#fff;border-radius:50%;transition:.2s}"
-                    ".tg input:checked+.sl{background:#8b5cf6}"
+                    ".tg input:checked+.sl{background:var(--ac)}"
                     ".tg input:checked+.sl:before{transform:translateX(20px)}"
 # 分组标题行（sep 字段）
                     ".sec{margin:20px 0 6px;padding:10px 14px;font-size:14px;font-weight:500;color:#d9d3f0;"
-                    "background:#28223d;border-left:3px solid #8b5cf6;border-radius:0 8px 8px 0;letter-spacing:.3px}"
+                    "background:#28223d;border-left:3px solid var(--ac);border-radius:0 8px 8px 0;letter-spacing:.3px}"
                     ".sec:first-child{margin-top:2px}"
                     # 多选勾选组（multi 字段）
                     ".cbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:10px}"
                     ".cb{display:flex;align-items:center;gap:9px;margin:0;padding:9px 11px;background:#191527;"
                     "border:1px solid #352e4d;border-radius:9px;cursor:pointer;transition:border-color .12s,background .12s}"
                     ".cb:hover{border-color:#5a4a8e;background:#221d33}"
-                    ".cb input{width:16px;height:16px;flex-shrink:0;accent-color:#8b5cf6;cursor:pointer}"
+                    ".cb input{width:16px;height:16px;flex-shrink:0;accent-color:var(--ac);cursor:pointer}"
                     ".cb span{font-size:14px;color:#d6d2f5;line-height:1.3}"
-                    ".cb:has(input:checked){border-color:#8b5cf6;background:rgba(139,92,246,.12)}"
+                    ".cb:has(input:checked){border-color:var(--ac);background:rgba(var(--acr),.12)}"
                     # 表格
                     ".tbl{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}"
                     ".tbl td,.tbl th{padding:12px 10px;border-bottom:1px solid #2d2740;text-align:left}"
@@ -9928,12 +10128,12 @@ def start_health_server():
                     ".tbl td{color:#d9d6ea}"
                     ".tbl tr:nth-child(even) td{background:rgba(255,255,255,.015)}"
                     ".tbl tr:last-child td{border-bottom:none}"
-                    ".tbl tr:hover td{background:rgba(139,92,246,.07)}"
+                    ".tbl tr:hover td{background:rgba(var(--acr),.07)}"
                     # 内部表单行（季节/授权等用 div 套 input 而不是 .row）
                     "[style*='padding:13px 2px']{padding:12px 0 !important;border-bottom:1px solid #26273a !important}"
                     # footer
                     ".ft{padding:18px 28px;text-align:center;color:#6f6a8a;font-size:13px;border-top:1px solid #2d2740}"
-                    ".ft a{color:#8b5cf6}"
+                    ".ft a{color:var(--ac)}"
                     # 移动端
                     "@media(max-width:768px){"
                     ".hd{padding:0 12px}"
@@ -9957,7 +10157,26 @@ def start_health_server():
                     "::-webkit-scrollbar{width:8px;height:8px}"
                     "::-webkit-scrollbar-track{background:transparent}"
                     "::-webkit-scrollbar-thumb{background:#352e4d;border-radius:4px}"
-                    "::-webkit-scrollbar-thumb:hover{background:#5a4a8e}"
+                    "::-webkit-scrollbar-thumb:hover{background:var(--ac2)}"
+                    # 主题色切换点（顶栏）
+                    ".dot{width:15px;height:15px;border-radius:50%;display:inline-block;margin-left:7px;"
+                    "border:2px solid transparent;cursor:pointer;vertical-align:middle;opacity:.7;transition:.12s}"
+                    ".dot:hover{opacity:1;transform:scale(1.18)}"
+                    ".dot.cur{border-color:#fff;opacity:1}"
+                    # 成员列表增强：首字母头像 / 身份徽章 / 更多折叠 / 紧凑行距
+                    ".av{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;"
+                    "justify-content:center;color:#fff;font-size:13px;font-weight:600;flex-shrink:0}"
+                    ".role{font-size:11px;padding:1px 7px;border-radius:7px;margin-left:7px;font-weight:500;"
+                    "display:inline-block;vertical-align:middle;white-space:nowrap}"
+                    ".role.owner{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.35)}"
+                    ".role.admin{background:rgba(var(--acr),.16);color:#c4b5fd;border:1px solid rgba(var(--acr),.32)}"
+                    ".tbl.cp td,.tbl.cp th{padding:8px 8px}"
+                    ".more{position:relative;display:inline-block}"
+                    ".more .menu{display:none;position:absolute;right:0;top:100%;margin-top:3px;background:#211c30;"
+                    "border:1px solid #352e4d;border-radius:10px;padding:6px;z-index:30;min-width:130px;"
+                    "box-shadow:0 10px 26px rgba(0,0,0,.45)}"
+                    ".more:hover .menu{display:block}"
+                    ".pbtn{padding:3px 10px;font-size:12px;border-radius:7px;border:none;color:#fff;cursor:pointer;margin:1px}"
                     "</style></head><body>"
                     # 顶部 header
                     "<header class='hd'>"
@@ -9965,15 +10184,39 @@ def start_health_server():
                     "document.querySelector('.backdrop').classList.toggle('show')\" aria-label='菜单'>☰</button>"
                     f"<div class='logo'>🤖 机器人后台</div>"
                     f"<div class='crumb'>· {html.escape(title)}</div>"
-                    "<div class='right'>机器人后台</div>"
+                    "<div class='right'>机器人后台"
+                    + "".join(f"<a class='dot{' cur' if k == _thm_key else ''}' title='主题：{k}' "
+                              f"href='/theme/{k}?back={quote('/page/' + sidebar_active if sidebar_active else '/')}' "
+                              f"style='background:{v[0]}'></a>" for k, v in _UI_THEMES.items())
+                    + "</div>"
                     "</header>"
                     "<div class='backdrop' onclick=\"document.querySelector('.side').classList.remove('open');"
                     "this.classList.remove('show')\"></div>"
                     "<div class='wrap'>"
                     f"<nav class='side'>{''.join(items)}</nav>"
-                    f"<main class='main'>{body}</main>{_id_picker_js()}</div>"
+                    f"<main class='main'>{body}</main>{_id_picker_js()}{_sort_js()}</div>"
                     "<footer class='ft'>© 机器人后台</footer>"
                     "</body></html>").encode("utf-8")
+
+        def _sort_js():
+            """表格列头点击排序（通用）：带 data-s 的 th 可点，数字列按数值、其余按中文排序。"""
+            return ("<script>document.addEventListener('click',function(e){"
+                    "var th=e.target.closest('th[data-s]');if(!th)return;"
+                    "var tb=th.closest('table');if(!tb)return;"
+                    "var idx=Array.prototype.indexOf.call(th.parentNode.children,th);"
+                    "var asc=th.dataset.asc!=='1';"
+                    "tb.querySelectorAll('th[data-s]').forEach(function(o){"
+                    "o.textContent=o.textContent.replace(/[▲▼]\\s*$/,'');delete o.dataset.asc;});"
+                    "th.textContent=th.textContent.replace(/[▲▼]\\s*$/,'')+(asc?' ▲':' ▼');"
+                    "th.dataset.asc=asc?'1':'0';"
+                    "var rows=[].slice.call(tb.rows).filter(function(r){"
+                    "return r.cells.length&&r.cells[0].tagName==='TD';});"
+                    "rows.sort(function(a,b){"
+                    "var x=a.cells[idx].innerText.trim(),y=b.cells[idx].innerText.trim();"
+                    "var nx=parseFloat(x.replace(/,/g,'')),ny=parseFloat(y.replace(/,/g,''));"
+                    "if(!isNaN(nx)&&!isNaN(ny))return asc?nx-ny:ny-nx;"
+                    "return asc?x.localeCompare(y,'zh'):y.localeCompare(x,'zh');});"
+                    "rows.forEach(function(r){tb.appendChild(r);});});</script>")
 
         def _group_options(selected=0):
             """已知群下拉选项（授权群 ∪ 有积分数据的群）；selected=回显选中。"""
@@ -10134,6 +10377,11 @@ def start_health_server():
                     "<div class='ft'>💡 推荐：Telegram 发 <b>/后台</b>，点链接免密登录（密码为备用通道）<br>© 机器人后台 · v" + BOT_VERSION + "</div>"
                     "</div></body></html>").encode("utf-8")
 
+        def _savebar(label="保存设置", hint="保存立即生效，无需重启"):
+            # 吸底保存条：贴在卡片底部、滚动时始终可见（照阿福的受控保存区）
+            return (f"<div class='savebar'><button type='submit'>💾 {label}</button>"
+                    f"<span class='hint'>{hint}</span></div>")
+
         def _field_rows(gkey):
             rows = []
             if gkey == "tpls":
@@ -10152,13 +10400,10 @@ def start_health_server():
                                 f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
                                 f"<textarea name='{key}' rows='4' style='margin-top:8px'>{html.escape(cur or '')}</textarea></div>")
                 return "".join(rows)
-            for key, _g, label, ftype, lo, hi, grp in SETTINGS_FIELDS:
-                if grp != gkey:
-                    continue
+
+            def _one(key, _g, label, ftype, lo, hi):
                 cur = globals().get(_g)
-                if ftype == "sep":
-                    rows.append(f"<div class='sec'>{html.escape(label)}</div>")
-                elif ftype == "multi":
+                if ftype == "multi":
                     picked = {p.strip() for p in str(cur or "").split(",") if p.strip()}
                     boxes = []
                     for val, vlabel in MULTI_OPTIONS.get(key, []):
@@ -10166,45 +10411,95 @@ def start_health_server():
                         boxes.append(f"<label class='cb'><input type='checkbox' name='{key}' "
                                      f"value='{html.escape(val, quote=True)}'{ck}>"
                                      f"<span>{html.escape(vlabel)}</span></label>")
-                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
-                                f"<div class='lbl'>{html.escape(label)}"
-                                f"<small>勾选即生效；未勾选的类型一律放行</small></div>"
-                                f"<div class='cbs'>{''.join(boxes)}</div></div>")
-                elif ftype == "bool":
+                    return (f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                            f"<div class='lbl'>{html.escape(label)}"
+                            f"<small>勾选即生效；未勾选的类型一律放行</small></div>"
+                            f"<div class='cbs'>{''.join(boxes)}</div></div>")
+                if ftype == "bool":
                     checked = " checked" if cur else ""
-                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
-                                f"<label class='tg'><input type='checkbox' name='{key}'{checked}>"
-                                f"<span class='sl'></span></label></div>")
-                elif ftype in ("levels", "items"):
+                    return (f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
+                            f"<label class='tg'><input type='checkbox' name='{key}'{checked}>"
+                            f"<span class='sl'></span></label></div>")
+                if ftype in ("levels", "items"):
                     if isinstance(cur, (list, tuple)) and cur and isinstance(cur[0], dict):
                         val = "\n".join(f"{x['name']}:{x['value']}" for x in cur)
                     else:
                         val = str(cur or "")
-                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
-                                f"<div class='lbl'>{html.escape(label)}<small>每行一条：名称:数值</small></div>"
-                                f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(val)}</textarea></div>")
-                elif ftype == "text":
-                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
-                                f"<div class='lbl' style='display:flex;align-items:center;justify-content:space-between'>"
-                                f"<span>{html.escape(label)}<small>可用占位符见默认值；支持换行</small></span>"
-                                f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
-                                f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(cur or '')}</textarea></div>")
-                elif ftype == "short":
-                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
-                                f"<input type='text' name='{key}' value='{html.escape(cur, quote=True)}' maxlength='8'></div>")
-                elif ftype == "cmd":
-                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}"
-                                f"<small>改完立即生效，无需重启；旧指令同时失效</small></div>"
-                                f"<input type='text' name='{key}' value='{html.escape(cur, quote=True)}' maxlength='16'></div>")
-                elif ftype in ("names", "emoji", "bets"):
-                    val = ",".join(str(x) for x in cur) if isinstance(cur, (list, tuple)) else str(cur)
-                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
-                                f"<input type='text' name='{key}' value='{html.escape(val, quote=True)}'></div>")
-                else:
-                    rows.append(f"<div class='row'><div class='lbl'>{html.escape(label)}"
-                                f"<small>范围 {lo} ~ {hi}</small></div>"
-                                f"<input type='number' name='{key}' value='{cur}' step='{'0.1' if ftype == 'float' else '1'}'></div>")
-            return "".join(rows)
+                    return (f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                            f"<div class='lbl'>{html.escape(label)}<small>每行一条：名称:数值</small></div>"
+                            f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(val)}</textarea></div>")
+                if ftype == "text":
+                    return (f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                            f"<div class='lbl' style='display:flex;align-items:center;justify-content:space-between'>"
+                            f"<span>{html.escape(label)}<small>可用占位符见默认值；支持换行</small></span>"
+                            f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
+                            f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(cur or '')}</textarea></div>")
+                if ftype == "short":
+                    return (f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
+                            f"<input type='text' name='{key}' value='{html.escape(cur, quote=True)}' maxlength='8'></div>")
+                if ftype == "cmd":
+                    return (f"<div class='row'><div class='lbl'>{html.escape(label)}"
+                            f"<small>改完立即生效，无需重启；旧指令同时失效</small></div>"
+                            f"<input type='text' name='{key}' value='{html.escape(cur, quote=True)}' maxlength='16'></div>")
+                if ftype in ("names", "emoji", "bets"):
+                    # 词表标签输入（照方丈）：回车/逗号即添加，✕ 删除，退格删末尾；
+                    # 底层仍是逗号分隔的 hidden input，提交格式不变，保存逻辑零改动
+                    items = ([str(x).strip() for x in cur if str(x).strip()] if isinstance(cur, (list, tuple))
+                             else [p.strip() for p in re.split(r"[,，]", str(cur or "")) if p.strip()])
+                    chips = "".join(f"<span class='chip'><b>{html.escape(s)}</b><i title='删除'>✕</i></span>" for s in items)
+                    ph = "数字 1~100000，回车添加" if ftype == "bets" else "输入后按回车添加"
+                    return (f"<div class='row'><div class='lbl'>{html.escape(label)}</div>"
+                            f"<div class='tagbox'>{chips}"
+                            f"<input type='hidden' name='{key}' value='{html.escape(','.join(items), quote=True)}'>"
+                            f"<input type='text' placeholder='{ph}' autocomplete='off'>"
+                            "</div>"
+                            "<script>if(!window._tbInit){window._tbInit=1;"
+                            "function _tbSync(tb){var h=tb.querySelector('input[type=hidden]');if(!h)return;"
+                            "h.value=[].map.call(tb.querySelectorAll('.chip b'),function(x){return x.textContent}).join(',')}"
+                            "document.addEventListener('click',function(e){"
+                            "var i=e.target.closest('.tagbox .chip i');"
+                            "if(i){var tb=i.closest('.tagbox');i.parentElement.remove();_tbSync(tb);return}"
+                            "var tb=e.target.closest('.tagbox');if(tb){var f=tb.querySelector('input[type=text]');if(f)f.focus()}});"
+                            "document.addEventListener('keydown',function(e){"
+                            "var inp=e.target.closest('.tagbox input[type=text]');if(!inp)return;"
+                            "var tb=inp.closest('.tagbox');"
+                            "if(e.key==='Enter'||e.key===','||e.key==='，'){e.preventDefault();"
+                            "var v=inp.value.replace(/[,，]/g,'').trim();"
+                            "if(v){var c=document.createElement('span');c.className='chip';"
+                            "var b=document.createElement('b');b.textContent=v;c.appendChild(b);"
+                            "var x=document.createElement('i');x.textContent='✕';x.title='删除';c.appendChild(x);"
+                            "tb.insertBefore(c,inp);inp.value='';_tbSync(tb)}}"
+                            "else if(e.key==='Backspace'&&!inp.value){"
+                            "var cs=tb.querySelectorAll('.chip');if(cs.length){cs[cs.length-1].remove();_tbSync(tb)}}});}"
+                            "</script></div>")
+                return (f"<div class='row'><div class='lbl'>{html.escape(label)}"
+                        f"<small>范围 {lo} ~ {hi}</small></div>"
+                        f"<input type='number' name='{key}' value='{cur}' step='{'0.1' if ftype == 'float' else '1'}'></div>")
+
+            grp_fields = [f for f in SETTINGS_FIELDS if f[6] == gkey]
+            if not grp_fields:
+                return ""
+            if any(f[3] == "sep" for f in grp_fields):
+                # ①②③ 结构化页（mod/autodel/schedule）：分节标题就是布局，保持定义顺序原样渲染
+                return "".join(f"<div class='sec'>{html.escape(f[2])}</div>" if f[3] == "sep" else _one(*f[:6])
+                               for f in grp_fields)
+            # 普通页（照阿福）：开关置顶 → 数字/短文本参数双列 → 宽内容（模板/多选）殿后
+            bools = [f for f in grp_fields if f[3] == "bool"]
+            simple = [f for f in grp_fields if f[3] in ("int", "float", "short", "cmd", "names", "emoji", "bets")]
+            wide = [f for f in grp_fields if f[3] in ("text", "multi", "levels", "items")]
+            parts = []
+            if bools and (simple or wide):
+                parts.append("<div class='sec'>🎛 开关</div>")
+            parts += [_one(*f[:6]) for f in bools]
+            if simple:
+                if bools:
+                    parts.append("<div class='sec'>⚙️ 参数</div>")
+                parts.append("<div class='grid2'>" + "".join(_one(*f[:6]) for f in simple) + "</div>")
+            if wide:
+                if bools or simple:
+                    parts.append("<div class='sec'>📝 内容与模板</div>")
+                parts += [_one(*f[:6]) for f in wide]
+            return "".join(parts)
 
         def _home_page():
             all_players = {u for users in game_chips.values() for u in users}
@@ -10398,22 +10693,37 @@ def start_health_server():
                             f"<input type='hidden' name='op' value='{op}'>"
                             f"<input type='hidden' name='cid' value='{sel_cid}'>"
                             f"<input type='hidden' name='uid' value='{uid}'>"
-                            f"<button type='submit' style='padding:2px 10px;cursor:pointer;background:{color};color:#fff;border:none;border-radius:6px'>{label}</button></form>")
+                            f"<button type='submit' class='pbtn' style='background:{color}'>{label}</button></form>")
+                admins_map = _group_admins_get(sel_cid) if sel_cid else {}   # 群主/管理员徽章（5 分钟缓存）
                 rows_html = ""
                 for x in members[(page - 1) * per: page * per]:
                     in_wl = x["uid"] in whitelist.get(sel_cid, set())
-                    rows_html += ("<tr><td>" + html.escape(x["name"]) + "</td>"
+                    nm = html.escape(x["name"])
+                    av_ch = html.escape((x["name"] or "?")[0].upper())
+                    av_bg = _AV_COLORS[x["uid"] % len(_AV_COLORS)]
+                    role = admins_map.get(x["uid"])
+                    role_html = ("<span class='role owner'>👑 群主</span>" if role == "owner"
+                                 else "<span class='role admin'>🛡 管理员</span>" if role == "admin" else "")
+                    ops = (_mb("wl_del", x["uid"], "删白", "#8a6d3b") if in_wl
+                           else _mb("wl_add", x["uid"], "✅ 加白", "#2f9e5f")) \
+                        + " " + _mb("ban", x["uid"], "⛔ 封禁", "#c0392b") \
+                        + " " + _mb("kick", x["uid"], "👋 踢出", "#c0392b") \
+                        + ("<div class='more'><button type='button' class='pbtn' style='background:#4a4462'>"
+                           "更多 ▾</button><div class='menu'>"
+                           + _mb("warn_add", x["uid"], "⚠️ 警告 +1", "#b8860b")
+                           + " " + _mb("warn_sub", x["uid"], "⚠️ 警告 −1", "#5b5b76")
+                           + "</div></div>")
+                    rows_html += (f"<tr><td><div style='display:flex;align-items:center;gap:9px;min-width:0'>"
+                                  f"<span class='av' style='background:{av_bg}'>{av_ch}</span>"
+                                  f"<span style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>{nm}{role_html}</span></div></td>"
                                   f"<td><code>{x['uid']}</code></td>"
                                   f"<td>{x['joined_txt']}</td>"
                                   f"<td>{x['last']}</td>"
-                                  f"<td>{x['chips']}</td>"
+                                  f"<td>{x['chips']:,}</td>"
                                   f"<td>{x['warn']}</td>"
-                                  "<td>" + _mb("warn_add", x["uid"], "＋", "#3d6b4f") + " " + _mb("warn_sub", x["uid"], "－") + "</td>"
-                                  "<td>" + (_mb("wl_del", x["uid"], "删白", "#8a6d3b") if in_wl else _mb("wl_add", x["uid"], "✅ 加白", "#3d6b4f")) + " "
-                                  + _mb("ban", x["uid"], "⛔ 封禁", "#8a3b3b") + " "
-                                  + _mb("kick", x["uid"], "👋 踢出", "#8a3b3b") + "</td></tr>")
+                                  f"<td style='white-space:nowrap'>{ops}</td></tr>")
                 if not rows_html:
-                    rows_html = f"<tr><td colspan='8' style='text-align:center;color:#6a6982'>{'左侧选一个群后展示成员' if not sel_cid else '该群暂无成员档案（发过言/进过群才会建档）'}</td></tr>"
+                    rows_html = f"<tr><td colspan='7' style='text-align:center;color:#6a6982'>{'左侧选一个群后展示成员' if not sel_cid else '该群暂无成员档案（发过言/进过群才会建档）'}</td></tr>"
                 clear_warn_btn = (f"<form style='display:inline;margin:0' method='post' action='/memops'>"
                                   f"<input type='hidden' name='op' value='warn_clear_all'>"
                                   f"<input type='hidden' name='cid' value='{sel_cid}'>"
@@ -10443,8 +10753,9 @@ def start_health_server():
                         "<button type='submit'>🔍 搜索</button> "
                         "<a href='/page/members/mlist'><button type='button'>♻️ 重置</button></a>"
                         "</form></div>"
-                        f"<div class='card' style='margin-top:18px'><div class='sub'>共 {total} 条记录 · 第 {page}/{pages} 页</div>"
-                        "<table class='tbl'><tr><th>昵称</th><th>用户ID</th><th>进群时间</th><th>最近发言</th><th>积分</th><th>警告</th><th>警告操作</th><th>操作</th></tr>"
+                        f"<div class='card' style='margin-top:18px'><div class='sub'>共 {total} 条记录 · 第 {page}/{pages} 页 · 点列头可排序</div>"
+                        "<table class='tbl cp'><tr><th data-s>成员</th><th data-s>用户ID</th><th data-s>进群时间</th>"
+                        "<th data-s>最近发言</th><th data-s>积分</th><th data-s>警告</th><th>操作</th></tr>"
                         + rows_html + "</table>"
                         "<div style='margin-top:12px;display:flex;gap:10px'>"
                         + (f"<a href='/page/members/mlist?cid={sel_cid}&q={quote(q)}&per={per}&page={page-1}'><button type='button'>‹ 上一页</button></a>" if page > 1 else "")
@@ -10456,7 +10767,7 @@ def start_health_server():
                             "<div class='card'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='members/join'>"
                             + _field_rows("members/join") +
-                            "<button type='submit'>💾 保 存</button></form></div>")
+                            _savebar() + "</form></div>")
                 else:
                     body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body("records" if sub == "records" else "ops")
             elif gkey == "admin":
@@ -10573,7 +10884,7 @@ def start_health_server():
                             + "<div class='card'><form method='post' action='/save'>"
                               "<input type='hidden' name='group' value='admin/fundflow'>"
                               + _field_rows("admin/fundflow") +
-                              "<button type='submit' style='margin-top:10px'>💾 保存阈值</button></form></div>")
+                              _savebar("保存阈值") + "</form></div>")
                 else:
                     first = SUBPAGES["admin"][0][0]
                     if first == sub:
@@ -10611,8 +10922,8 @@ def start_health_server():
                         "<table class='tbl'><tr><th style='width:150px'>命令</th><th>触发词（逗号分隔）</th></tr>"
                         + "".join(rows) + "</table>" + _cf_html
                         + "<h3 style='margin-top:20px'>📱 Telegram / 菜单</h3>"
-                        "<textarea name='tg_menu' rows='14' style='width:100%;font-family:inherit'>" + html.escape(menu_txt) + "</textarea>"
-                        "<button type='submit' style='margin-top:12px'>💾 保存全部命令设置</button></form></div>")
+                        "<textarea name='tg_menu' rows='14' style='width:100%;font-family:inherit'>" + html.escape(menu_txt) + "</textarea>" +
+                        _savebar("保存全部命令设置") + "</form></div>")
             elif gkey == "security":
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码</div>{msg}"
                         "<form method='post' action='/save'>"
@@ -10720,8 +11031,8 @@ def start_health_server():
                         + "<div class='sub' style='margin-top:16px'>消息模板支持占位符："
                           f"<code>{'{title}'}</code> <code>{'{nick}'}</code> <code>{'{n}'}</code> <code>{'{balance}'}</code> "
                           f"<code>{'{prize_list}'}</code> <code>{'{keyword}'}</code> <code>{'{duration}'}</code> "
-                          f"<code>{'{winners}'}</code> <code>{'{reason}'}</code></div>"
-                        "<button type='submit' style='margin-top:8px'>💾 保存全部抽奖设置</button></form></div>")
+                          f"<code>{'{winners}'}</code> <code>{'{reason}'}</code></div>" +
+                        _savebar("保存全部抽奖设置") + "</form></div>")
             elif gkey == "invite":
                 # 邀请系统六子页：配置/记录/统计/汇总/前置条件/审核
                 subs_inv = {k: n for k, n in SUBPAGES.get("invite", [])}
@@ -10749,8 +11060,8 @@ def start_health_server():
                             "<input type='hidden' name='group' value='invite/config'>"
                             + _field_rows("invite/config") +
                             "<div class='sub' style='margin-top:16px'>模板占位符：邀请成功通知 <code>{inviter}</code> <code>{invitee}</code> <code>{reward}</code>；"
-                            "链接消息 <code>{link}</code> <code>{reward}</code>；排行行 <code>{i}</code> <code>{name}</code> <code>{count}</code></div>"
-                            "<button type='submit' style='margin-top:8px'>💾 保存邀请设置</button></form></div>")
+                            "链接消息 <code>{link}</code> <code>{reward}</code>；排行行 <code>{i}</code> <code>{name}</code> <code>{count}</code></div>" +
+                            _savebar("保存邀请设置") + "</form></div>")
                 elif sub == "records":
                     _recs = [(k, r) for k, r in invite_records.items()
                              if not sel_icid or _inv_icid(r.get("cid")) == sel_icid]
@@ -10829,7 +11140,7 @@ def start_health_server():
                             "<div class='card'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='invite/qualify'>"
                             + _field_rows("invite/qualify") +
-                            "<button type='submit' style='margin-top:8px'>💾 保存合格结算设置</button></form></div>")
+                            _savebar("保存合格结算设置") + "</form></div>")
                 else:
                     body = f"<h1>{gicon} {gname}</h1><div class='sub'>该子页暂未开通</div>{msg}"
             elif sub:
@@ -10886,8 +11197,8 @@ def start_health_server():
                             "<input type='hidden' name='group' value='points/level'>"
                             + _field_rows("points/level")
                             + "<div class='sub' style='margin-top:16px'>占位符：<code>{name}</code> <code>{level}</code> <code>{balance}</code>；群内发「"
-                              + html.escape(str(LEVEL_CMD)) + "」查询自己的等级</div>"
-                            "<button type='submit' style='margin-top:8px'>💾 保存通知设置</button></form></div>")
+                              + html.escape(str(LEVEL_CMD)) + "」查询自己的等级</div>" +
+                            _savebar("保存通知设置") + "</form></div>")
                 elif gkey == "points" and sub == "mall":
                     mall_rows = ""
                     for i, x in enumerate(MALL_ITEMS):
@@ -10912,7 +11223,7 @@ def start_health_server():
                             "<button style='margin:0'>➕ 新增商品</button></form></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/mall'>"
-                            + _field_rows("points/mall") + "<button type='submit'>💾 保存商城设置</button></form></div>")
+                            + _field_rows("points/mall") + _savebar("保存商城设置") + "</form></div>")
                 elif gkey == "points" and sub == "rule":
                     cap = f"每日上限 {CHAT_DAILY_CAP} 分" if CHAT_DAILY_CAP else "不设上限"
                     fee = f"（手续费 {INHERIT_FEE_PERCENT}%）" if INHERIT_FEE_PERCENT else "（免手续费）"
@@ -11036,8 +11347,8 @@ def start_health_server():
                             + _field_rows("points/redeem")
                             + "<div class='sub' style='margin-top:16px'>商品行占位符：<code>{goodsName}</code> <code>{pointNum}</code> <code>{leftNum}</code>；"
                               "成功通知占位符：<code>{name}</code> <code>{goodsName}</code> <code>{pointNum}</code> <code>{balance}</code>；"
-                              "防伪单号由系统自动生成，只发用户私聊和管理员对账（群里不显示，防群友看到别人单号冒领），无需模板配置</div>"
-                            "<button type='submit' style='margin-top:8px'>💾 保存兑换设置</button></form></div>")
+                              "防伪单号由系统自动生成，只发用户私聊和管理员对账（群里不显示，防群友看到别人单号冒领），无需模板配置</div>" +
+                            _savebar("保存兑换设置") + "</form></div>")
                 elif gkey == "points" and sub == "guess":
                     gs_rows = ""
                     for gc, g in sorted(guesses.items()):
@@ -11077,7 +11388,7 @@ def start_health_server():
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/guess'>"
                             + _field_rows("points/guess")
-                            + "<button type='submit' style='margin-top:8px'>💾 保存竞猜设置</button></form></div>")
+                            + _savebar("保存竞猜设置") + "</form></div>")
                 elif gkey == "points" and sub == "mallord":
                     _ord_src = [o for o in reversed(mall_orders[-200:]) if not sel_flt_cid or int(o.get("cid", 0) or 0) == sel_flt_cid]
                     ord_rows = "".join(
@@ -11108,13 +11419,13 @@ def start_health_server():
                             + pend_rows + "</table></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/buy'>"
-                            + _field_rows("points/buy") + "<button type='submit'>💾 保存</button></form></div>")
+                            + _field_rows("points/buy") + _savebar() + "</form></div>")
                 else:
                     body = (f"<h1>{gicon} {sname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
                             "<div class='card'><form method='post' action='/save'>"
                             f"<input type='hidden' name='group' value='{gkey}/{sub}'>"
                             + _field_rows(f"{gkey}/{sub}") +
-                            "<button type='submit'>💾 保 存</button></form></div>")
+                            _savebar() + "</form></div>")
             else:
                 # 无子页分组照旧；有子页分组落到第一个子页
                 if gkey in SUBPAGES and SUBPAGES[gkey]:
@@ -11229,7 +11540,7 @@ def start_health_server():
                         "<form method='post' action='/save'>"
                         f"<input type='hidden' name='group' value='{gkey}'>"
                         + _field_rows(gkey) +
-                        "<button type='submit'>💾 保 存</button></form></div>")
+                        _savebar() + "</form></div>")
             return _page(gname, gkey, body)
 
         def _tpl_preview(key):
@@ -11383,6 +11694,11 @@ def start_health_server():
                     else: target.add(rid)
                     save_settings({})
                     self._redirect("/page/schedule"); return
+                mm = re.fullmatch(r"/theme/([a-z]+)", path)
+                if mm and mm.group(1) in _UI_THEMES:   # 顶栏主题色点：切换并持久化，回跳原页面
+                    SETTINGS_SNAPSHOT["ui_theme"] = mm.group(1)
+                    save_data()
+                    self._redirect(qs.get("back", ["/"])[0] or "/"); return
                 mm = re.fullmatch(r"/menu_move/([a-z0-9_]+)/(-?1)", path)
                 if mm:
                     g, d = mm.group(1), int(mm.group(2))

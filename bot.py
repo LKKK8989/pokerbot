@@ -71,6 +71,8 @@ BOT_ADMINS = set(ADMIN_USER_IDS)  # 运行时管理员集合 = 种子 ∪ 持久
 SMALL_BLIND, BIG_BLIND, ANTE = 0, 0, 200
 # 4 游戏总开关/仅管理员开局（后台各游戏分组可调，保存立即生效）
 TEXAS_ENABLED, TEXAS_ADMIN_ONLY = 1, 0
+# 德州两个模式各自独立开关（用户要求：可以只开排位、关日常，随时切换）
+DAILY_TEXAS_ENABLED, RANKED_TEXAS_ENABLED = 1, 1
 BJ_ENABLED, BJ_ADMIN_ONLY = 1, 0
 JINHUA_ENABLED, JINHUA_ADMIN_ONLY = 1, 0
 RACE_ENABLED, RACE_ADMIN_ONLY = 1, 0
@@ -83,6 +85,20 @@ SEASON_REBUY_COUNT = 3         # 破产应急补分次数
 SEASON_REBUY_AMOUNT = 2000     # 每次应急补分
 SEASON_DAYS = 7                # 赛季周期（天）
 SEASON_BET_PERCENT = 0.2       # 排位赛单局每人投入上限 = 本局落座玩家筹码总和 × 此比例（人少上限低，防串通）
+# 排位赛德州独立参数（用户要求：排位赛可单独调规则，不用动日常德州）
+# 0 = 继承日常德州对应设置；填了非 0 值则排位局用这里的值
+SEASON_MIN_ENTRY_CHIPS = 0     # 入座最低排位分（0=沿用「排位分>0」的原有判定）
+SEASON_FIXED_MIN_RAISE = 0     # 最低加注额
+SEASON_TURN_TIMEOUT = 0        # 单回合思考时间（秒）
+SEASON_ROOM_WAIT_TIMEOUT = 0   # 等待房倒计时（秒）
+SEASON_SMALL_BLIND = 0         # 小盲注（0=继承；日常也是 0 时表示不设盲注）
+SEASON_BIG_BLIND = 0           # 大盲注（同上）
+SEASON_ANTE = 0                # 前注（每人发牌前强制投入）
+# ---------- 聊天积分兑换排位分 ----------
+RANKED_EXCHANGE_ENABLED = 1    # 兑换开关
+RANKED_EXCHANGE_COST = 1       # 兑换比例-消耗的聊天积分（分母）
+RANKED_EXCHANGE_GAIN = 1       # 兑换比例-得到的排位分（分子）→ 默认 1:1
+RANKED_EXCHANGE_DAILY_LIMIT = 0  # 每人每日兑换上限（按消耗的聊天积分累计，0=不限）
 # 自适应数据持久化路径：HF Spaces 开启持久化(/data 存在)→用 /data；否则用当前目录(Serv00/本地均为真实磁盘，持久)
 _data_candidates = [
     os.environ.get("DATA_FILE"),
@@ -242,6 +258,8 @@ SETTINGS_FIELDS = [
     ("big_blind",               "BIG_BLIND",               "德州大盲注(0=不设盲注)",    "int",   0,   100000,  "texas"),
     ("ante",                    "ANTE",                    "德州前注(每人发牌前强制投入)", "int", 0,  100000,  "texas"),
     ("texas_enabled",           "TEXAS_ENABLED",           "德州扑克开关",              "bool",  0,   1,       "texas"),
+    ("daily_texas_enabled",     "DAILY_TEXAS_ENABLED",     "日常德州开关",              "bool",  0,   1,       "texas"),
+    ("ranked_texas_enabled",    "RANKED_TEXAS_ENABLED",    "排位德州开关",              "bool",  0,   1,       "texas"),
     ("texas_admin_only",        "TEXAS_ADMIN_ONLY",        "德州仅管理员开局",          "bool",  0,   1,       "texas"),
     ("stale_text_command_seconds","STALE_TEXT_COMMAND_SECONDS","过期消息忽略(秒,防翻旧账命令)", "int", 5, 3600, "general"),
     # ---------- 定时任务（时间可自行设置） ----------
@@ -337,6 +355,21 @@ SETTINGS_FIELDS = [
     ("season_days",             "SEASON_DAYS",             "赛季天数",                  "int",   1,   90,      "season"),
     ("season_rebuy_count",      "SEASON_REBUY_COUNT",      "每日重买次数上限",          "int",   0,   20,      "season"),
     ("season_rebuy_amount",     "SEASON_REBUY_AMOUNT",     "每次重买金额",              "int",   0,   1000000, "season"),
+    # ===== 排位赛德州独立参数（0=沿用日常德州设置；填非 0 值即排位局专用） =====
+    ("sep_season_texas",        None, "排位赛德州规则（留空/0 = 沿用日常德州；填了就是排位局专用）", "sep", 0, 0, "season"),
+    ("season_min_entry_chips",  "SEASON_MIN_ENTRY_CHIPS",  "入座最低排位分(0=只要>0即可)", "int", 0, 1000000, "season"),
+    ("season_fixed_min_raise",  "SEASON_FIXED_MIN_RAISE",  "最低加注额(0=沿用日常)",     "int",   0,  100000, "season"),
+    ("season_turn_timeout",     "SEASON_TURN_TIMEOUT",     "单回合思考时间(秒,0=沿用日常)", "int", 0, 600,   "season"),
+    ("season_room_wait_timeout","SEASON_ROOM_WAIT_TIMEOUT","等待房倒计时(秒,0=沿用日常)", "int",  0,  600,   "season"),
+    ("season_small_blind",      "SEASON_SMALL_BLIND",      "德州小盲注(0=沿用日常)",     "int",   0,  100000, "season"),
+    ("season_big_blind",        "SEASON_BIG_BLIND",        "德州大盲注(0=沿用日常)",     "int",   0,  100000, "season"),
+    ("season_ante",             "SEASON_ANTE",             "德州前注(0=沿用日常)",       "int",   0,  100000, "season"),
+    # ===== 聊天积分兑换排位分（比例可调，默认 1:1） =====
+    ("sep_season_exchange",     None, "聊天积分兑换排位分", "sep", 0, 0, "season"),
+    ("ranked_exchange_enabled", "RANKED_EXCHANGE_ENABLED", "兑换开关",                  "bool",  0,   1,       "season"),
+    ("ranked_exchange_cost",    "RANKED_EXCHANGE_COST",    "兑换比例·消耗聊天积分",      "int",   1,   1000000, "season"),
+    ("ranked_exchange_gain",    "RANKED_EXCHANGE_GAIN",    "兑换比例·得到排位分",        "int",   1,   1000000, "season"),
+    ("ranked_exchange_daily_limit","RANKED_EXCHANGE_DAILY_LIMIT","每人每日兑换上限(按消耗积分算,0=不限)", "int", 0, 10000000, "season"),
     # ---------- 积分系统（子页面制：points/子页键，照阿福模板） ----------
     ("admin_adjust",            "ADMIN_ADJUST_ENABLED",    "管理员可增减积分",          "bool",  0,   1,       "points/set"),
     ("rank_1_emoji",            "RANK_1_EMOJI",            "积分排行第一名表情",        "short", 0,   0,       "points/set"),
@@ -826,8 +859,29 @@ def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=Non
 
 _DYN_CMD_OWNED = {}  # gname -> 上次注册的动态指令名（改名后移除旧指令）
 
+def _fn_legit_aliases(fn):
+    """某命令当前**应当**生效的别名集合：有覆盖=覆盖表里的全部；无覆盖=出厂别名。
+
+    与 apply_command_aliases 的语义严格一致（覆盖即替换）。
+    用途：判断「上一轮的动态指令名」是否还属于合法别名——是就别删。
+    """
+    overrides = globals().get("CMD_ALIAS_OVERRIDES") or {}
+    base = globals().get("BASE_CMD_ALIASES") or {}
+    override = overrides.get(fn.__name__)
+    if override is not None:
+        names = [a.strip() for a in str(override).replace("，", ",").split(",") if a.strip()]
+        if names:
+            return set(names)
+    return {a for a, f in base.items() if f is fn}
+
 def _sync_dyn_aliases():
-    """把网页自定义的指令名（查询积分/签到/积分排行）注册进命令分发表；旧名随之失效。"""
+    """把网页自定义的指令名（查询积分/签到/积分排行）注册进命令分发表；旧名随之失效。
+
+    修复（2026-09-09 用户报告）：此前无条件 pop 掉「上一轮动态名」，而 SIGN_CMD 取的是
+    覆盖表的**第一个**别名，于是把用户显式写在覆盖表里的其它别名一起删了——
+    典型表现：签到页填「每日签到,签到」时「签到」失效，把顺序换成「签到,每日签到」才好。
+    现在只移除「既不在出厂别名、也不在覆盖表」的陈旧动态名，用户配置的别名一律保留。
+    """
     aliases = globals().get("CMD_ALIASES")
     if aliases is None:
         return
@@ -835,7 +889,7 @@ def _sync_dyn_aliases():
                       ("INVITE_LINK_CMD", cmd_invite_link), ("INVITE_RANK_TODAY_CMD", cmd_invite_rank_today),
                       ("INVITE_RANK_MONTH_CMD", cmd_invite_rank_month), ("INVITE_RANK_ALL_CMD", cmd_invite_rank_all)):
         old = _DYN_CMD_OWNED.get(gname)
-        if old and aliases.get(old) is fn:
+        if old and old not in _fn_legit_aliases(fn) and aliases.get(old) is fn:
             aliases.pop(old, None)
         name = globals().get(gname)
         if name:
@@ -1231,6 +1285,8 @@ season_joined = defaultdict(set)                          # season_joined[cid] =
 season_rebuy = defaultdict(lambda: defaultdict(int))      # season_rebuy[cid][uid] 已用应急补分次数
 season_lobby_msg = {}                                       # season_lobby_msg[cid] = 排位大厅看板消息 id（UI 态，不持久化）
 season_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # season_profit_by_date[date][cid][uid] = 当日盈亏（赛季每日重置成 2W 前记录；赛季总排行=7日累计之和）
+season_exchange_daily = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # season_exchange_daily[date][cid][uid] = 当日已消耗的聊天积分（兑换每日上限用）
+season_exchange_bonus = defaultdict(lambda: defaultdict(int))  # season_exchange_bonus[cid][uid] = 本赛季累计兑换得到的排位分（「额外底分」：每日重置保留、不计入盈亏榜）
 # ---------- 赌神称号（全局唯一，跨群共享荣誉） ----------
 user_titles = {}               # user_titles[uid] = {"🎰赌神", ...}  每人拥有的称号集合（赌神全局唯一，其余称号可叠加）
 champions_history = []         # [{"season_id","uid","name","score","streak"}] 历届荣誉墙
@@ -1400,6 +1456,8 @@ def force_save_now():
                 "season_joined": {str(cid): list(users) for cid, users in season_joined.items()},
                 "season_rebuy": {str(cid): dict(users) for cid, users in season_rebuy.items()},
                 "season_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in season_profit_by_date.items()},
+                "season_exchange_daily": {date: {str(cid): {str(uid): int(v) for uid, v in users.items()} for cid, users in chats.items()} for date, chats in season_exchange_daily.items()},
+                "season_exchange_bonus": {str(cid): dict(users) for cid, users in season_exchange_bonus.items()},
                 "user_titles": {str(uid): sorted(t) for uid, t in user_titles.items()},
                 "title_expiry": {str(uid): {t: int(exp) for t, exp in ts.items()} for uid, ts in title_expiry.items()},
                 "title_equipped": {str(uid): t for uid, t in title_equipped.items()},
@@ -1423,6 +1481,10 @@ def force_save_now():
                 "join_verify_pending": {k: dict(v) for k, v in join_verify_pending.items() if isinstance(v, dict)},
                 "observe_checked": sorted(observe_checked),
                 "lurker_checked": sorted(lurker_checked),
+                # 入群时间表：观察期巡检 + 潜水号清理的唯一数据源。
+                # 此前没持久化，Railway 每次重部署都清零 → 两个巡检永远扫不到人（开关开了也没用）。
+                "member_joined_at": {str(cid): {str(uid): float(t) for uid, t in users.items()}
+                                     for cid, users in member_joined_at.items()},
                 "announce_last_date": announce_last_date,
                 "invite_debug": {str(cid): list(v) for cid, v in invite_debug.items()},
                 "invite_links": {str(cid): {str(uid): dict(v) for uid, v in users.items()}
@@ -1565,6 +1627,13 @@ def load_data():
         for cid, uids in data.get("season_joined", {}).items():
             season_joined[int(cid)] = set(int(u) for u in uids)
         for date, chats in data.get("season_profit_by_date", {}).items(): restore_nested(season_profit_by_date[date], chats)
+        for date, cids in data.get("season_exchange_daily", {}).items():
+            for cid, users in cids.items():
+                for uid, v in users.items():
+                    try: season_exchange_daily[str(date)][int(cid)][int(uid)] = int(v)
+                    except (ValueError, TypeError): continue
+        season_exchange_bonus.clear()
+        restore_nested(season_exchange_bonus, data.get("season_exchange_bonus", {}))
         # 赌神称号恢复
         user_titles.clear()
         for uid, t in data.get("user_titles", {}).items():
@@ -1638,6 +1707,17 @@ def load_data():
             if isinstance(v, dict): join_verify_pending[str(k)] = dict(v)
         observe_checked.update(str(x) for x in (data.get("observe_checked", []) or []))
         lurker_checked.update(str(x) for x in (data.get("lurker_checked", []) or []))
+        # 入群时间表恢复：与保存侧成对，重部署后观察期巡检/潜水清理才能继续工作
+        for cid, users in (data.get("member_joined_at", {}) or {}).items():
+            try:
+                c = int(cid)
+            except (ValueError, TypeError):
+                continue
+            for uid, ts in (users or {}).items():
+                try:
+                    member_joined_at[c][int(uid)] = float(ts)
+                except (ValueError, TypeError):
+                    continue
         # 待删消息队列恢复：重启/重部署后由 restore_pending_deletes 重放，游戏面板不再永久残留
         _pending_deletes[:] = [q for q in (data.get("pending_deletes") or [])
                                if isinstance(q, (list, tuple)) and len(q) == 3]
@@ -2344,6 +2424,28 @@ def distribute_side_pots(total_bets, scores):
     return payouts
 
 
+def _season_rule(game, daily_val, season_val):
+    """排位赛独立参数取值：排位局且排位参数非 0 时用排位值，否则沿用日常德州的值。
+
+    约定 SEASON_* = 0 表示「沿用日常」，这样新增参数不需要迁移旧设置。
+    盲注/前注本身允许为 0（不设），0 与「沿用日常」语义冲突，
+    故盲注类单独走 _season_blind。
+    """
+    return season_val if (getattr(game, "season", False) and season_val) else daily_val
+
+
+def _season_blind(game, daily_val, season_val):
+    """盲注/前注专用：排位局且「排位盲注类参数被管理员显式设过」时用排位值，否则沿用日常。
+
+    判定口径：排位小盲/大盲/前注任一 > 0，就说明管理员在后台填了排位专用盲注，
+    此时三个值整体按排位参数走（填 0 的项即「排位局该项为 0」）。
+    全部为 0 = 没动过 → 沿用日常德州。
+    """
+    if getattr(game, "season", False) and (SEASON_SMALL_BLIND or SEASON_BIG_BLIND or SEASON_ANTE):
+        return season_val
+    return daily_val
+
+
 class PokerGame:
     def __init__(self, cid, owner, mode=None, season=False):
         self.chat_id, self.owner_id, self.mode, self.phase = cid, owner, mode or current_game_mode(), "waiting"
@@ -2361,14 +2463,46 @@ class PokerGame:
         self.max_total_bet = None  # 排位赛单局每人投入上限（仅 season，start 时按总筹码×百分比算）
         self.start_date = now_bj().strftime("%Y-%m-%d")  # 开局业务日，用于排位赛跨午夜补重置判断
 
+    # ---------- 规则参数（排位局可独立配置，0/未填 = 沿用日常德州） ----------
+    @property
+    def min_raise(self):
+        """最低加注额。"""
+        return _season_rule(self, FIXED_MIN_RAISE, SEASON_FIXED_MIN_RAISE)
+
+    @property
+    def turn_timeout(self):
+        """单回合思考时间（秒）。"""
+        return _season_rule(self, TURN_TIMEOUT, SEASON_TURN_TIMEOUT)
+
+    @property
+    def wait_timeout(self):
+        """等待房倒计时（秒）。"""
+        return _season_rule(self, ROOM_WAIT_TIMEOUT, SEASON_ROOM_WAIT_TIMEOUT)
+
+    @property
+    def ante_value(self):
+        """前注。"""
+        return _season_blind(self, ANTE, SEASON_ANTE)
+
+    @property
+    def small_blind_value(self):
+        """小盲注。"""
+        return _season_blind(self, SMALL_BLIND, SEASON_SMALL_BLIND)
+
+    @property
+    def big_blind_value(self):
+        """大盲注。"""
+        return _season_blind(self, BIG_BLIND, SEASON_BIG_BLIND)
+
     def add(self, uid):
         if self.phase != "waiting" or uid in self.players: return False
         if self.season:
-            # 排位赛：必须已报名、且排位分 > 0
+            # 排位赛：必须已报名、且排位分 > 0（可选再加一道「入座最低排位分」门槛）
             if uid not in season_joined.get(self.chat_id, set()):
                 return False
             wallet = season_points
             if wallet[self.chat_id][uid] <= 0: return False
+            if SEASON_MIN_ENTRY_CHIPS and wallet[self.chat_id][uid] < SEASON_MIN_ENTRY_CHIPS: return False
         else:
             wallet = game_chips
             if wallet[self.chat_id][uid] < MIN_ENTRY_CHIPS: return False
@@ -2380,18 +2514,19 @@ class PokerGame:
         random.shuffle(self.players)
         self.cancel_auto(); self.cancel_wait(); self.folded.clear(); self.all_in.clear(); self.acted.clear(); self.raise_locked.clear(); self.board = []; self.pot = 0; self.settled = False
         wallet = season_points if self.season else game_chips
+        _ante = self.ante_value
         for uid in self.players:
             self.chips[uid] = wallet[self.chat_id][uid]; self.initial_chips[uid] = self.chips[uid]
             self.total_bet[uid] = self.round_bets[uid] = 0
-            ante = min(ANTE, self.chips[uid]); self.chips[uid] -= ante; self.total_bet[uid] += ante; self.pot += ante
+            ante = min(_ante, self.chips[uid]); self.chips[uid] -= ante; self.total_bet[uid] += ante; self.pot += ante
             if not self.chips[uid]: self.all_in.add(uid)
         # 排位赛：单局每人投入上限 = 本局落座玩家带入筹码总和 × 百分比（人少上限低，防串通）
-        self.max_total_bet = max(int(sum(self.initial_chips.values()) * SEASON_BET_PERCENT), ANTE) if self.season else None
+        self.max_total_bet = max(int(sum(self.initial_chips.values()) * SEASON_BET_PERCENT), _ante) if self.season else None
         self.deck = [Card.new(rank + suit) for rank in "23456789TJQKA" for suit in "shdc"]
         random.shuffle(self.deck); self.hands = {uid: [self.deck.pop(), self.deck.pop()] for uid in self.players}
         self.dealer_idx = len(self.players) - 1; self.active = self.players.copy()
-        self._blind(self.players[(self.dealer_idx + 1) % len(self.players)], SMALL_BLIND)
-        bb = (self.dealer_idx + 2) % len(self.players); self._blind(self.players[bb], BIG_BLIND)
+        self._blind(self.players[(self.dealer_idx + 1) % len(self.players)], self.small_blind_value)
+        bb = (self.dealer_idx + 2) % len(self.players); self._blind(self.players[bb], self.big_blind_value)
         self.current_bet, self.phase, self.actor_idx = max(self.round_bets.values()), "preflop", (bb + 1) % len(self.active)
         if self._next(self.actor_idx) is None: self.phase = "showdown"
         return True
@@ -2447,7 +2582,7 @@ class PokerGame:
                 self.current_bet = new_total
                 # 任意抬高下注额的全下都要求其余玩家重新响应。
                 self.acted = {uid}
-                if raise_size < FIXED_MIN_RAISE:
+                if raise_size < self.min_raise:
                     # 短全下不重新开放加注：之前已经行动的玩家只能跟注或弃牌。
                     self.raise_locked.update(prior_actors - {uid})
                 else:
@@ -2458,7 +2593,7 @@ class PokerGame:
             try: extra = int(extra)
             except (TypeError, ValueError): return False, "无效加注额"
             to_call = self.current_bet - self.round_bets[uid]; paid = to_call + extra; new_total = self.round_bets[uid] + paid
-            if extra < FIXED_MIN_RAISE: return False, f"最低加注为 {FIXED_MIN_RAISE}"
+            if extra < self.min_raise: return False, f"最低加注为 {self.min_raise}"
             if paid > self.chips[uid]: return False, f"积分不足：本次需要跟注 {to_call} + 加注 {extra}，共 {paid}，你只有 {self.chips[uid]}"
             if self.max_total_bet is not None and self.total_bet[uid] + paid > self.max_total_bet:
                 return False, f"单局每人投入上限 {self.max_total_bet}，你已投入 {self.total_bet[uid]}"
@@ -2556,7 +2691,7 @@ class PokerGame:
 async def poker_waiting_text(game, app):
     players = [f"{i}. {await get_name(app, uid)}" for i, uid in enumerate(game.players, 1)]
     prefix = "🏆 排位赛｜" if game.season else "🃏 新一局积分德州扑克"
-    return f"{prefix}\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players) + "\n\n点击加入，发起人可立即开始。\n⏰ 满 2 人后 60 秒自动开局，不足 2 人 60 秒后自动解散。"
+    return f"{prefix}\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players) + f"\n\n点击加入，发起人可立即开始。\n⏰ 满 2 人后 {game.wait_timeout} 秒自动开局，不足 2 人 {game.wait_timeout} 秒后自动解散。"
 
 
 async def update_poker_waiting(game, app):
@@ -2596,11 +2731,12 @@ def poker_buttons(game, uid):
                                    callback_data="texas_check" if not to_call else "texas_call")
     if uid not in game.raise_locked:
         # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底
-        half_amt = max(FIXED_MIN_RAISE, game.pot // 2)
-        pot_amt = max(FIXED_MIN_RAISE, game.pot)
+        _min_raise = game.min_raise  # 排位局可能用独立的最低加注额
+        half_amt = max(_min_raise, game.pot // 2)
+        pot_amt = max(_min_raise, game.pot)
         row_act = [act_btn]
-        if game.chips[uid] >= to_call + FIXED_MIN_RAISE and half_amt > FIXED_MIN_RAISE:
-            row_act.append(InlineKeyboardButton(f"🔼 加注 {FIXED_MIN_RAISE}", callback_data=f"texas_raise_{FIXED_MIN_RAISE}"))
+        if game.chips[uid] >= to_call + _min_raise and half_amt > _min_raise:
+            row_act.append(InlineKeyboardButton(f"🔼 加注 {_min_raise}", callback_data=f"texas_raise_{_min_raise}"))
         rows.append(row_act)
         row_p = []
         if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
@@ -2628,13 +2764,13 @@ async def start_turn_timer(game, app):
         return
     # 行动消息携带完整牌桌 + 行动提示 + 操作按钮（一条消息）
     await safe_delete(app.bot, game.chat_id, game.action_msg_id)
-    text = f"{await poker_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {TURN_TIMEOUT} 秒内行动。"
+    text = f"{await poker_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {game.turn_timeout} 秒内行动。"
     msg = await safe_send(app.bot, game.chat_id, text, reply_markup=poker_buttons(game, uid), parse_mode="HTML")
     game.action_msg_id = msg.message_id if msg else None
 
     # 真实超时任务：无需跟注自动过牌，否则自动弃牌，防止牌局卡死
     async def timeout_action():
-        await asyncio.sleep(TURN_TIMEOUT)
+        await asyncio.sleep(game.turn_timeout)
         if game.settled or game.phase == "showdown": return
         if game.current() != uid: return  # 该玩家已行动过
         if game.round_bets[uid] == game.current_bet:
@@ -2723,16 +2859,17 @@ async def settle_poker(game, app):
                         season_rebuy[game.chat_id][p] += 1
                         season_points[game.chat_id][p] = SEASON_REBUY_AMOUNT
                         lines.append(f"⚠️ {names[p]} 破产，启用应急筹码 +{SEASON_REBUY_AMOUNT}（剩 {SEASON_REBUY_COUNT - season_rebuy[game.chat_id][p]} 次）")
-            # 排位赛跨午夜补重置：本局横跨业务日结束，错过的午夜刷新在此补记当日盈亏并归位到起始分
+            # 排位赛跨午夜补重置：本局横跨业务日结束，错过的午夜刷新在此补记当日盈亏并归位到基准分
             if game.start_date and business_date() != game.start_date:
                 for uid in game.players:
                     if uid < 0: continue
+                    base = _season_base(game.chat_id, uid)
                     final = season_points[game.chat_id][uid]
-                    day_profit = final - SEASON_START_CHIPS
+                    day_profit = final - base
                     if day_profit:
                         season_profit_by_date[game.start_date][game.chat_id][uid] += day_profit
-                    season_points[game.chat_id][uid] = SEASON_START_CHIPS
-                    # 已取消淘汰机制：破产玩家当日剩余时间无法下注，次日 0 点重置为 {SEASON_START_CHIPS} 后可继续参赛
+                    season_points[game.chat_id][uid] = base
+                    # 已取消淘汰机制：破产玩家当日剩余时间无法下注，次日 0 点重置为「起始分+兑换底分」后可继续参赛
 
         if game.mode == "official" and not game.season:
             rank = sorted(poker_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:50]
@@ -2817,6 +2954,7 @@ class HorseRace:
         self.task, self.settled, self.cancelled, self.lock = None, False, False, asyncio.Lock()
         self.final_odds = None
         self.bet_odds = defaultdict(dict)  # 每注下注瞬间锁定的赔率（uid->horse 金额加权平均）
+        self.panel_cd = 0.0  # 看板重发冷却：重复发 /赛车 时避免刷屏（未超时只回一句文字）
         rates = [random.uniform(.18, .35) for _ in range(HORSE_COUNT)]
         # 先按显示精度（整数%）四舍五入再归一化，避免"显示胜率相同、真实胜率不同"导致同胜率马赔率不同
         rates = [round(r, 2) for r in rates]
@@ -3188,9 +3326,17 @@ async def need_auth(update, context=None):
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
         if not is_auth(chat.id):
+            # 新群默认不在授权名单里，而「初始积分/签到/游戏」等全部走这里拦截。
+            # 管理员自己在新群里会只看到「请联系管理员」却无路可走（用户实际踩过），
+            # 所以对 Bot 管理员直接把「本群怎么授权」写清楚，一步可解。
+            if _u and is_bot_admin(_u.id):
+                _tip = (f"❌ 本群尚未授权，群内积分/游戏等功能不会生效。\n"
+                        f"你是 Bot 管理员，直接在本群发送 /授权 即可（群号 {chat.id}）。")
+            else:
+                _tip = "❌ 此群组未授权，请联系管理员。"
             if update.effective_message:
-                if context is not None and update.message: await send_reply(update, context, "❌ 此群组未授权，请联系管理员。")
-                else: await update.effective_message.reply_text("❌ 此群组未授权，请联系管理员。")
+                if context is not None and update.message: await send_reply(update, context, _tip)
+                else: await update.effective_message.reply_text(_tip)
             return False
     return True
 
@@ -3248,10 +3394,11 @@ async def start_bj_turn_timer(game, app):
     game.timer_task = asyncio.create_task(timeout())
 
 async def start_bj_wait_timeout(game, app):
-    """21点等待房 60 秒倒计时：有人加入则自动开局，无人加入自动解散。"""
+    """21点等待房倒计时：有人加入则自动开局，无人加入自动解散。"""
     game.cancel_wait()
     async def expire():
-        await asyncio.sleep(ROOM_WAIT_TIMEOUT)
+        _wait = ROOM_WAIT_TIMEOUT
+        await asyncio.sleep(_wait)
         if game.phase != "waiting" or active_blackjack_games.get(game.chat_id) is not game:
             return
         if game.players:
@@ -3260,7 +3407,7 @@ async def start_bj_wait_timeout(game, app):
                 await start_bj_turn_timer(game, app)
         else:
             active_blackjack_games.pop(game.chat_id, None)
-            await safe_edit(app.bot, game.chat_id, game.game_msg_id, "⌛ 21点等待 60 秒无人加入，房间已自动解散。", reply_markup=None)
+            await safe_edit(app.bot, game.chat_id, game.game_msg_id, f"⌛ 21点等待 {_wait} 秒无人加入，房间已自动解散。", reply_markup=None)
     game.wait_task = asyncio.create_task(expire())
 
 
@@ -3276,7 +3423,7 @@ async def build_blackjack_wait_board(game, app):
     )
     for uid in game.players:
         text += f"- {await get_name(app, uid)} (下注: {game.bets[uid]})\n"
-    text += "\n⏰ 有人加入后 60 秒自动开局，无人加入自动解散。\n"
+    text += f"\n⏰ 有人加入后 {ROOM_WAIT_TIMEOUT} 秒自动开局，无人加入自动解散。\n"
     kb = [[InlineKeyboardButton(f"📥 加入 (下注{b})", callback_data=f"bj_join_{b}") for b in BJ_JOIN_BETS]]
     if game.players: kb.append([InlineKeyboardButton("🎮 开始游戏", callback_data="bj_start")])
     kb.append([InlineKeyboardButton("❌ 终止", callback_data="bj_end")])
@@ -3440,8 +3587,12 @@ async def update_blackjack_ui(game, app):
 
 
 
-async def _game_gate(update, context, game):
-    """4 游戏总开关/仅管理员开局（后台各游戏分组设置，保存立即生效）。返回 True=放行。"""
+async def _game_gate(update, context, game, ranked=None):
+    """4 游戏总开关/仅管理员开局（后台各游戏分组设置，保存立即生效）。返回 True=放行。
+
+    ranked：仅德州用。True=排位德州、False=日常德州、None=不区分（走总开关）。
+    德州额外受「日常/排位」两个独立开关控制，管理员可只开一种模式。
+    """
     label, enabled, admin_only = {
         "texas":     ("德州扑克", TEXAS_ENABLED, TEXAS_ADMIN_ONLY),
         "blackjack": ("21点", BJ_ENABLED, BJ_ADMIN_ONLY),
@@ -3451,6 +3602,13 @@ async def _game_gate(update, context, game):
     if not enabled:
         await send_reply(update, context, f"❌ {label}已关闭（管理员可在后台「{label}」分组重新开启）。")
         return False
+    if game == "texas" and ranked is not None:
+        if ranked and not RANKED_TEXAS_ENABLED:
+            await send_reply(update, context, "❌ 排位德州已关闭（管理员可在后台「德州扑克」分组开启）。")
+            return False
+        if not ranked and not DAILY_TEXAS_ENABLED:
+            await send_reply(update, context, "❌ 日常德州已关闭（管理员可在后台「德州扑克」分组开启）。")
+            return False
     if admin_only and not is_bot_admin(update.effective_user.id):
         await send_reply(update, context, f"❌ {label}仅管理员可开局。")
         return False
@@ -3928,7 +4086,7 @@ class JinhuaGame:
 
 async def jinhua_waiting_text(game, app):
     players = [f"{i}. {await get_name(app, uid)}" for i, uid in enumerate(game.players, 1)]
-    return f"🌸 新一局炸金花\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players) + "\n\n点击加入，发起人可立即开始。\n⏰ 满 2 人后 60 秒自动开局，不足 2 人 60 秒后自动解散。"
+    return f"🌸 新一局炸金花\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players) + f"\n\n点击加入，发起人可立即开始。\n⏰ 满 2 人后 {ROOM_WAIT_TIMEOUT} 秒自动开局，不足 2 人 {ROOM_WAIT_TIMEOUT} 秒后自动解散。"
 
 
 async def update_jinhua_waiting(game, app):
@@ -4167,7 +4325,8 @@ async def settle_jinhua(game, app):
 async def start_jinhua_wait_timeout(game, app):
     game.cancel_wait()
     async def countdown():
-        await asyncio.sleep(ROOM_WAIT_TIMEOUT)
+        _wait = ROOM_WAIT_TIMEOUT
+        await asyncio.sleep(_wait)
         if game.phase != "waiting" or active_jinhua_games.get(game.chat_id) is not game:
             return
         if len(game.players) >= 2:
@@ -4175,7 +4334,7 @@ async def start_jinhua_wait_timeout(game, app):
                 await update_jinhua_table(game, app)
                 await start_jinhua_turn_timer(game, app)
         else:
-            await refund_jinhua(game, app, "⌛ 炸金花等待 60 秒不足 2 人，房间已自动解散。")
+            await refund_jinhua(game, app, f"⌛ 炸金花等待 {_wait} 秒不足 2 人，房间已自动解散。")
     game.wait_task = asyncio.create_task(countdown())
 
 
@@ -4243,10 +4402,14 @@ async def cmd_jinhua(update, context):
 
 
 async def start_wait_timeout(game, app):
-    """德州等待房 60 秒倒计时：满 2 人自动开局，不足 2 人自动解散。"""
+    """德州等待房倒计时：满 2 人自动开局，不足 2 人自动解散。
+
+    倒计时秒数走 game.wait_timeout：排位局可用后台「排位赛」分组单独配置。
+    """
     game.cancel_wait()
     async def countdown():
-        await asyncio.sleep(ROOM_WAIT_TIMEOUT)
+        _wait = game.wait_timeout
+        await asyncio.sleep(_wait)
         if game.phase != "waiting" or active_poker_games.get(game.chat_id) is not game:
             return
         if len(game.players) >= 2:
@@ -4254,13 +4417,13 @@ async def start_wait_timeout(game, app):
                 await update_poker_table(game, app)
                 await start_turn_timer(game, app)
         else:
-            await refund_poker(game, app, "⌛ 德州等待 60 秒不足 2 人，房间已自动解散。")
+            await refund_poker(game, app, f"⌛ 德州等待 {_wait} 秒不足 2 人，房间已自动解散。")
     game.wait_task = asyncio.create_task(countdown())
 
 
 async def cmd_dz(update, context):
     if not await need_auth(update, context): return
-    if not await _game_gate(update, context, "texas"): return
+    if not await _game_gate(update, context, "texas", ranked=False): return
     if not await require_group_chat(update, "德州扑克", "dz", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id; game = active_poker_games.get(cid)
     room_name, _ = poker_room_of(cid, uid, exclude_game=game)
@@ -4306,7 +4469,8 @@ async def start_season(cid, name="", forced=False):
     season_games[cid] = defaultdict(int)
     season_rebuy[cid] = defaultdict(int)
     for uid in joined:
-        season_points[cid][uid] = SEASON_START_CHIPS
+        # 赛前兑换的排位分带进新赛季：基准分 = 起始分 + 该玩家已兑换分
+        season_points[cid][uid] = _season_base(cid, uid)
         season_games[cid][uid] = 0
         season_rebuy[cid][uid] = 0
     season_profit_by_date.pop(cid, None)
@@ -4367,19 +4531,48 @@ async def season_settle(app, manual=False):
     season_start_ts = 0
     season_end_ts = 0
     season_points.clear(); season_games.clear(); season_joined.clear(); season_rebuy.clear(); season_profit_by_date.clear()
+    season_exchange_bonus.clear()  # 兑换底分随赛季结束清零，下赛季重新累计
     season_lobby_msg.clear()  # 大厅看板为 UI 态，结算后清空，下赛季重新发
     save_data()
 
 
+def _season_base(cid, uid):
+    """当日基准分 = 起始分 + 本赛季累计兑换分。
+    兑换分是「额外底分」：每日 0 点重置时保留，且不计入任何盈亏榜（否则花钱买的分会虚增名次）。"""
+    return SEASON_START_CHIPS + season_exchange_bonus.get(cid, {}).get(uid, 0)
+
+
+def season_daily_refresh(day_key, cids, protected=None):
+    """排位赛每日归位：每人分数重置为「起始分+兑换底分」，当日盈亏（当前分-基准分）记入 day_key。
+
+    protected = {(cid, uid)}：进行中的排位局跳过本次归位，等其结算时在 settle_poker 内补记，
+    避免打断进行中的牌局。返回实际归位人数（便于日志/测试）。
+    """
+    protected = protected or set()
+    touched = 0
+    for cid in cids:
+        users = season_points.get(cid)
+        if not users: continue
+        for uid in list(users.keys()):
+            if (cid, uid) in protected: continue
+            base = _season_base(cid, uid)
+            day_profit = users[uid] - base
+            if day_profit:
+                season_profit_by_date[day_key][cid][uid] += day_profit
+            users[uid] = base
+            touched += 1
+    return touched
+
+
 def season_total_profit(cid, uid):
-    """赛季总盈亏 = 各日已结算盈亏之和 + 当前未结算当日盈亏（当前分 - 起始分）。
-    仅对已报名玩家有意义；未报名 uid 不参与当日盈亏计算，避免凭空 -起始分。"""
+    """赛季总盈亏 = 各日已结算盈亏之和 + 当前未结算当日盈亏（当前分 - 基准分）。
+    基准分含兑换底分，故兑换来的分不会虚增排名；仅对已报名玩家有意义。"""
     total = 0
     for d in season_profit_by_date:
         total += season_profit_by_date[d].get(cid, {}).get(uid, 0)
     pts = season_points.get(cid, {}).get(uid)
     if pts is not None:
-        total += pts - SEASON_START_CHIPS
+        total += pts - _season_base(cid, uid)
     return total
 
 
@@ -4395,7 +4588,9 @@ async def season_standings_lines(app, cid, uid=None):
         g = season_games[cid].get(u, 0)
         tag = "" if g >= SEASON_MIN_GAMES else f"（{g}局·未达标）"
         marker = "👑" if (i == 1 and u in user_titles and TITLE_GAMBLING_GOD in user_titles[u]) else rank_marker(i)
-        lines.append(f"{marker} {await get_name(app, u, cid=cid, with_title=False)}：总{season_total_profit(cid, u):+d}｜当日{val}｜{g}局{tag}")
+        bonus = season_exchange_bonus.get(cid, {}).get(u, 0)
+        btag = f"｜底分{bonus}" if bonus else ""
+        lines.append(f"{marker} {await get_name(app, u, cid=cid, with_title=False)}：总{season_total_profit(cid, u):+d}｜当日{val - _season_base(cid, u):+d}｜{g}局{btag}{tag}")
     # 个人排名行：请求者不在前 50 时，单独补一行真实名次，避免大群看不到自己
     if uid is not None and uid in users:
         full_rank = next((i for i, (u, _) in enumerate(standings, 1) if u == uid), None)
@@ -4411,7 +4606,7 @@ async def season_signup(app, cid, uid):
     if season_active:
         season_joined.setdefault(cid, set()).add(uid)
         if uid not in season_points.get(cid, {}):
-            season_points[cid][uid] = SEASON_START_CHIPS
+            season_points[cid][uid] = _season_base(cid, uid)   # 含赛前兑换的底分
             season_games[cid][uid] = 0
             season_rebuy[cid][uid] = 0
         save_data()
@@ -4439,8 +4634,10 @@ async def season_lobby_content(app, cid):
                 f"满 {SEASON_MIN_PLAYERS} 人自动开赛，每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。\n"
                 f"已报名：{names_text}\n"
                 f"点下面按钮报名，或用 /排位报名 也能一键报名。")
+        _ex_row = [[InlineKeyboardButton("💱 积分兑换排位分", callback_data="season_exchange_info")]] if RANKED_EXCHANGE_ENABLED else []
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"📝 报名参赛（{n}/{SEASON_MIN_PLAYERS}）", callback_data="season_signup")],
+            *_ex_row,
             [InlineKeyboardButton("❌ 关闭看板", callback_data="season_lobby_close")],
         ])
     else:
@@ -4449,9 +4646,11 @@ async def season_lobby_content(app, cid):
         text = (f"🏆 <b>第{season_id}赛季「{sn}」进行中</b>\n\n"
                 f"⏳ 剩余约 {remain} 天｜上榜需≥{SEASON_MIN_GAMES}局\n"
                 f"用 /排位 开局入座；中途想加入点下面按钮。")
+        _ex_row = [[InlineKeyboardButton("💱 积分兑换排位分", callback_data="season_exchange_info")]] if RANKED_EXCHANGE_ENABLED else []
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("📝 中途报名加入", callback_data="season_signup")],
             [InlineKeyboardButton("📊 看排位榜", callback_data="season_rank_btn")],
+            *_ex_row,
             [InlineKeyboardButton("❌ 关闭看板", callback_data="season_lobby_close")],
         ])
     return text, markup
@@ -4715,6 +4914,63 @@ async def cmd_season_points(update, context):
     await send_reply(update, context, f"✅ 已为 {await get_name(context.application, uid)} {verb} {abs(amount)} 排位分，当前 {season_points[cid][uid]}。")
 
 
+def _exchange_rate_text():
+    """兑换比例文案：1:1 时显示「1 积分 = 1 排位分」。"""
+    return f"{RANKED_EXCHANGE_COST} 积分 = {RANKED_EXCHANGE_GAIN} 排位分"
+
+
+async def cmd_season_exchange(update, context):
+    """聊天积分兑换排位分（比例、开关、每日上限均可在后台「排位赛」分组调整）。"""
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "积分兑换排位分", "兑换排位", context): return
+    if not RANKED_EXCHANGE_ENABLED:
+        await send_reply(update, context, "❌ 积分兑换排位分功能未开启（管理员可在后台「排位赛」分组开启）。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    args = context.args or []
+    if not args or not args[0].isdigit() or int(args[0]) <= 0:
+        await send_reply(update, context,
+                         f"用法：/兑换排位 数量（兑换的是聊天积分，按 {_exchange_rate_text()} 折算成排位分）\n"
+                         f"例：/兑换排位 {RANKED_EXCHANGE_COST * 10} → 得到 {RANKED_EXCHANGE_GAIN * 10} 排位分")
+        return
+    cost = int(args[0])
+    if player_is_busy(cid, uid):
+        await send_reply(update, context, "⚠️ 你正在游戏中，请先结束再兑换排位分。"); return
+    if cost < RANKED_EXCHANGE_COST:
+        await send_reply(update, context, f"❌ 最少兑换 {RANKED_EXCHANGE_COST} 积分（当前比例 {_exchange_rate_text()}）。"); return
+    gain = cost * RANKED_EXCHANGE_GAIN // RANKED_EXCHANGE_COST
+    if gain <= 0:
+        await send_reply(update, context, f"❌ 兑换数量太小，至少能得到 1 排位分（比例 {_exchange_rate_text()}）。"); return
+    # 每日上限：按「消耗的聊天积分」累计，跨天自动重置（键为业务日）
+    today = business_date()
+    if RANKED_EXCHANGE_DAILY_LIMIT > 0:
+        used = season_exchange_daily[today][cid].get(uid, 0)
+        if used + cost > RANKED_EXCHANGE_DAILY_LIMIT:
+            await send_reply(update, context,
+                             f"❌ 超出每日兑换上限：今日已兑换 {used} 积分，上限 {RANKED_EXCHANGE_DAILY_LIMIT}（管理员可在后台调整）。")
+            return
+    async with user_wallet_locks([uid]):
+        if game_chips[cid][uid] < cost:
+            await send_reply(update, context, f"❌ 聊天积分不足：需要 {cost}，当前 {game_chips[cid][uid]}。"); return
+        game_chips[cid][uid] -= cost
+        # 排位分账本：赛季未开赛也允许先兑换，开赛后报名即可带入（与 /赛季分 同一容器）
+        season_points.setdefault(cid, defaultdict(int))[uid] += gain
+        # 兑换分记为「额外底分」：每日重置保留、不计入盈亏榜（避免花钱买分虚增排名）
+        season_exchange_bonus.setdefault(cid, defaultdict(int))[uid] += gain
+        season_joined.setdefault(cid, set()).add(uid)
+        if uid not in season_games.get(cid, {}):
+            season_games[cid][uid] = 0
+            season_rebuy[cid][uid] = 0
+        if RANKED_EXCHANGE_DAILY_LIMIT > 0:
+            season_exchange_daily[today][cid][uid] += cost
+        ledger_add(cid, uid, 0, cost, "兑换排位分")  # 资金流台账：聊天积分回收
+        save_data()
+        await asyncio.to_thread(force_save_now)
+    await send_reply(update, context,
+                     f"✅ 兑换成功：-{cost} 聊天积分 → +{gain} 排位分\n"
+                     f"💰 聊天积分余额 {game_chips[cid][uid]}｜🏆 当前排位分 {season_points[cid][uid]}\n"
+                     f"（比例 {_exchange_rate_text()}；兑换分算「额外底分」，每日 0 点重置后保留、不计入盈亏榜。用 /排位 开局入座）")
+
+
 async def cmd_season_help(update, context):
     if not await need_auth(update, context): return
     cid = update.effective_chat.id
@@ -4728,13 +4984,20 @@ async def cmd_season_help(update, context):
         "• /排位榜 — 看当前排名（榜尾显示你的名次）\n"
         "• /赌神 — 查看 🎰赌神 称号与历届荣誉墙\n"
         "• 大厅看板按钮：📊 看排位榜\n\n"
+        "<b>积分兑换排位分</b>\n"
+        f"• /兑换排位 数量 — 把聊天积分换成排位分（当前比例 {_exchange_rate_text()}）\n"
+        f"• 开关：{'已开启' if RANKED_EXCHANGE_ENABLED else '已关闭'}"
+        + (f"｜每人每日上限 {RANKED_EXCHANGE_DAILY_LIMIT} 积分" if RANKED_EXCHANGE_DAILY_LIMIT else "｜每日不限")
+        + "（管理员可在后台「排位赛」分组调整）\n"
+        "• 兑换来的分算「额外底分」：每日 0 点重置后保留，但不计入盈亏榜（不影响名次）\n\n"
         "<b>管理员专属</b>\n"
         "• /排位开赛 [赛季名] — 强制开赛（可自定义名，如 /排位开赛 赌神大战秋季赛）\n"
         "• /排位结束 — 提前结算并推最终榜\n\n"
         "<b>自动机制</b>\n"
         "• 每日 23:50 自动推一次排位榜\n"
         "• 开赛后第 7 天（到点后的首个午夜）自动结算，可能晚最多约 24 小时\n\n"
-        "📌 满 20 人开赛；起始 20000 分；输光可应急补分 3×2000；满 5 局才上榜；次日 0 点重置为 20000 分可继续打。\n"
+        "📌 满 20 人开赛；起始 20000 分；输光可应急补分 3×2000；满 5 局才上榜；次日 0 点重置为 20000 分（含已兑换的底分）可继续打。\n"
+        "⚙️ 排位赛的入座门槛/加注额/思考时间/等待倒计时/盲注/前注可在后台「排位赛」分组单独设置，留 0 表示沿用日常德州。\n"
         "💡 以上「排位」命令均可换「赛季」前缀，含义完全相同，如 /赛季榜 /赛季报名 /赛季开赛 /赛季结束。\n"
         "⚠️ 群里若中文命令无反应，多为 BotFather 隐私模式拦截，发 /setprivacy → Disable 即可。"
     )
@@ -4743,6 +5006,7 @@ async def cmd_season_help(update, context):
 
 async def cmd_season_play(update, context):
     if not await need_auth(update, context): return
+    if not await _game_gate(update, context, "texas", ranked=True): return
     if not await require_group_chat(update, "德州排位赛", "排位", context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     if not season_active:
@@ -4758,12 +5022,16 @@ async def cmd_season_play(update, context):
     if uid not in season_joined.get(cid, set()):
         season_joined.setdefault(cid, set()).add(uid)
         if uid not in season_points.get(cid, {}):
-            season_points[cid][uid] = SEASON_START_CHIPS
+            season_points[cid][uid] = _season_base(cid, uid)   # 含赛前兑换的底分
             season_games[cid][uid] = 0
             season_rebuy[cid][uid] = 0
         save_data()
     if season_points[cid][uid] <= 0:
         await send_reply(update, context, "❌ 你的排位分已用完，等待应急补分或下局。"); return
+    if SEASON_MIN_ENTRY_CHIPS and season_points[cid][uid] < SEASON_MIN_ENTRY_CHIPS:
+        await send_reply(update, context,
+                         f"❌ 进入排位赛至少需要 {SEASON_MIN_ENTRY_CHIPS} 排位分，你当前 {season_points[cid][uid]}。\n"
+                         f"可用 /兑换排位 数量 把聊天积分换成排位分。"); return
     game = active_poker_games.get(cid)
     if game:
         if game.season:
@@ -4774,7 +5042,10 @@ async def cmd_season_play(update, context):
             return
         else:
             await send_reply(update, context, "当前有日常德州房间，请先 /结束 后再开排位赛。"); return
-    game = PokerGame(cid, uid, current_game_mode(), season=True); game.add(uid); active_poker_games[cid] = game
+    game = PokerGame(cid, uid, current_game_mode(), season=True)
+    if not game.add(uid):  # 排位分门槛/报名状态校验失败时不要留下空房间
+        await send_reply(update, context, "❌ 无法入座排位赛（排位分不足或未报名）。"); return
+    active_poker_games[cid] = game
     msg = await safe_send(context.bot, cid, await poker_waiting_text(game, context.application), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 加入游戏", callback_data="texas_join")], [InlineKeyboardButton("❌ 终止房间", callback_data="texas_end")]]))
     if msg:
         game.game_msg_id = msg.message_id
@@ -4787,8 +5058,14 @@ async def cmd_sm(update, context):
     cid = update.effective_chat.id
     if cid in active_horse_races:
         race = active_horse_races[cid]
-        # 已有赛车：直接把当前带按钮的看板重发出来，让后发的人也能立刻看到/参与，而不是只回一句文字
+        # 已有赛车：直接回应当前进行中的这一局，绝不新开一局
         if getattr(race, "phase", "") == "betting":
+            # 防刷屏：短时间内重复发 /赛车 只回一句文字；超过冷却才重发看板（让后进群的人能看到按钮）
+            now_ts = time.time()
+            if now_ts - float(getattr(race, "panel_cd", 0) or 0) < 15:
+                await send_reply(update, context, "当前已有赛车进行中，直接点上方看板下注即可。")
+                return
+            race.panel_cd = now_ts
             msg = await safe_send(context.bot, cid, await race.view(context.application), reply_markup=race.buttons())
             if msg: race.game_msg_id = msg.message_id
         else:
@@ -5674,6 +5951,14 @@ async def on_button(update, context):
                 else:
                     await q.answer("✅ 已报名")
                 return
+            if data == "season_exchange_info":
+                # 大厅按钮：只回提示，不直接扣分（避免误触扣款，兑换走 /兑换排位 数量）
+                if not RANKED_EXCHANGE_ENABLED:
+                    await q.answer("积分兑换排位分功能未开启", show_alert=True); return
+                await q.answer(f"发「/兑换排位 数量」即可兑换\n当前比例 {_exchange_rate_text()}"
+                               + (f"\n每人每日上限 {RANKED_EXCHANGE_DAILY_LIMIT} 积分" if RANKED_EXCHANGE_DAILY_LIMIT else ""),
+                               show_alert=True)
+                return
             if data == "season_lobby_close":
                 mid = season_lobby_msg.pop(cid, None)
                 if mid: await safe_delete(context.bot, cid, mid)
@@ -5707,12 +5992,15 @@ async def on_button(update, context):
                         if uid not in season_joined.get(cid, set()):
                             season_joined.setdefault(cid, set()).add(uid)
                             if uid not in season_points.get(cid, {}):
-                                season_points[cid][uid] = SEASON_START_CHIPS
+                                season_points[cid][uid] = _season_base(cid, uid)   # 含赛前兑换的底分
                                 season_games[cid][uid] = 0
                                 season_rebuy[cid][uid] = 0
                             save_data()
                         if season_points[cid][uid] <= 0:
                             await q.answer("排位分不足，无法加入", show_alert=True); return
+                        if SEASON_MIN_ENTRY_CHIPS and season_points[cid][uid] < SEASON_MIN_ENTRY_CHIPS:
+                            await q.answer(f"进入排位赛至少需要 {SEASON_MIN_ENTRY_CHIPS} 排位分，你当前 {season_points[cid][uid]}",
+                                           show_alert=True); return
                     else:
                         wallet = game_chips
                         if wallet[cid][uid] < MIN_ENTRY_CHIPS:
@@ -5727,8 +6015,8 @@ async def on_button(update, context):
                 return
             if uid != game.current(): await q.answer("还没轮到你", show_alert=True); return
             action = {"texas_fold":"fold", "texas_check":"check", "texas_call":"call", "texas_allin":"allin"}.get(data); extra = 0
-            if data == "texas_raise_half": action, extra = "raise", max(FIXED_MIN_RAISE, game.pot // 2)
-            elif data == "texas_raise_pot": action, extra = "raise", max(FIXED_MIN_RAISE, game.pot)
+            if data == "texas_raise_half": action, extra = "raise", max(game.min_raise, game.pot // 2)
+            elif data == "texas_raise_pot": action, extra = "raise", max(game.min_raise, game.pot)
             elif data.startswith("texas_raise_"):
                 try: action, extra = "raise", int(data.rsplit("_", 1)[1])
                 except ValueError: await q.answer("无效加注额", show_alert=True); return
@@ -9222,22 +9510,16 @@ async def daily_reset_scheduler(app):
                     if poker.season and poker.phase != "waiting":
                         season_protected.update((poker.chat_id, uid) for uid in poker.players)
                 day_key = (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")
-                for cid in target_groups:  # 只重置作用群
-                    users = season_points.get(cid)
-                    if not users: continue
-                    for uid in list(users.keys()):
-                        if (cid, uid) in season_protected:
-                            continue  # 进行中排位局跳过，等结算补重置
-                        day_profit = users[uid] - SEASON_START_CHIPS
-                        if day_profit:
-                            season_profit_by_date[day_key][cid][uid] += day_profit
-                        users[uid] = SEASON_START_CHIPS
+                season_daily_refresh(day_key, target_groups, season_protected)
                 save_data()
             for cid in target_groups:
                 if cid in race_daily_stats: race_daily_stats[cid] = [0] * HORSE_COUNT
             archive_old_profit_data()
             # 积分系统：清掉前天的聊天积分（保留当天用于跨午夜），过期红包退余款
             chat_today.pop((now_bj() - timedelta(days=2)).strftime("%Y-%m-%d"), None)
+            # 兑换排位分的每日累计：只留最近两天，防长期运行后字典无限膨胀
+            for _d in [d for d in season_exchange_daily if d < (now_bj() - timedelta(days=1)).strftime("%Y-%m-%d")]:
+                season_exchange_daily.pop(_d, None)
             for pid in list(rp_packets.keys()):
                 p = rp_packets[pid]
                 if now_bj().timestamp() - p["ts"] > 86400:
@@ -9290,18 +9572,20 @@ async def leaderboard_scheduler(app):
                 lines = [f"🏆 德州当日排行榜（{date}）", "━"*14]
                 for i, (uid, amount) in enumerate(sorted(data.items(), key=lambda x:x[1], reverse=True)[:50], 1): lines.append(f"{rank_marker(i)} {await get_name(app, uid)}：{amount:+d}")
                 await safe_send_long(app.bot, cid, "\n".join(lines))
-            # 排位赛每日 23:50 推送「当日分数」（每人每天从 2W 起始，当日分即当前分）
+            # 排位赛每日 23:50 推送「当日盈亏」（当前分 - 基准分，兑换底分不计入）
             if season_active:
                 for cid in list(season_points.keys()):
                     if cid not in target_groups: continue  # 只推目标群
                     users = season_points.get(cid, {})
                     if not users: continue
-                    day_standings = sorted(users.items(), key=lambda x: (-x[1], x[0]))
-                    lines = [f"🏆 第{season_id}赛季 当日分数（每人起始 {SEASON_START_CHIPS}）", "━" * 18]
+                    # 当日盈亏 = 当前分 - (起始分+兑换底分)，与排位榜口径一致（兑换分不计入）
+                    day_rows = [(u, val - _season_base(cid, u)) for u, val in users.items()]
+                    day_standings = sorted(day_rows, key=lambda x: (-x[1], x[0]))
+                    lines = [f"🏆 第{season_id}赛季 当日盈亏榜（基准分 {SEASON_START_CHIPS}+兑换底分）", "━" * 18]
                     for i, (u, val) in enumerate(day_standings[:50], 1):
                         g = season_games[cid].get(u, 0)
                         tag = "" if g >= SEASON_MIN_GAMES else f"（{g}局·未达标）"
-                        lines.append(f"{rank_marker(i)} {await get_name(app, u, cid=cid, with_title=False)}：{val}｜{g}局{tag}")
+                        lines.append(f"{rank_marker(i)} {await get_name(app, u, cid=cid, with_title=False)}：{val:+d}｜{g}局{tag}")
                     await safe_send_long(app.bot, cid, "\n".join(lines))
             save_data()
         except Exception:
@@ -9716,7 +10000,7 @@ CMD_ALIASES = {
     # 中文命令
     "开始": cmd_start, "菜单": cmd_help, "帮助": cmd_help, "help": cmd_help,
     "德州": cmd_dz, "德州扑克": cmd_dz,
-    "赛车": cmd_sm, "sc": cmd_sm,
+    "赛车": cmd_sm, "sc": cmd_sm, "赛马": cmd_sm,
     "21点": cmd_21, "二十一点": cmd_21,
     "结束": cmd_end,
     "加积分": cmd_add, "加分": cmd_add,
@@ -9757,6 +10041,8 @@ CMD_ALIASES = {
     "我的称号": cmd_my_titles, "我的头衔": cmd_my_titles, "mytitles": cmd_my_titles,
     "佩戴": cmd_equip, "佩戴称号": cmd_equip, "equip": cmd_equip,
     "赛季分": cmd_season_points, "加赛季分": cmd_season_points, "减赛季分": cmd_season_points, "seasonpoints": cmd_season_points,
+    "兑换排位": cmd_season_exchange, "排位兑换": cmd_season_exchange, "积分换排位": cmd_season_exchange,
+    "兑换排位分": cmd_season_exchange, "seasonexchange": cmd_season_exchange,
     # 旧英文/数字别名（保留兼容，仍可用）
     "start": cmd_start, "help": cmd_help, "dz": cmd_dz, "sm": cmd_sm,
     "21": cmd_21, "end": cmd_end,
@@ -12659,14 +12945,21 @@ def main():
     else:
         logger.warning("JobQueue 不可用，自动备份未启用（需安装 python-telegram-bot[job-queue]）")
 
+    # 关键：handler 分组（PTB 语义「每个 group 内最多只有一个 handler 被调用，先匹配者 break，
+    # 但不同 group 之间都会执行」）。此前全部注册在 group 0，而 on_media 的
+    # ~TEXT & ~COMMAND 会先匹配「入群服务消息」并 break，导致注册在其后的 on_new_members_msg
+    # 永远不触发 → 普通群入群验证/硬门槛/防突袭/观察期起点全部静默失效（无报错、无日志，
+    # 用户只能看到「开关开了没用」）。
+    # 现在：group 0=文本命令与按钮，group 1=媒体类自动删除，group 2=成员/入群事件。
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^/'), route_command))
-    app.add_handler(CallbackQueryHandler(on_button)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))
-    app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_media))  # 自动删除规则中心：媒体类
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))
+    app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_media), group=1)  # 自动删除规则中心：媒体类
     # 关键：chat_member_types 必须显式传 ANY_CHAT_MEMBER（默认 -1=MY_CHAT_MEMBER 只听 bot 自身状态变化，
     # 普通新成员入群/退群触发的 chat_member 更新会被静默丢弃，调试里"最近事件"无埋点）
-    app.add_handler(ChatMemberHandler(on_member_event, chat_member_types=ChatMemberHandler.ANY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members_msg))  # 普通群入群兜底
-    app.add_handler(ChatJoinRequestHandler(on_join_request))  # 入群申请事件（群需开「申请加入」）
+    app.add_handler(ChatMemberHandler(on_member_event, chat_member_types=ChatMemberHandler.ANY_CHAT_MEMBER), group=2)
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members_msg), group=2)  # 普通群入群兜底
+    app.add_handler(ChatJoinRequestHandler(on_join_request), group=2)  # 入群申请事件（群需开「申请加入」）
     app.add_error_handler(on_app_error)  # 全局错误兜底：handler 异常不再静默
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 

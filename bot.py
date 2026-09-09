@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-10-0116"
+BOT_VERSION = "2026-09-10-0605"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -344,7 +344,7 @@ SETTINGS_FIELDS = [
     ("raid_cooldown",         "RAID_COOLDOWN",         "人墙持续秒数(到期自动解除)", "int", 60, 86400, "mod"),
     ("sep_mod_forcesub",      None, "强制订阅频道（未订阅者发言即删+提示，管理员豁免）", "sep", 0, 0, "mod"),
     ("force_sub_enabled",     "FORCE_SUB_ENABLED",     "强制订阅开关",            "bool", 0, 1, "mod"),
-    ("force_sub_channels",    "FORCE_SUB_CHANNELS",    "须订阅的频道(@用户名 或 频道id，多个逗号/回车分隔，订阅其一即可)", "names", 0, 0, "mod"),
+    ("force_sub_channels",    "FORCE_SUB_CHANNELS",    "须订阅的频道(@用户名 或 -100xxx频道id，逗号分隔，订阅其一即可；私有频道请填id，邀请链接检测不了)", "names", 0, 0, "mod"),
     ("force_sub_only_new",    "FORCE_SUB_ONLY_NEW",    "只检测新用户(入群10分钟内)", "bool", 0, 1, "mod"),
     ("force_sub_warn_seconds","FORCE_SUB_WARN_SECONDS","提示自动删除(秒,0=不删)",  "int",  0, 3600, "mod"),
     ("force_sub_warn_tpl",    "FORCE_SUB_WARN_TPL",    "订阅提示({name} {channels} {seconds})", "text", 0, 0, "mod"),
@@ -986,7 +986,7 @@ MSG_TPL_DEFAULTS = {
     "invite_rank_line_fmt": "{i}. {name}｜邀请 {count} 人",
     "invite_invalid_msg": "⚠️ {name} 的邀请链接无效，请让邀请人重新生成",
     "invite_self_msg": "😅 不能邀请自己哦",
-    "force_sub_warn_tpl": "📢 {name}，请先订阅我们的频道再发言～\n订阅后重新发一次消息即可正常聊天。\n（本提示 {seconds} 秒后自动消失）",
+    "force_sub_warn_tpl": "📢 {name}，请先订阅我们的频道再发言～\n- 加入频道：{channels}\n订阅后重新发一次消息即可正常聊天。\n（本提示 {seconds} 秒后自动消失）",
 }
 INVITE_OK_GROUP = MSG_TPL_DEFAULTS["invite_ok_group"]
 INVITE_RANK_TODAY_MSG = MSG_TPL_DEFAULTS["invite_rank_today_msg"]
@@ -6393,6 +6393,27 @@ async def on_button(update, context):
                 pass
             return
         
+        # --- 强制订阅：点「我已加入」立即复检（不等 60 秒负缓存，也不用重发消息） ---
+        if data == "fsub_recheck":
+            _fsub_ok_cache.get(cid, {}).pop(uid, None)
+            try:
+                _ok, _checked = await _fsub_probe(context, uid)
+            except Exception:
+                logger.exception("强制订阅复检异常（已吞并）")
+                _ok, _checked = False, 0
+            if _ok:
+                _fsub_ok_cache[cid][uid] = (time.time(), True)
+                try:
+                    await q.message.delete()
+                except Exception:
+                    pass
+                await q.answer("✅ 已确认订阅，现在可以正常发言啦")
+            elif _checked == 0:
+                await q.answer("⚠️ 机器人读不到该频道成员（需把机器人加入频道并设为管理员），已暂时放行", show_alert=True)
+            else:
+                await q.answer("❌ 还没检测到订阅，请先点上面的按钮加入频道", show_alert=True)
+            return
+
         # --- 21点 回调 ---
         if data.startswith("bj_"):
             game = active_blackjack_games.get(cid)
@@ -7113,30 +7134,89 @@ async def _mod_punish(context, cid, uid, action, mute_seconds, name, reason):
         logger.exception("群管处罚失败 cid=%s uid=%s action=%s（已吞并）", cid, uid, action)
 
 
+_FSUB_RE_URL = re.compile(r"(?:t\.me/|telegram\.me/)(?:s/)?([A-Za-z0-9_]{4,})")
+_FSUB_RE_HANDLE = re.compile(r"@?([A-Za-z0-9_]{4,})")
+
+
+def _fsub_parse(ch):
+    """把网页「须订阅的频道」里填的内容统一解析成 get_chat_member 能用的 key。
+
+    支持：@用户名 / 裸用户名 / t.me/用户名 / https://t.me/用户名 / -100xxx 频道 id。
+    ⚠️ 私有邀请链接（t.me/+hash、t.me/joinchat/xxx）Bot API **查不了成员状态**，返回 None；
+    调用方必须跳过该频道，绝不能把它当作「未订阅」——这正是 2026-09-10 用户报的
+    「群友订阅成功却还是被删消息」的根因（当时填的是完整链接，int() 抛异常被吞）。
+    """
+    s = str(ch or "").strip()
+    if not s:
+        return None
+    if "t.me/+" in s or "joinchat/" in s:
+        return None                      # 私有邀请链接：无法查询
+    if re.fullmatch(r"-?\d+", s):        # 纯数字 / -100xxx 频道 id
+        try:
+            return int(s)
+        except Exception:
+            return None
+    m = _FSUB_RE_URL.search(s)           # 链接形式
+    if m:
+        return "@" + m.group(1)
+    m = _FSUB_RE_HANDLE.fullmatch(s)     # @用户名 或裸用户名
+    if m:
+        return "@" + m.group(1)
+    return None
+
+
 async def _fsub_links(context):
     """把 FORCE_SUB_CHANNELS 转成 [(显示名, 链接)]：@用户名→公开 t.me 链接；数字 id→get_chat 邀请链接（缓存）。"""
     out = []
     for ch in sget("FORCE_SUB_CHANNELS"):
-        ch = str(ch).strip()
-        if not ch:
+        raw = str(ch or "").strip()
+        if not raw:
             continue
-        if ch.startswith("@"):
-            out.append((ch, f"https://t.me/{ch.lstrip('@')}"))
-        elif "t.me/" in ch:
-            out.append((f"@{ch.split('t.me/')[-1].strip('/')}", f"https://t.me/{ch.split('t.me/')[-1].strip('/')}"))
+        if raw.startswith("@"):
+            out.append((raw, f"https://t.me/{raw.lstrip('@')}"))
+        elif "t.me/" in raw:
+            _u = raw.split("t.me/")[-1].strip("/")
+            out.append((f"@{_u}" if not _u.startswith("+") else "频道", f"https://t.me/{_u}"))
         else:
             try:
-                if ch in _fsub_invite_cache:
-                    out.append((f"频道 {ch}", _fsub_invite_cache[ch]))
+                if raw in _fsub_invite_cache:
+                    out.append((f"频道 {raw}", _fsub_invite_cache[raw]))
                     continue
-                chat = await context.bot.get_chat(int(ch))
+                chat = await context.bot.get_chat(int(raw))
                 url = getattr(chat, "invite_link", None) or (f"https://t.me/{chat.username}" if getattr(chat, "username", "") else "")
                 if url:
-                    _fsub_invite_cache[ch] = url
-                    out.append((getattr(chat, "title", None) or f"频道 {ch}", url))
+                    _fsub_invite_cache[raw] = url
+                    out.append((getattr(chat, "title", None) or f"频道 {raw}", url))
             except Exception:
                 continue
     return out
+
+
+async def _fsub_probe(context, user_id):
+    """查询 user_id 是否订阅了任一 FORCE_SUB_CHANNELS。
+
+    返回 (ok, checked)：
+      ok=True  → 至少一个频道确认已订阅；
+      checked=0 → 一个频道都没查成功（配置是私有链接 / bot 不在频道 / 非管理员 / 网络异常），
+                  调用方应 fail-open 放行，避免误删已订阅的群友。
+    """
+    checked = 0
+    for ch in sget("FORCE_SUB_CHANNELS"):
+        key = _fsub_parse(ch)
+        if key is None:
+            logger.warning("强制订阅：频道配置 %r 无法解析（私有邀请链接 Bot 查不了成员，"
+                           "请改填 -100xxx 频道 id 或 @用户名）", ch)
+            continue
+        try:
+            _m = await context.bot.get_chat_member(key, user_id)
+        except Exception as e:
+            logger.warning("强制订阅：查询频道 %s 成员状态失败（需把机器人加入该频道并设为管理员）：%s", key, e)
+            continue
+        checked += 1
+        if (getattr(_m, "status", "left") in ("member", "administrator", "creator", "restricted")
+                or getattr(_m, "is_member", False)):
+            return True, checked
+    return False, checked
 
 
 async def _forcesub_enforce(update, context):
@@ -7144,6 +7224,9 @@ async def _forcesub_enforce(update, context):
 
     返回 True=已拦截（消息已处理，调用方直接 return）。管理员/群管/Bot 管理员豁免；
     已订阅判定缓存 30 分钟、未订阅缓存 60 秒（订阅后一分钟内自动放行），避免每条消息打 API。
+
+    ⚠️ fail-open（2026-09-10 修）：只有 API **明确返回**未订阅才删消息；频道配置解析不出、
+    查询抛异常（bot 不在频道 / 非管理员 / 网络抖动）一律放行——宁可漏拦也不误删已订阅的群友。
     """
     if not sget("FORCE_SUB_ENABLED") or not sget("FORCE_SUB_CHANNELS"):
         return False
@@ -7162,23 +7245,22 @@ async def _forcesub_enforce(update, context):
             return False
     now = time.time()
     _hit = _fsub_ok_cache.get(cid, {}).get(user.id)
-    if _hit and (_hit[1] and now - _hit[0] < 1800):
-        return False          # 已订阅，缓存期内直接放行
-    ok = False
-    for ch in sget("FORCE_SUB_CHANNELS"):
-        ch = str(ch).strip()
-        if not ch:
-            continue
-        try:
-            _m = await context.bot.get_chat_member(ch if ch.startswith("@") else int(ch), user.id)
-            if getattr(_m, "status", "left") in ("member", "administrator", "creator"):
-                ok = True
-                break
-        except Exception:
-            continue
-    _fsub_ok_cache[cid][user.id] = (now, ok)
-    if ok:
-        return False
+    ok = None
+    if _hit:
+        _age = now - _hit[0]
+        if _hit[1] and _age < 1800:
+            return False                 # 已订阅（30 分钟缓存）→ 直接放行
+        if not _hit[1] and _age < 60:
+            ok = False                   # 未订阅（60 秒负缓存）→ 不重复打 API
+    if ok is None:
+        ok, _checked = await _fsub_probe(context, user.id)
+        if not ok and _checked == 0:
+            # 一个频道都没查成功 → 配置/权限问题，放行避免误删（fail-open）
+            _fsub_ok_cache[cid][user.id] = (now, True)
+            return False
+        _fsub_ok_cache[cid][user.id] = (now, ok)
+        if ok:
+            return False
     # 未订阅：删消息 + 发提示（订阅其一即可；提示可自动删除）
     try:
         await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
@@ -7188,12 +7270,19 @@ async def _forcesub_enforce(update, context):
     if not (_prev and now - _prev < 60):   # 60 秒内只发一次提示，不刷屏
         try:
             links = await _fsub_links(context)
+            # 频道名做成可点蓝字（HTML 文本超链接）：点一下 Telegram 直接跳频道
+            _ch_html = "、".join(f"<a href='{html.escape(u, quote=True)}'>{html.escape(str(l))}</a>"
+                                 for l, u in links if u)
+            if not _ch_html:
+                _ch_html = "、".join(html.escape(str(c)) for c in sget("FORCE_SUB_CHANNELS"))
             txt = _fmt_tpl("force_sub_warn_tpl",
-                           name=user_names.get(user.id) or user.first_name or f"用户{user.id}",
-                           channels="、".join(l for l, _u in links) or "、".join(str(c) for c in sget("FORCE_SUB_CHANNELS")),
+                           name=html.escape(user_names.get(user.id) or user.first_name or f"用户{user.id}"),
+                           channels=_ch_html,
                            seconds=sget("FORCE_SUB_WARN_SECONDS"))
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"📢 订阅 {l}", url=u)] for l, u in links]) or None
-            sent = await context.bot.send_message(cid, txt, reply_markup=kb)
+            _rows = [[InlineKeyboardButton(f"📢 加入 {l}", url=u)] for l, u in links if u]
+            _rows.append([InlineKeyboardButton("✅ 我已加入", callback_data="fsub_recheck")])
+            sent = await context.bot.send_message(cid, txt, parse_mode="HTML",
+                                                  reply_markup=InlineKeyboardMarkup(_rows))
             _fsub_ok_cache[cid][f"warned:{user.id}"] = now
             if sget("FORCE_SUB_WARN_SECONDS") > 0:
                 async def _del_warn():
@@ -8740,31 +8829,28 @@ async def cmd_points_redeem(update, context):
     if not items:
         await send_reply(update, context, "🎁 本群暂无可兑换商品，管理员可在后台「积分系统 → 积分兑换」给本群上架。"); return
     args = context.args or []
-    if not args:  # 货架卡(B2)：正文逐商品小卡，底部「编号 · 立即兑换」整行深链按钮（点蓝色跳私聊确认）
-        _cn = chat_name_cache.get(cid) or ""
-        mins = max(1, MALL_LIST_DELETE_SECONDS // 60)
-        lines = [f"🎁 积分兑换 · {_cn}" if _cn else "🎁 积分兑换",
-                 f"💡 点下方「编号 · 立即兑换」跳转机器人私聊确认（{mins} 分钟后自动删除）；也可发「{REDEEM_CMD} 编号/名称」", ""]
+    if not args:  # 货架卡：正文逐商品小卡 + 行内蓝色「立即兑换」文本超链接（点蓝字跳私聊确认）
+        lines = ["🎁 <b>积分兑换</b>", ""]
         rows = []
         for i, x in enumerate(items, 1):
             price = int(x.get("price", 0) or 0)
             left = int(x.get("left", 0) or 0)
             left_txt = "不限" if left <= 0 else str(left)
-            lines.append(f"<b>{i}.</b> {html.escape(x['name'])}")
-            lines.append(f"　{price} 积分 · 剩余 {left_txt}")
+            lines.append(f"🟡 <b>{html.escape(x['name'])}</b>")
             desc = str(x.get("desc", "") or "").strip()
             if desc and len(desc) <= 60:
-                lines.append(f"　<i>{html.escape(desc)}</i>")
-            lines.append("")
+                lines.append(f"<i>{html.escape(desc)}</i>")
+            meta = f"{price} 积分 剩余 {left_txt}"
             url = _deep_buy_url("redeem", cid, i)
             if url:
-                # 竞品式：URL 按钮 → Telegram 蓝色字体 → 点了打开 bot 私聊，机器人回「是否兑换/积分不足」
-                rows.append([InlineKeyboardButton(f"{i}. 立即兑换", url=url)])
+                lines.append(f"└ {meta} <a href='{html.escape(url, quote=True)}'>立即兑换</a>")
             else:
-                # 启动早期/无用户名兜底：仍群内直兑（回调），功能不中断
+                # 启动早期/无 bot 用户名 → 没有可用深链，退回底部按钮直兑
+                lines.append(f"└ {meta}")
                 rows.append([InlineKeyboardButton(f"{i}. 立即兑换", callback_data=f"redeem_buy_{i}")])
+            lines.append("")
         msg = await safe_send(context.bot, cid, "\n".join(lines),
-                              reply_markup=InlineKeyboardMarkup(rows))
+                              reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
         if msg and MALL_LIST_DELETE_SECONDS > 0:
             schedule_delete(context.application, cid, msg, MALL_LIST_DELETE_SECONDS)
         return
@@ -8781,28 +8867,34 @@ async def cmd_points_redeem(update, context):
         await send_reply(update, context, err)
 
 def _mall_panel(page, items, cid):
-    """商城货架卡（B2）：正文逐商品小卡 + 底部「编号 · 立即兑换」深链按钮（售罄置灰）。
-    返回 (text, rows)；cmd_mall 首屏与 mall_page_ 翻页共用，保证样式一致。"""
+    """商城货架卡：正文逐商品小卡 + 行内蓝色「立即兑换」文本超链接（售罄置灰）。
+    返回 (text, rows)；cmd_mall 首屏与 mall_page_ 翻页共用，保证样式一致。
+
+    样式对齐用户 2026-09-10 指定截图：商品名 + 「└ 价格 积分 剩余 N 立即兑换(蓝字)」，
+    底部「第 x/y 页」；不再每商品占一行按钮（按钮只留翻页）。
+    """
     pages = max(1, (len(items) + sget("MALL_PAGE_SIZE") - 1) // sget("MALL_PAGE_SIZE"))
     page = max(1, min(page, pages))
     chunk = items[(page - 1) * sget("MALL_PAGE_SIZE"): page * sget("MALL_PAGE_SIZE")]
-    lines = [f"🛒 积分商城（{page}/{pages} 页）",
-             f"💡 点下方「编号 · 立即兑换」跳转机器人私聊确认（{max(1, MALL_LIST_DELETE_SECONDS // 60)} 分钟后自动删除）", ""]
+    lines = ["🛒 <b>积分商城</b>", ""]
     rows = []
     for i, item in enumerate(chunk, (page - 1) * sget("MALL_PAGE_SIZE") + 1):
         stk = item.get("stock")
         sold_out = isinstance(stk, int) and stk <= 0
-        lines.append(f"<b>{i}.</b> {html.escape(item['name'])}")
-        meta = f"{_mall_price(item)} 积分"
-        meta += " · 已售罄" if sold_out else (" · 余量不限" if not isinstance(stk, int) else f" · 余 {stk}")
-        lines.append(f"　{meta}")
-        lines.append("")
+        left_txt = "不限" if not isinstance(stk, int) else str(stk)
+        lines.append(f"🟡 <b>{html.escape(item['name'])}</b>")
+        meta = f"{_mall_price(item)} 积分 剩余 {left_txt}"
+        url = _deep_buy_url("mall", cid, i)
         if sold_out:
-            rows.append([InlineKeyboardButton(f"{i}. 已售罄", callback_data="noop")])
+            lines.append(f"└ {meta} <s>已售罄</s>")
+        elif url:
+            lines.append(f"└ {meta} <a href='{html.escape(url, quote=True)}'>立即兑换</a>")
         else:
-            url = _deep_buy_url("mall", cid, i)
-            rows.append([InlineKeyboardButton(f"{i}. 立即兑换", url=url)] if url
-                        else [InlineKeyboardButton(f"{i}. 立即兑换", callback_data=f"mall_buy_{i}")])
+            # 启动早期/无 bot 用户名 → 没有可用深链，退回底部按钮直兑
+            lines.append(f"└ {meta}")
+            rows.append([InlineKeyboardButton(f"{i}. 立即兑换", callback_data=f"mall_buy_{i}")])
+        lines.append("")
+    lines.append(f"第 {page}/{pages} 页")
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton("⬅ 上一页", callback_data=f"mall_page_{page-1}"))

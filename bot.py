@@ -3,7 +3,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-2130"
+BOT_VERSION = "2026-09-09-2354"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -172,6 +172,7 @@ SUBPAGES = {
         ("rule",     "积分规则"),
         ("rp",       "积分红包"),
         ("level",    "积分等级"),
+        ("levelguard", "等级消息管控"),
         ("inherit",  "积分继承"),
         ("redeem",   "积分兑换"),
         ("mall",     "积分商城"),
@@ -383,6 +384,11 @@ SETTINGS_FIELDS = [
     ("chat_chars_per",          "CHAT_CHARS_PER",          "每满N个字符记分",           "int",   1,   200,     "points/set"),
     ("chat_reward",             "CHAT_REWARD",             "每满N字符记几分",           "int",   1,   1000,    "points/set"),
     ("chat_daily_cap",          "CHAT_DAILY_CAP",          "聊天积分每日上限(0=不限)",  "int",   0,   1000000, "points/cap"),
+    # ===== 有效发言判定（2026-09-09 用户规则：正常讨论才计分） =====
+    ("chat_min_len",            "CHAT_MIN_LEN",            "有效发言最少字数(低于不计分)", "int", 1, 200, "points/cap"),
+    ("chat_junk_words",         "CHAT_JUNK_WORDS",         "无意义词(纯这些词的消息不计分)", "names", 0, 0, "points/cap"),
+    ("chat_dup_n",              "CHAT_DUP_N",              "窗口内同内容达N条不计分(0=不查重)", "int", 0, 20, "points/cap"),
+    ("chat_dup_window",         "CHAT_DUP_WINDOW",         "重复内容判定窗口(秒)",      "int",   10,  86400,   "points/cap"),
     ("sign_enabled",            "SIGN_ENABLED",            "每日签到开关",              "bool",  0,   1,       "points/sign"),
     ("sign_base_reward",        "SIGN_BASE_REWARD",        "签到基础奖励",              "int",   0,   1000000, "points/sign"),
     ("sign_streak_bonus",       "SIGN_STREAK_BONUS",       "连续签到满7天额外奖励",     "int",   0,   1000000, "points/sign"),
@@ -397,10 +403,23 @@ SETTINGS_FIELDS = [
     ("rp_msg_poor",             "RP_MSG_POOR",             "发红包积分不足提示",        "text",  0,   0,       "points/rp"),
     ("rp_msg_target",           "RP_MSG_TARGET",           "专属红包非目标提示",        "text",  0,   0,       "points/rp"),
     ("rp_msg_log",              "RP_MSG_LOG",              "拼手气日志(每行,{rank}=名次)", "text", 0, 0,       "points/rp"),
-    ("level_notify_enabled",    "LEVEL_NOTIFY_ENABLED",    "等级升级群内通知开关",      "bool",  0,   1,       "points/level"),
+    ("level_notify_enabled",    "LEVEL_NOTIFY_ENABLED",    "用户升级通知开关",          "bool",  0,   1,       "points/level"),
+    ("level_enabled",           "LEVEL_ENABLED",           "积分等级系统开关",          "bool",  0,   1,       "points/level"),
+    ("level_allow_demote",      "LEVEL_ALLOW_DEMOTE",      "积分不足是否允许降级",      "bool",  0,   1,       "points/level"),
+    ("level_sync_tag",          "LEVEL_SYNC_TAG",          "积分称号同步成员标签开关",  "bool",  0,   1,       "points/level"),
     ("level_up_msg_tpl",        "LEVEL_UP_MSG_TPL",        "用户升级通知",              "text",  0,   0,       "points/level"),
-    ("level_down_msg_tpl",      "LEVEL_DOWN_MSG_TPL",      "用户降级通知(已弃用:等级只升不降)", "text",  0,   0,       "points/level"),
+    ("level_down_notify_enabled", "LEVEL_DOWN_NOTIFY_ENABLED", "用户降级通知开关",      "bool",  0,   1,       "points/level"),
+    ("level_down_msg_tpl",      "LEVEL_DOWN_MSG_TPL",      "用户降级通知",              "text",  0,   0,       "points/level"),
+    ("level_query_msg_tpl",     "LEVEL_QUERY_MSG_TPL",     "用户查询等级消息",          "text",  0,   0,       "points/level"),
+    ("level_query_none_tpl",    "LEVEL_QUERY_NONE_TPL",    "用户查询等级无规则提示",    "text",  0,   0,       "points/level"),
     ("point_levels",            "POINT_LEVELS",            "积分等级表",               "levels", 0, 0,      "points/level_hidden"),
+    ("level_msg_guard_enabled", "LEVEL_MSG_GUARD_ENABLED", "积分等级权限(等级消息管控)","bool",  0,   1,       "points/levelguard"),
+    ("level_msg_warn_tpl",      "LEVEL_MSG_WARN_TPL",      "等级消息违规提示",          "text",  0,   0,       "points/levelguard"),
+    ("level_msg_window",        "LEVEL_MSG_WINDOW",        "违规窗口时间(秒)",          "int",   1,   3600,    "points/levelguard"),
+    ("level_msg_max_hits",      "LEVEL_MSG_MAX_HITS",      "窗口违规次数",              "int",   1,   100,     "points/levelguard"),
+    ("level_msg_punish",        "LEVEL_MSG_PUNISH",        "频繁违规惩罚类型(0=只提醒 1=禁言 2=踢出)", "int", 0, 2, "points/levelguard"),
+    ("level_msg_mute_seconds",  "LEVEL_MSG_MUTE_SECONDS",  "违规后禁言(秒 0不禁言 小于30秒永久)", "int", 0, 86400, "points/levelguard"),
+    ("level_msg_mute_tpl",      "LEVEL_MSG_MUTE_TPL",      "禁言提示消息",              "text",  0,   0,       "points/levelguard"),
     ("mall_items",              "MALL_ITEMS",              "商城商品表",               "items", 0, 0,       "points/mall_hidden"),
     ("mall_enabled",            "MALL_ENABLED",            "开启积分商城",              "bool",  0,   1,       "points/mall"),
     ("mall_page_size",          "MALL_PAGE_SIZE",          "商城列表每页商品数",        "int",   1,   50,      "points/mall"),
@@ -441,6 +460,10 @@ SETTINGS_FIELDS = [
     ("invite_notify",           "INVITE_NOTIFY",           "邀请人私聊通知开关",        "bool",  0,   1,       "invite/config"),
     ("invite_reward",           "INVITE_REWARD",           "邀请奖励(积分/合格1人)",     "int",   0,   1000000, "invite/config"),
     ("invite_reward_times",     "INVITE_REWARD_TIMES",     "每人最多发放奖励次数",      "int",   1,   10000,   "invite/config"),
+    ("invite_daily_cap_times",  "INVITE_DAILY_CAP_TIMES",  "每人每日拉新人数上限(0=不限)", "int", 0,   1000,    "invite/config"),
+    ("invite_daily_cap_points", "INVITE_DAILY_CAP_POINTS", "每人每日拉新积分上限(0=不限)", "int", 0,   1000000, "invite/config"),
+    ("newbie_reward_enabled",   "NEWBIE_REWARD_ENABLED",   "新人欢迎奖励开关(首次发言发)", "bool", 0, 1,      "invite/config"),
+    ("newbie_reward",           "NEWBIE_REWARD",           "新人欢迎奖励积分",          "int",   0,   1000000, "invite/config"),
     ("invite_rank_admin_only",  "INVITE_RANK_ADMIN_ONLY",  "排行仅管理员可查开关",      "bool",  0,   1,       "invite/config"),
     # （2026-09-08 去重移除：今日/本月/总邀请排行指令三字段与「命令管理」页重复，
     #   触发词改由别名层统一管理：今日邀请排行/本月邀请排行/总邀请排行 照常可用）
@@ -509,6 +532,11 @@ CHAT_ENABLED = 1
 CHAT_CHARS_PER = 5
 CHAT_REWARD = 1
 CHAT_DAILY_CAP = 500
+# 有效发言判定（2026-09-09 用户规则：正常讨论才计分，无意义/重复灌水不计）
+CHAT_MIN_LEN = 4            # 消息最少字数（低于此不计分）
+CHAT_JUNK_WORDS = []        # 无意义词黑名单（整条消息由这些词构成则不计分）
+CHAT_DUP_WINDOW = 300       # 重复内容判定窗口（秒）
+CHAT_DUP_N = 2              # 窗口内同内容达到 N 条即视为灌水，不再计分
 POINTS_DELETE_SECONDS = 30
 REPLY_DELETE_SECONDS = 30   # 查询类命令的 bot 回复自动删除（0=不删）
 SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
@@ -598,6 +626,12 @@ INVITE_ENABLED = 1          # 邀请系统总开关
 INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
 INVITE_REWARD = 50          # 每合格 1 人奖励积分（达到质量要求才发）
 INVITE_REWARD_TIMES = 10    # 单邀请人最多发放奖励次数（超额合格不再发，防白嫖）
+# 每日拉新上限（2026-09-09 用户规则：单人每日最多 6 人 / 300 分，避免诱导乱拉人）
+INVITE_DAILY_CAP_TIMES = 6      # 单人每日最多发放奖励的次数（0=不限）
+INVITE_DAILY_CAP_POINTS = 300   # 单人每日拉新积分上限（0=不限）
+# 新人欢迎奖励（2026-09-09 用户规则：新人完成入群审核 +200，帮助其有基础分）
+NEWBIE_REWARD_ENABLED = 0   # 新人欢迎奖励开关
+NEWBIE_REWARD = 200         # 新人首次发言奖励积分
 # 归因策略（2026-09-08 二次改：申请制链接）：实测 chat_member 进群事件的 invite_link 字段
 # 经常为空（直链/主链/时序都踩过），导致归因恒 0。而 chat_join_request 事件由 API 保证携带
 # invite_link → /link 改发「申请制链接」（creates_join_request=True）：点链接 → 申请（带链接
@@ -643,16 +677,29 @@ WELCOME_ENABLED = 0         # 入群欢迎开关（1=开启）
 WELCOME_TPL = "🎉 欢迎 {name} 加入本群！\n积分游戏请在群内发送 /start 查看玩法。"
 REDPACKET_ENABLED = 1
 POINT_LEVELS = [
-    {"name": "练气期", "value": 0},
-    {"name": "筑基期", "value": 2000},
-    {"name": "金丹期", "value": 5000},
-    {"name": "元婴期", "value": 12000},
-    {"name": "化神期", "value": 30000},
-    {"name": "炼虚期", "value": 80000},
-    {"name": "合体期", "value": 200000},
-    {"name": "大乘期", "value": 500000},
-    {"name": "渡劫期", "value": 1200000},
-    {"name": "真仙", "value": 3000000},
+    # 2026-09-09 用户截图口径：L1~L20 对应 100~20000 分
+    # 权限阶梯：L1 只能文字 → L3 起可发贴纸 → L5 起可发图/视频 → L8 起可发音频
+    #          → L13 起可发链接 → L18 起可转发/编辑（每级可在网页单独改）
+    {"name": "L1",  "value": 100,   "perms": "text",                                          "on": 1},
+    {"name": "L2",  "value": 200,   "perms": "text",                                          "on": 1},
+    {"name": "L3",  "value": 350,   "perms": "text,sticker",                                  "on": 1},
+    {"name": "L4",  "value": 550,   "perms": "text,sticker",                                  "on": 1},
+    {"name": "L5",  "value": 800,   "perms": "text,sticker,photo,video",                      "on": 1},
+    {"name": "L6",  "value": 1100,  "perms": "text,sticker,photo,video",                      "on": 1},
+    {"name": "L7",  "value": 1450,  "perms": "text,sticker,photo,video",                      "on": 1},
+    {"name": "L8",  "value": 1850,  "perms": "text,sticker,photo,video,audio",                "on": 1},
+    {"name": "L9",  "value": 2300,  "perms": "text,sticker,photo,video,audio",                "on": 1},
+    {"name": "L10", "value": 2800,  "perms": "text,sticker,photo,video,audio",                "on": 1},
+    {"name": "L11", "value": 3400,  "perms": "text,sticker,photo,video,audio",                "on": 1},
+    {"name": "L12", "value": 4100,  "perms": "text,sticker,photo,video,audio",                "on": 1},
+    {"name": "L13", "value": 4900,  "perms": "text,sticker,photo,video,audio,link",           "on": 1},
+    {"name": "L14", "value": 5800,  "perms": "text,sticker,photo,video,audio,link",           "on": 1},
+    {"name": "L15", "value": 6800,  "perms": "text,sticker,photo,video,audio,link",           "on": 1},
+    {"name": "L16", "value": 8000,  "perms": "text,sticker,photo,video,audio,link",           "on": 1},
+    {"name": "L17", "value": 9500,  "perms": "text,sticker,photo,video,audio,link",           "on": 1},
+    {"name": "L18", "value": 12000, "perms": "text,sticker,photo,video,audio,link,forward",   "on": 1},
+    {"name": "L19", "value": 15000, "perms": "text,sticker,photo,video,audio,link,forward",   "on": 1},
+    {"name": "L20", "value": 20000, "perms": "text,sticker,photo,video,audio,forward,link,edit", "on": 1},
 ]
 MALL_ITEMS = []  # [{"name": 商品名, "value": 价格}]
 INHERIT_ENABLED = 1
@@ -676,6 +723,35 @@ MALL_ENABLED = 1            # 积分商城开关
 MALL_PAGE_SIZE = 10         # 商城列表每页商品数
 MALL_LIST_DELETE_SECONDS = 300  # 兑换/商城列表消息自动删除秒数（5 分钟；按钮要活所以不能 30 秒太短；0=不删）
 LEVEL_NOTIFY_ENABLED = 1    # 等级升降群内通知开关
+LEVEL_ENABLED = 1           # 积分等级系统总开关（2026-09-09 用户截图「积分等级系统开关」）
+LEVEL_ALLOW_DEMOTE = 0      # 积分不足是否允许降级（用户截图，默认否）
+LEVEL_SYNC_TAG = 1          # 积分称号同步成员标签开关（用户截图）
+LEVEL_MSG_GUARD_ENABLED = 1 # 等级消息管控总开关（按等级限制可发的消息类型）
+LEVEL_MSG_WARN_TPL = ("⚠️ {name}，你当前等级「{level}」还不能发送{kind}。\n"
+                      "多发消息或参与游戏升级后即可解锁。")
+LEVEL_MSG_MUTE_TPL = "🔇 {name} 因频繁发送超出等级权限的消息，已被禁言 {seconds} 秒。"
+LEVEL_MSG_WINDOW = 10       # 违规窗口（秒）
+LEVEL_MSG_MAX_HITS = 2      # 窗口内违规次数达此值触发惩罚
+LEVEL_MSG_PUNISH = 1        # 频繁违规惩罚：0=只提醒 1=禁言 2=踢出
+LEVEL_MSG_MUTE_SECONDS = 60 # 违规后禁言秒数（0=不禁言；小于30视为永久）
+LEVEL_QUERY_NONE_TPL = "ℹ️ 积分等级未配置（后台「积分系统 → 积分等级」添加）。"
+LEVEL_DOWN_NOTIFY_ENABLED = 1   # 用户降级通知开关（用户截图）
+LEVEL_DOWN_MSG_TPL_DEFAULT = "📉 {name} 降级到「{level}」。\n💰 当前积分：{balance}"
+# 等级可授权的消息类型（键=存储值，值=显示名）。顺序即网页勾选顺序
+LEVEL_PERM_OPTIONS = [
+    ("text",    "允许发送文字（纯文字，无媒体、非转发）"),
+    ("photo",   "允许发送图片"),
+    ("video",   "允许发送视频"),
+    ("audio",   "允许发送音频"),
+    ("sticker", "允许发送贴纸"),
+    ("forward", "允许转发消息"),
+    ("link",    "允许发送含链接的消息"),
+    ("edit",    "允许编辑消息"),
+]
+LEVEL_PERM_NAMES = {k: v.split("（")[0].replace("允许发送", "").replace("允许转发", "转发").replace("允许编辑", "编辑")
+                    for k, v in LEVEL_PERM_OPTIONS}
+LEVEL_PERM_DEFAULT = ",".join(k for k, _v in LEVEL_PERM_OPTIONS)   # 旧数据默认全放行
+level_msg_violations = {}   # (cid, uid) -> [违规时间戳...]，等级消息越权计数（窗口内）
 LEVEL_CMD = "我的等级"
 RANK_1_EMOJI = "🥇"
 RANK_2_EMOJI = "🥈"
@@ -696,6 +772,13 @@ MSG_TPL_DEFAULTS = {
     "rp_msg_log": "{rank} {name}：{amount} 积分",
     "level_up_msg_tpl": "🎉 恭喜 {name} 升级「{level}」！\n💰 当前积分：{balance}",
     "level_down_msg_tpl": "📉 {name} 降级到「{level}」。\n💰 当前积分：{balance}",
+    "level_query_msg_tpl": ("🎖 {name} 的等级：{level}\n"
+                            "💰 当前积分：{balance}\n"
+                            "{base_line}{next_line}"),
+    "level_query_none_tpl": "ℹ️ 积分等级未配置（后台「积分系统 → 积分等级」添加）。",
+    "level_msg_warn_tpl": ("⚠️ {name}，你当前等级「{level}」还不能发送{kind}。\n"
+                           "多发消息或参与游戏升级后即可解锁。"),
+    "level_msg_mute_tpl": "🔇 {name} 因频繁发送超出等级权限的消息，已被禁言 {seconds} 秒。",
     "mall_msg_buy": "🛍 购买成功：{item}（-{price} 积分）\n💰 余额 {balance}\n管理员会尽快处理发货。",
     "mall_msg_empty": "🛒 商城暂无商品，管理员可在后台上架。",
     "inherit_msg_ok": "✅ {name} → {target}：{amount} 积分{fee}\n💰 对方到账 {recv}｜你当前 {balance}",
@@ -729,6 +812,7 @@ RP_MSG_TARGET = MSG_TPL_DEFAULTS["rp_msg_target"]
 RP_MSG_LOG = MSG_TPL_DEFAULTS["rp_msg_log"]
 LEVEL_UP_MSG_TPL = MSG_TPL_DEFAULTS["level_up_msg_tpl"]
 LEVEL_DOWN_MSG_TPL = MSG_TPL_DEFAULTS["level_down_msg_tpl"]
+LEVEL_QUERY_MSG_TPL = MSG_TPL_DEFAULTS["level_query_msg_tpl"]
 MALL_MSG_BUY = MSG_TPL_DEFAULTS["mall_msg_buy"]
 MALL_MSG_EMPTY = MSG_TPL_DEFAULTS["mall_msg_empty"]
 INHERIT_MSG_OK = MSG_TPL_DEFAULTS["inherit_msg_ok"]
@@ -750,6 +834,10 @@ def _fmt_tpl(key, **kw):
 # 积分系统持久化数据（与主数据同一套脏标记/写盘/备份机制）
 sign_data = defaultdict(lambda: defaultdict(dict))   # sign_data[cid][uid] = {"last": "YYYY-MM-DD", "streak": n}
 chat_today = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # chat_today[date][cid][uid] = 当日聊天已得积分
+newbie_rewarded = {}                                 # "cid:uid" -> True 新人欢迎奖励已发放（防重复）
+chat_dup_hist = {}                                   # (cid,uid,内容归一化) -> [ts,...] 有效发言查重用
+invite_daily = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+# invite_daily[date][cid][inviter] = {"times": 已发奖次数, "points": 已发奖积分}（每日拉新上限用）
 mall_orders = []                                     # [{"ts","cid","uid","name","item","price"}]
 chat_rules = []                                      # 阿福式聊天积分规则 [{"match","points","on"}] 命中即停；空=走每N字符旧规则
 buy_packages = []                                    # 购买积分套餐 [{"name","cny","points","sort","on"}]
@@ -1014,6 +1102,31 @@ def apply_settings(cfg: dict):
             continue
         raw = cfg[key]
         if isinstance(raw, (list, tuple)):
+            # 富结构直传（网页保存的等级表含 perms/on）：原样收下，只做字段校验
+            if ftype == "levels" and raw and all(isinstance(x, dict) for x in raw):
+                parsed, ok = [], True
+                for it in raw:
+                    name = str(it.get("name", "")).strip()[:12]
+                    if not name or any(ch in name for ch in "<>&"):
+                        ok = False; break
+                    try:
+                        v = int(float(it.get("value", 0) or 0))
+                    except (TypeError, ValueError):
+                        ok = False; break
+                    if not (0 <= v <= 10000000):
+                        ok = False; break
+                    item = {"name": name, "value": v}
+                    if "perms" in it:
+                        item["perms"] = str(it.get("perms") or "")
+                    if "on" in it:
+                        item["on"] = it.get("on")
+                    parsed.append(item)
+                if ok and parsed and len(parsed) <= 30:
+                    parsed.sort(key=lambda x: x["value"])
+                    globals()[gname] = parsed
+                    _normalize_levels()
+                    applied[key] = parsed
+                continue
             lines = raw
         else:
             lines = str(raw).replace("：", ":").splitlines()
@@ -1036,6 +1149,8 @@ def apply_settings(cfg: dict):
         if ok and parsed and len(parsed) <= 30:
             parsed.sort(key=lambda x: x["value"])
             globals()[gname] = parsed
+            if ftype == "levels":
+                _normalize_levels()   # 纯文本格式（名称:数值）也要补 perms/on
             applied[key] = parsed
         elif ok and not parsed and ftype == "items":
             globals()[gname] = []  # 商品表允许清空
@@ -1184,6 +1299,7 @@ def load_settings():
             v = payload.get(key)
             if isinstance(v, list):
                 gl.clear(); gl.extend(x for x in v if isinstance(x, dict))
+        _normalize_levels()   # 旧存档等级表补 perms/on（幂等）
         # 4 个调度任务的作用对象
         st = payload.get("schedule_targets") or {}
         if isinstance(st, dict):
@@ -1476,6 +1592,9 @@ def force_save_now():
                 "user_names": {str(uid): n for uid, n in user_names.items()},
                 "sign_data": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in sign_data.items()},
                 "chat_today": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in chats.items()} for date, chats in chat_today.items()},
+                "newbie_rewarded": {k: 1 for k in newbie_rewarded},
+                "invite_daily": {date: {str(cid): {str(u): dict(v) for u, v in us.items()}
+                                        for cid, us in cs.items()} for date, cs in invite_daily.items()},
                 "mall_orders": mall_orders[-200:],
                 "guesses": {str(cid): {"q": g["q"], "a": g["a"], "b": g["b"], "end_ts": g["end_ts"],
                                        "locked": bool(g.get("locked")), "msg_id": g.get("msg_id"),
@@ -1684,6 +1803,15 @@ def load_data():
             for cid, users in chats.items():
                 for uid, v in users.items():
                     chat_today[str(date)][int(cid)][int(uid)] = int(v)
+        newbie_rewarded.clear()
+        for k in (data.get("newbie_rewarded") or {}):
+            newbie_rewarded[str(k)] = True
+        invite_daily.clear()
+        for date, cs in (data.get("invite_daily") or {}).items():
+            for cid, us in cs.items():
+                for u, v in us.items():
+                    invite_daily[str(date)][int(cid)][int(u)] = {
+                        "times": int((v or {}).get("times", 0)), "points": int((v or {}).get("points", 0))}
         mall_orders.clear()
         mall_orders.extend(data.get("mall_orders", [])[-200:])
         guesses.clear()
@@ -5253,7 +5381,7 @@ def _invite_progress_text(uid, cid, my_name, cname):
     recs = [r for r in invite_records.values()
             if r.get("inviter") == uid and (cid is None or r.get("cid") == cid)]
     counted = len(recs)
-    qualified = sum(1 for r in recs if _rec_qualified(r) and not _rec_rejected(r))
+    qualified = sum(1 for r in recs if _rec_ok(r))
     rejected = sum(1 for r in recs if _rec_rejected(r))
     awarded = sum(1 for r in recs if _rec_awarded(r))
     req = []
@@ -5958,7 +6086,17 @@ async def on_button(update, context):
                 await q.answer("❌ 这不是你的验证按钮", show_alert=True); return
             rec_v = join_verify_pending.get(f"{cid_v}:{uid_v}")
             if not rec_v:
-                await q.answer("✅ 你已通过验证", show_alert=False); return
+                # 修复（2026-09-09）：pending 丢失（重部署后存档未同步/记录被清）时，
+                # 人可能仍处于验证禁言状态。只说「已通过验证」却不解禁 = 用户永远发不了言。
+                # 这里幂等兜底解除限制（本来能发言时重复设置也无害）。
+                try:
+                    await context.bot.restrict_chat_member(
+                        cid_v, uid_v, permissions=ChatPermissions(
+                            can_send_messages=True, can_send_other_messages=True,
+                            can_add_web_page_previews=True, can_send_polls=True, can_invite_users=True))
+                except Exception:
+                    logger.exception("入群验证：pending 缺失时解除限制失败 cid=%s uid=%s", cid_v, uid_v)
+                await q.answer("✅ 你已通过验证，可以发言了", show_alert=False); return
             name_v = str(rec_v.get("name") or q.from_user.first_name or f"用户{uid_v}")
             ans_v = rec_v.get("ans")
             if ans_v is not None and not str(pick).strip():
@@ -6576,6 +6714,8 @@ async def _autodel_enforce(update, context):
             return False
     hit = _autodel_text_hit(message, message.text or message.caption or "") or _autodel_media_hit(message)
     if hit:
+        if hit == "link" and not is_svc and user:
+            _invite_flag_ad(update.effective_chat.id, user.id, "发链接/广告")  # 风控连坐
         delay = int(AUTODEL_MEDIA_SECONDS if is_svc or hit in (
             "photo", "video", "sticker", "gif", "voice", "contact", "document", "archive", "executable", "service"
         ) else AUTODEL_TEXT_SECONDS)
@@ -6699,6 +6839,7 @@ async def _sensitive_enforce(update, context):
     if SENSITIVE_ACTION:
         await _mod_punish(context, cid, user.id, SENSITIVE_ACTION, SENSITIVE_MUTE_SECONDS,
                           user.first_name or f"用户{user.id}", "敏感词")
+    _invite_flag_ad(cid, user.id, "敏感词")   # 风控连坐：被邀请人发广告 → 邀请人不再计合格
     return True
 
 async def _mod_punish(context, cid, uid, action, mute_seconds, name, reason):
@@ -6922,6 +7063,17 @@ async def _join_verify_start(context, cid, uid, name):
     if not mid:
         # 验证消息没发出去 → 不登记。否则用户看不到题目却会被超时禁言/踢出（静默处罚）。
         logger.warning("入群验证：验证消息未能发出，跳过登记 cid=%s uid=%s", cid, uid)
+        if mode != 1:
+            # 修复（2026-09-09）：上面已经禁言了，消息却发不出去 → 必须撤销禁言，
+            # 否则新人既看不到题目、又永远发不了言（用户报障「发不了言、找不到验证」）。
+            try:
+                await context.bot.restrict_chat_member(
+                    cid, uid, permissions=ChatPermissions(
+                        can_send_messages=True, can_send_other_messages=True,
+                        can_add_web_page_previews=True, can_send_polls=True, can_invite_users=True))
+                logger.info("入群验证：已撤销禁言 cid=%s uid=%s", cid, uid)
+            except Exception:
+                logger.exception("入群验证：撤销禁言失败 cid=%s uid=%s", cid, uid)
         return
     rec = {"ts": time.time(), "msg_id": mid, "name": str(name), "mode": mode}
     if mode in (0, 1):
@@ -6931,14 +7083,29 @@ async def _join_verify_start(context, cid, uid, name):
     join_verify_pending[key] = rec
 
 async def _jv_wrong_hit(context, cid, uid, name, rec):
-    """记一次验证答错；达到上限按超时档处理。返回 (累计错次, 是否已达上限)。"""
+    """记一次验证答错；达到上限按超时档处理。返回 (累计错次, 是否已达上限)。
+
+    修复（2026-09-09 用户报障「新人被永久禁言、找不到验证」）：
+    此前达上限一律 pop 掉 pending + 按档处罚。action=0/1（提醒/禁言）时人还在群里，
+    pending 一清 → 再点正确答案只会收到「✅ 你已通过验证」而**不会解除禁言**，
+    巡检也扫不到 → **永久禁言**（真实配置 max_wrong=1，点错一次即触发）。
+    现在：action 0/1 保留 pending（禁言不影响点按钮，仍可自救），action 2/3 才清（人已离群）。
+    重复答错不重复刷群消息（用 over_notified 标记），避免刷屏。
+    """
     rec["wrong"] = int(rec.get("wrong", 0) or 0) + 1
     if int(JOIN_VERIFY_MAX_WRONG) > 0 and rec["wrong"] >= int(JOIN_VERIFY_MAX_WRONG):
-        join_verify_pending.pop(f"{cid}:{uid}", None)
+        if JOIN_VERIFY_ACTION >= 2:
+            join_verify_pending.pop(f"{cid}:{uid}", None)   # 踢出/封禁：人已离群，清记录
+        else:
+            rec["over"] = True          # 保留 pending，允许继续点按钮自救
+        if rec.get("over_notified"):
+            return rec["wrong"], True   # 已提醒过，不重复刷屏
+        rec["over_notified"] = True
         if JOIN_VERIFY_ACTION == 0:
             try:
                 await context.bot.send_message(
-                    cid, f"❌ {html.escape(str(name))} 答错 {rec['wrong']} 次未通过验证，请管理员留意。")
+                    cid, f"❌ {html.escape(str(name))} 答错 {rec['wrong']} 次未通过验证，"
+                         f"请管理员留意（可继续点按钮作答）。")
             except Exception:
                 pass
         else:
@@ -6946,7 +7113,8 @@ async def _jv_wrong_hit(context, cid, uid, name, rec):
             try:
                 await context.bot.send_message(
                     cid, f"❌ {html.escape(str(name))} 验证答错超限，已"
-                         f"{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群' if JOIN_VERIFY_ACTION == 2 else '封禁'}。")
+                         f"{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群' if JOIN_VERIFY_ACTION == 2 else '封禁'}。"
+                         + ("（仍可点下方正确答案通过验证）" if JOIN_VERIFY_ACTION == 1 else ""))
             except Exception:
                 pass
         return rec["wrong"], True
@@ -7049,9 +7217,19 @@ async def join_verify_sweep(context):
         join_verify_pending.pop(key, None)
         name = rec.get("name") or f"用户{uid}"
         if JOIN_VERIFY_ACTION == 0:
+            # 修复（2026-09-09）：action=0「只提醒」时，_join_verify_start 给的禁言没人解
+            # → 新人被永久禁言（用户报障「发不了言」）。只提醒档必须解除禁言。
+            try:
+                await context.bot.restrict_chat_member(
+                    cid, uid, permissions=ChatPermissions(
+                        can_send_messages=True, can_send_other_messages=True,
+                        can_add_web_page_previews=True, can_send_polls=True, can_invite_users=True))
+            except Exception:
+                logger.exception("入群验证：超时(action=0)解除限制失败 cid=%s uid=%s", cid, uid)
             try:
                 await context.bot.send_message(
-                    cid, f"⏰ {html.escape(str(name))} 入群后未在 {int(JOIN_VERIFY_SECONDS)} 秒内完成验证，请管理员留意。")
+                    cid, f"⏰ {html.escape(str(name))} 入群后未在 {int(JOIN_VERIFY_SECONDS)} 秒内完成验证，"
+                         f"已自动放行，请管理员留意。")
             except Exception:
                 pass
         else:
@@ -7264,6 +7442,9 @@ async def on_media(update, context):
             return
         if await _autodel_enforce(update, context):
             return
+        # 等级消息管控：超出当前等级权限的消息类型撤删（双路径，见 on_media）
+        if await _level_msg_enforce(update, context):
+            return
         # 敏感词：媒体消息的 caption 同样要查（此前只查文本 → 表情包/图片配文里的敏感词漏网）
         if await _sensitive_enforce(update, context):
             return
@@ -7297,6 +7478,10 @@ async def on_text(update, context):
 
         # 自动删除规则中心：链接/超长/会员表情（媒体消息走 on_media；管理员豁免）
         if await _autodel_enforce(update, context):
+            return
+
+        # 等级消息管控：当前等级不允许的消息类型（如 L1 发图）撤删 + 违规计数
+        if await _level_msg_enforce(update, context):
             return
 
         # 敏感词过滤（默认关；管理员豁免）：命中即删，可叠加禁言/踢出
@@ -7348,10 +7533,19 @@ async def on_text(update, context):
         # 成员档案：发言即记录（首次见/最后见/消息数）
         try:
             prof = member_profiles[cid][user.id]
-            if not prof:
+            _first_speak = not prof          # 首次发言（档案为空）
+            if _first_speak:
                 prof.update({"name": user_names.get(user.id, f"用户{user.id}"), "first": now_bj().strftime("%Y-%m-%d %H:%M"), "msgs": 0})
             prof["last"] = now_bj().strftime("%Y-%m-%d %H:%M")
             prof["msgs"] = prof.get("msgs", 0) + 1
+            # 新人欢迎奖励：首次发言时发放（用户规则「新人完成入群审核 +200」）
+            if _first_speak and not is_bot_admin(user.id):
+                _npts, _old = _grant_newbie_reward(cid, user.id,
+                                                   user_names.get(user.id) or user.first_name or "")
+                if _npts:
+                    _app = context.application
+                    asyncio.create_task(_check_level_change(
+                        _app, cid, user.id, _old, _earn_get(cid, user.id)))
         except Exception:
             logger.exception("成员档案记录异常（已吞并）")
         # 合格邀请结算（事件驱动）：被邀请人在本群发言后即时判定是否达标（发奖/待达标）
@@ -7500,16 +7694,223 @@ def _earn_get(cid, uid):
     except Exception:
         return 0
 
+def _normalize_levels():
+    """等级表结构归一（2026-09-09 用户需求）：旧存档 {name,value} → 补齐 perms/on。
+
+    兼容原则：**旧数据默认全放行**（perms=LEVEL_PERM_DEFAULT, on=1），
+    否则升级后老用户会突然被拦（历史无权限概念，不能追溯处罚）。
+    幂等：可重复调用。
+    """
+    for it in POINT_LEVELS:
+        if not isinstance(it, dict):
+            continue
+        if "perms" not in it or not isinstance(it.get("perms"), str):
+            # 旧存档缺字段 → 兼容放行（不能追溯处罚老用户）
+            it["perms"] = LEVEL_PERM_DEFAULT
+        else:
+            # 空串是用户在网页上显式「一个都不勾」= 全部禁止，必须保留（不能补默认）
+            picked = {p.strip() for p in it["perms"].split(",") if p.strip()}
+            it["perms"] = ",".join(k for k, _v in LEVEL_PERM_OPTIONS if k in picked)
+        if "on" not in it:
+            it["on"] = 1
+        else:
+            it["on"] = 1 if str(it.get("on")).strip().lower() in ("1", "true", "on", "yes", "是") else 0
+
+
+def _set_level_enabled(v):
+    """开关积分等级系统（测试与网页共用入口）。"""
+    global LEVEL_ENABLED
+    LEVEL_ENABLED = 1 if str(v).strip().lower() in ("1", "true", "on", "yes", "是") else 0
+    return LEVEL_ENABLED
+
+
+def _level_perms(cid, uid):
+    """取该用户当前等级允许的消息类型集合。未达最低等级/表为空 → 返回全部（放行）。"""
+    if not POINT_LEVELS:
+        return set(k for k, _v in LEVEL_PERM_OPTIONS)
+    cur = _level_item(cid, uid)
+    if cur is None:
+        return set(k for k, _v in LEVEL_PERM_OPTIONS)   # 未达最低等级：放行，不惩罚新人
+    raw = str(cur.get("perms") if cur.get("perms") is not None else LEVEL_PERM_DEFAULT)
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def _level_allows(cid, uid, kind):
+    """该用户当前等级是否允许发送某类消息。总开关关/表空/未达最低等级 → 一律放行。"""
+    if not LEVEL_ENABLED or not LEVEL_MSG_GUARD_ENABLED:
+        return True
+    if not POINT_LEVELS:
+        return True
+    return str(kind) in _level_perms(cid, uid)
+
+
+def _msg_kind(message, text=""):
+    """判定一条消息的类型（用于等级权限校验）。返回 LEVEL_PERM_OPTIONS 的键。
+
+    优先级：转发 > 贴纸 > 图片 > 视频 > 音频 > 链接 > 编辑 > 文字。
+    转发优先于内容类型：用户要的是「能不能转发」这一维度的管控。
+    """
+    if message is None:
+        return "text"
+    if getattr(message, "forward_origin", None) or getattr(message, "forward_from", None) \
+            or getattr(message, "forward_from_chat", None) or getattr(message, "forward_sender_name", None):
+        return "forward"
+    if getattr(message, "sticker", None) is not None:
+        return "sticker"
+    if getattr(message, "photo", None) is not None:
+        return "photo"
+    if getattr(message, "video", None) is not None or getattr(message, "video_note", None) is not None:
+        return "video"
+    if getattr(message, "audio", None) is not None or getattr(message, "voice", None) is not None:
+        return "audio"
+    t = str(text or "")
+    if ("http://" in t or "https://" in t or "t.me/" in t
+            or any(getattr(e, "type", None) in ("url", "text_link") for e in (getattr(message, "entities", None) or []))):
+        return "link"
+    if getattr(message, "edit_date", None):
+        return "edit"
+    return "text"
+
+
+def _level_msg_hit(cid, uid, message, text=""):
+    """等级消息管控判定。返回被拦截的消息类型键，放行返回 None。"""
+    if not LEVEL_ENABLED or not LEVEL_MSG_GUARD_ENABLED:
+        return None
+    if not POINT_LEVELS:
+        return None
+    if is_bot_admin(uid):
+        return None
+    kind = _msg_kind(message, text)
+    if _level_allows(cid, uid, kind):
+        return None
+    return kind
+
+
+def _level_violation_hit(cid, uid):
+    """记一次等级消息违规，返回 (窗口内次数, 是否达惩罚阈值)。
+
+    窗口与阈值来自网页配置（LEVEL_MSG_WINDOW / LEVEL_MSG_MAX_HITS）。
+    达阈值后清空窗口，避免「到阈值后每发一条都触发一次惩罚」。
+    """
+    now = time.time()
+    win = max(1, int(LEVEL_MSG_WINDOW))
+    lst = [t for t in (level_msg_violations.get((cid, uid)) or []) if now - t <= win]
+    lst.append(now)
+    level_msg_violations[(cid, uid)] = lst[-50:]
+    n = len(lst)
+    if n >= max(1, int(LEVEL_MSG_MAX_HITS)):
+        level_msg_violations.pop((cid, uid), None)
+        return n, True
+    return n, False
+
+
+async def _level_msg_enforce(update, context):
+    """等级消息管控执行：超出等级权限的消息撤删 + 违规计数 + 达阈值惩罚。
+
+    返回 True 表示已处理（调用方应停止后续处理）。
+    双路径接入：on_text 与 on_media 都要调（媒体消息走 on_media）。
+    """
+    try:
+        if not LEVEL_ENABLED or not LEVEL_MSG_GUARD_ENABLED:
+            return False
+        user, message = update.effective_user, update.effective_message
+        if not message or not user or user.is_bot or not is_group_chat(update):
+            return False
+        if is_bot_admin(user.id):
+            return False
+        cid = update.effective_chat.id
+        if cid not in AUTHORIZED_GROUPS:
+            return False
+        text = message.text or message.caption or ""
+        kind = _level_msg_hit(cid, user.id, message, text)
+        if not kind:
+            return False
+        try:
+            await message.delete()
+        except Exception:
+            # 生产上是 TelegramError（无删除权限等）；测试桩/异常结构也不许中断管控流程
+            try:
+                await context.bot.delete_message(cid, message.message_id)
+            except Exception:
+                pass
+        name = user.first_name or user_names.get(user.id) or f"用户{user.id}"
+        lv = _level_of(cid, user.id)[0] or "无"
+        n, over = _level_violation_hit(cid, user.id)
+        if over and int(LEVEL_MSG_PUNISH):
+            secs = int(LEVEL_MSG_MUTE_SECONDS)
+            if int(LEVEL_MSG_PUNISH) == 1:
+                if secs <= 0:
+                    return True          # 0=不禁言（只删消息 + 已发提示）
+                if secs < 30:
+                    # 用户口径：小于 30 秒 = 永久禁言。_mod_punish 有 max(30,..) 下限，
+                    # 无法表达「永久」，这里直接 restrict 且不带 until_date。
+                    try:
+                        await context.bot.restrict_chat_member(
+                            cid, user.id, permissions=ChatPermissions(can_send_messages=False))
+                    except Exception:
+                        logger.exception("等级消息管控：永久禁言失败 cid=%s uid=%s（已吞并）", cid, user.id)
+                    mute_txt = _fmt_tpl("level_msg_mute_tpl", name=html.escape(str(name)), seconds="永久")
+                else:
+                    await _mod_punish(context, cid, user.id, 1, secs, name, "等级消息越权")
+                    mute_txt = _fmt_tpl("level_msg_mute_tpl", name=html.escape(str(name)), seconds=str(secs))
+                try:
+                    await context.bot.send_message(cid, mute_txt)
+                except Exception:
+                    pass
+            else:
+                await _mod_punish(context, cid, user.id, 2, 0, name, "等级消息越权")
+            return True
+        # 未达惩罚阈值：发一次违规提示（按 REPLY_DELETE_SECONDS 自动回收，防刷屏）
+        try:
+            tip = await context.bot.send_message(
+                cid, _fmt_tpl("level_msg_warn_tpl", name=html.escape(str(name)),
+                              level=html.escape(str(lv)),
+                              kind=html.escape(str(LEVEL_PERM_NAMES.get(kind, kind))),
+                              count=str(n), limit=str(int(LEVEL_MSG_MAX_HITS))))
+            if REPLY_DELETE_SECONDS > 0:
+                schedule_delete(context.application, cid, tip, REPLY_DELETE_SECONDS)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        logger.exception("等级消息管控异常（已吞并）")
+        return False
+
+
+def _level_base(cid, uid):
+    """等级判定基数。降级开关开 → 当前余额；否则 → 累计获得（消费不掉级）。"""
+    if LEVEL_ALLOW_DEMOTE:
+        try:
+            return max(0, int(game_chips[cid][uid] or 0))
+        except Exception:
+            return 0
+    return _earn_get(cid, uid)
+
+
+def _level_item(cid, uid):
+    """返回该用户当前命中的等级 dict（跳过停用等级）；未达最低等级返回 None。"""
+    base = _level_base(cid, uid)
+    cur = None
+    for it in POINT_LEVELS:
+        if not int(it.get("on", 1) or 0):
+            continue   # 停用等级不参与判定（与 _get_level 口径一致）
+        if base >= int(it.get("value", 0) or 0):
+            cur = it
+    return cur
+
+
 def _level_of(cid, uid):
-    """按「累计获得」返回 (等级名, 累计获得值)。等级判定唯一口径。"""
-    got = _earn_get(cid, uid)
-    return _get_level(got), got
+    """返回 (等级名, 用于判定的数值)。等级判定唯一口径。"""
+    base = _level_base(cid, uid)
+    return _get_level(base), base
 
 def _get_level(balance):
-    """按积分等级表返回当前等级名，表为空返回空串。"""
+    """按积分等级表返回当前等级名，表为空返回空串。停用的等级不参与判定。"""
     lv = ""
     for item in POINT_LEVELS:
-        if balance >= item["value"]:
+        if not int(item.get("on", 1) or 0):
+            continue
+        if balance >= int(item.get("value", 0) or 0):
             lv = item["name"]
     return lv
 
@@ -7520,28 +7921,79 @@ def _level_rank(lv_name):
             return i
     return -1
 
+async def _level_sync_member_tag(app, cid, uid, level_name=None):
+    """积分称号同步成员标签（用户截图「积分称号同步成员标签开关」）。
+
+    用 Telegram 原生 set_chat_member_tag 把当前等级名写成成员标签（群昵称后的标识）。
+    失败静默：非管理员/权限不足/群不支持 都不影响主流程（等级系统照常工作）。
+    """
+    try:
+        if not LEVEL_SYNC_TAG:
+            return False
+        lv = level_name if level_name is not None else _level_of(cid, uid)[0]
+        if not lv:
+            return False
+        await app.bot.set_chat_member_tag(cid, uid, lv[:16])
+        return True
+    except Exception:
+        logger.debug("同步成员标签失败（已忽略）：cid=%s uid=%s", cid, uid, exc_info=True)
+        return False
+
+
 async def _check_level_change(app, cid, uid, old_earned, new_earned, balance=None):
-    """「累计获得」变动后检查等级升降并发群内通知（LEVEL_NOTIFY_ENABLED 控制）。
+    """「累计获得」变动后检查**升级**并发群内通知（LEVEL_NOTIFY_ENABLED 控制）。
 
     old_earned/new_earned 是**累计获得**（不是余额）——花积分不会掉级，所以消费点
     不该再调本函数（此前兑换/商城误传余额，导致花分就发降级公告）。
+    本函数**只发升级公告**，减少/异常输入一律静默（降级走 _check_level_drop_on_spend）。
 
     接入点：签到 / 管理员加分 / 转赠收款 / 红包领取 / 邀请奖励 / 竞猜派彩 / 游戏结算 / 归零赠送。
     聊天积分小额高频，刻意不接（避免刷屏）。
     """
     try:
-        if not LEVEL_NOTIFY_ENABLED or not POINT_LEVELS:
+        if not POINT_LEVELS:
             return
-        if int(new_earned or 0) <= int(old_earned or 0):
-            return   # 只可能升不可能降（累计账本只增）
-        old_lv, new_lv = _get_level(int(old_earned or 0)), _get_level(int(new_earned or 0))
+        old_v, new_v = int(old_earned or 0), int(new_earned or 0)
+        if new_v <= old_v:
+            return   # 只可能升不可能降（累计账本只增）；减少=异常输入，不公告
+        old_lv, new_lv = _get_level(old_v), _get_level(new_v)
         if old_lv == new_lv:
+            return
+        await _level_sync_member_tag(app, cid, uid, new_lv)   # 称号同步标签（开关控制）
+        if not LEVEL_NOTIFY_ENABLED:
             return
         name = await get_name(app, uid, cid=cid)
         show_bal = game_chips[cid][uid] if balance is None else balance
         await send_settle(app, cid, _fmt_tpl("level_up_msg_tpl", name=name, level=new_lv, balance=show_bal))
     except Exception:
         logger.exception("等级变动通知失败（已忽略）")
+
+
+async def _check_level_drop_on_spend(app, cid, uid, before_balance):
+    """扣分后检查是否因余额下降而**降级**并发通知。
+
+    仅在 LEVEL_ALLOW_DEMOTE（积分不足是否允许降级）开启时生效——默认关闭时
+    等级按累计获得判定，花分不掉级，本函数直接返回（零开销）。
+    在扣分点调用，传扣分前的余额。
+    """
+    try:
+        if not LEVEL_ALLOW_DEMOTE or not POINT_LEVELS:
+            return
+        old_v = max(0, int(before_balance or 0))
+        new_v = max(0, int(game_chips[cid][uid] or 0))
+        if new_v >= old_v:
+            return
+        old_lv, new_lv = _get_level(old_v), _get_level(new_v)
+        if old_lv == new_lv:
+            return
+        await _level_sync_member_tag(app, cid, uid, new_lv)
+        if not LEVEL_DOWN_NOTIFY_ENABLED:
+            return
+        name = await get_name(app, uid, cid=cid)
+        await send_settle(app, cid, _fmt_tpl("level_down_msg_tpl", name=name,
+                                             level=new_lv or "无", balance=new_v))
+    except Exception:
+        logger.exception("扣分降级检查失败（已忽略）")
 
 def _mall_price(item):
     """商品价格兼容新旧结构（旧 {"name","value"} / 新 {"name","price",...}）。"""
@@ -7555,25 +8007,83 @@ async def cmd_my_level(update, context):
     if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
     if not POINT_LEVELS:
-        await send_reply(update, context, "ℹ️ 积分等级未配置（后台「积分系统 → 积分等级」添加）。"); return
+        await send_reply(update, context, _fmt_tpl("level_query_none_tpl")); return
     bal = game_chips[cid][uid]
-    lv, earned = _level_of(cid, uid)   # 等级按「累计获得」算，兑换花分不掉级
+    lv, base = _level_of(cid, uid)
     next_lv, next_val = "", None
     for item in POINT_LEVELS:
-        if item["value"] > earned and (next_val is None or item["value"] < next_val):
-            next_lv, next_val = item["name"], item["value"]
-    nxt = f"\n⬆️ 下一等级：{next_lv}（还差 {next_val - earned} 积分）" if next_lv else "\n🏆 你已是最高等级！"
+        if not int(item.get("on", 1) or 0):
+            continue
+        if int(item.get("value", 0) or 0) > base and (next_val is None or item["value"] < next_val):
+            next_lv, next_val = item["name"], int(item["value"])
+    nxt = f"\n⬆️ 下一等级：{next_lv}（还差 {next_val - base} 积分）" if next_lv else "\n🏆 你已是最高等级！"
+    base_line = ("📈 累计获得：{v}（等级按此计算，消费不降级）".format(v=base)
+                 if not LEVEL_ALLOW_DEMOTE else "📈 等级按当前积分计算（积分不足会降级）")
     await send_reply(update, context,
-                     f"🎖 {await get_name(context.application, uid)} 的等级：{lv or '无'}\n"
-                     f"💰 当前积分：{bal}\n📈 累计获得：{earned}（等级按此计算，消费不降级）{nxt}")
+                     _fmt_tpl("level_query_msg_tpl", name=await get_name(context.application, uid),
+                              level=lv or "无", balance=bal, earned=base,
+                              base_line=base_line, next_line=nxt))
+
+def _chat_is_effective(cid, uid, text, min_len=None):
+    """有效发言判定（2026-09-09 用户规则）：正常话题/有内容的讨论才算有效。
+
+    三条否决（任一命中即不计分）：
+      ① 过短：去掉空白后长度 < min_len（仅「每N字符」旧规则模式检查；
+              规则表模式由用户自己配条件，不额外卡长度）
+      ② 纯符号/表情：把标点、emoji、空白全部剔除后什么都不剩
+              （如「😂😂😂」「。。。」「!!!!」「👍👍。。。」）→ 无信息量，不计分
+      ③ 无意义：整条消息只由黑名单词/标点/表情构成（如「哈哈」「哦哦」「收到」）
+      ④ 灌水：窗口内同一内容已发 CHAT_DUP_N 条（复读机）
+    纯表情包/图片本身走 on_media，不经过本函数（天然不计分）。
+    """
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if min_len is not None and len(re.sub(r"\s+", "", t)) < max(1, int(min_len)):
+        return False
+    # ② 纯符号/表情：剔除标点、符号、emoji、空白后若无任何中文/字母/数字 → 无信息量
+    #    无条件生效（规则表模式也不能给纯表情/纯符号送分）
+    if not re.sub(r"[\s\W_]+", "", t, flags=re.UNICODE):
+        return False
+    # ③ 无意义词：把黑名单词与常见标点/空白全部剔除后，若什么都不剩 → 纯无意义
+    if CHAT_JUNK_WORDS:
+        _r = t
+        for w in CHAT_JUNK_WORDS:
+            w = str(w).strip()
+            if w:
+                _r = _r.replace(w, "")
+        _r = re.sub(r"[\s\W_]+", "", _r, flags=re.UNICODE)
+        if not _r:
+            return False
+    # ④ 重复灌水：本函数独立记录（不复用 antispam_hist——那个受 ANTISPAM_ENABLED 开关
+    #    与 ANTISPAM_MIN_LEN 长度门槛控制，关掉刷屏识别后重复检测会静默失效）
+    _n = int(CHAT_DUP_N)
+    if _n > 0:
+        _key = (cid, uid, _antispam_norm(t))
+        _now = time.time()
+        _win = max(10, int(CHAT_DUP_WINDOW))
+        _hist = [x for x in (chat_dup_hist.get(_key) or []) if _now - x <= _win]
+        _dup = len(_hist) >= _n          # 先判定：本条之前的条数已达阈值 → 本条不计分
+        _hist.append(_now)
+        chat_dup_hist[_key] = _hist[-20:]
+        if _dup:
+            return False
+    return True
+
 
 def _award_chat_points(cid, uid, text):
     """聊天积分：优先走网页配置的规则表（阿福式：文字/长度条件 → 分值，命中即停）；
-    规则表为空或全停时回退旧逻辑（每 N 字符记 X 分）。均受每日上限约束。"""
+    规则表为空或全停时回退旧逻辑（每 N 字符记 X 分）。均受每日上限约束。
+
+    2026-09-09：加「有效发言」前置判定——无意义词/重复灌水一律不计分；
+    长度门槛只在旧规则模式生效（规则表模式由用户配置的条件决定，不额外卡长度）。
+    """
     if not CHAT_ENABLED:
         return
     t = text.strip()
     enabled = [r for r in chat_rules if r.get("on")]
+    if not _chat_is_effective(cid, uid, t, min_len=None if enabled else CHAT_MIN_LEN):
+        return
     if enabled:
         gain = 0
         for r in enabled:
@@ -9139,6 +9649,42 @@ async def cmd_unmute(update, context):
     _admin_log(cid, admin, "解除禁言", user_names.get(target, str(target))); save_data()
     await send_reply(update, context, f"🔊 已解除 {user_names.get(target, target)} 的禁言。")
 
+async def cmd_jv_pass(update, context):
+    """管理员一键放行入群验证（2026-09-09 兜底通道）。
+
+    场景：新人卡在验证（被禁言/验证消息被顶掉/答错超限）在群里求助，
+    管理员回复其消息发「放行」即可解除限制并清掉 pending，不用去后台改配置。
+    """
+    if not await need_auth(update, context): return
+    cid, admin = update.effective_chat.id, update.effective_user.id
+    if not await _is_group_admin(context, cid, admin):
+        await send_reply(update, context, "❌ 仅管理员可操作"); return
+    reply = update.message.reply_to_message
+    args = context.args or []
+    if reply:
+        target = reply.from_user.id
+    elif args and args[0].lstrip("-").isdigit():
+        target = int(args[0])
+    else:
+        await send_reply(update, context, "用法：回复该成员的消息发「放行」，或「放行 用户ID」"); return
+    rec = join_verify_pending.pop(f"{cid}:{target}", None)
+    try:
+        await context.bot.restrict_chat_member(cid, target, permissions=ChatPermissions(
+            can_send_messages=True, can_send_other_messages=True, can_add_web_page_previews=True,
+            can_send_polls=True, can_invite_users=True))
+    except Exception as e:
+        await send_reply(update, context, f"❌ 放行失败：{e}"); return
+    if rec and rec.get("msg_id"):
+        try:
+            await context.bot.delete_message(cid, int(rec["msg_id"]))
+        except Exception:
+            pass
+    _admin_log(cid, admin, "放行入群验证", user_names.get(target, str(target))); save_data()
+    await send_reply(update, context,
+                     f"✅ 已放行 {user_names.get(target, target)}，他现在可以发言了。"
+                     + ("（原有验证记录已清除）" if rec else ""))
+
+
 async def cmd_groupban(update, context):
     """Telegram 级封禁：踢出并禁止再入群（区别于 /拉黑 的 bot 层黑名单）。"""
     if not await need_auth(update, context): return
@@ -9258,15 +9804,39 @@ def _rec_rejected(rec):
 def _rec_awarded(rec):
     return int((rec or {}).get("award", 0) or 0) > 0
 
+def _rec_ok(rec):
+    """合格记录（含已退群）：达标且未被拒、未被广告连坐。用于「合格人数/每日合格」统计。
+
+    与 _rec_valid 的区别：本函数**不排除已退群**——用户面板的「合格」表示「历史达标过的人数」，
+    退群不抹掉这个事实（测试 test_race_schedule_invdel 已固化该语义）。
+    """
+    if not rec:
+        return False
+    return bool(_rec_qualified(rec) and not _rec_rejected(rec) and not rec.get("ad_flag"))
+
+
+def _rec_valid(rec):
+    """有效邀请记录（唯一判定入口）：合格 + 未退群 + 未被拒 + 未因发广告被连坐。
+
+    2026-09-09 收口：此前多处各自手写 `_rec_qualified(r) and not _rec_rejected(r) and not r.get("left")`，
+    加「广告连坐」时只改了 _invite_count → 排行和群总览仍把广告号算作有效邀请。
+    用于「有效邀请数」口径（邀请数、排行、群总览今日有效邀请）。
+    """
+    if not rec:
+        return False
+    return bool(_rec_ok(rec) and not rec.get("left"))
+
+
 def _invite_count(inviter, cid=None):
-    """邀请人有效邀请数（合格且未退群）；cid 限定群，None=全部群。"""
+    """邀请人有效邀请数（合格且未退群、未发广告连坐）；cid 限定群，None=全部群。"""
     n = 0
     for rec in invite_records.values():
-        if rec.get("inviter") != inviter or not _rec_qualified(rec) or rec.get("left") or _rec_rejected(rec):
+        if rec.get("inviter") != inviter:
             continue
         if cid is not None and rec.get("cid") != cid:
             continue
-        n += 1
+        if _rec_valid(rec):
+            n += 1
     return n
 
 def _inviter_awarded_count(cid, inviter):
@@ -9305,13 +9875,34 @@ async def _invite_qualify_ready(cid, uid):
             return False
     return True
 
+def _invite_daily_get(cid, inviter):
+    """取邀请人当日拉新统计 {"times":已发奖次数,"points":已发奖积分}。"""
+    return invite_daily[now_bj().strftime("%Y-%m-%d")][cid][inviter]
+
+def _invite_daily_capped(cid, inviter):
+    """是否已达当日拉新上限（人数 / 积分任一超限即停发）。0=不限。"""
+    d = _invite_daily_get(cid, inviter)
+    if INVITE_DAILY_CAP_TIMES > 0 and int(d.get("times", 0)) >= int(INVITE_DAILY_CAP_TIMES):
+        return True
+    if INVITE_DAILY_CAP_POINTS > 0 and int(d.get("points", 0)) >= int(INVITE_DAILY_CAP_POINTS):
+        return True
+    return False
+
+def _invite_daily_add(cid, inviter, pts):
+    """记一次当日发放（人数+1，积分累加）。"""
+    d = _invite_daily_get(cid, inviter)
+    d["times"] = int(d.get("times", 0)) + 1
+    d["points"] = int(d.get("points", 0)) + int(pts)
+
 async def _invite_try_award(app, rec):
-    """合格后发奖（不超每人上限 INVITE_REWARD_TIMES；award>0 防重入）。"""
+    """合格后发奖（不超每人上限 INVITE_REWARD_TIMES / 当日上限；award>0 防重入）。"""
     if _rec_awarded(rec):
         return
     cid, inviter = rec["cid"], rec["inviter"]
     if _inviter_awarded_count(cid, inviter) >= max(1, int(INVITE_REWARD_TIMES)):
         return  # 超上限：仍合格（计入合格数），但不再发奖
+    if _invite_daily_capped(cid, inviter):
+        return  # 当日拉新上限：仍合格，但当日不再发奖（次日恢复）
     await _invite_award(app, rec)
 
 async def _invite_ping_qualify(app, cid, uid):
@@ -9358,6 +9949,7 @@ async def _invite_award(app, rec):
             game_chips[cid][inviter] = old + reward
             _earn_add(cid, inviter, reward)   # 邀请奖励是系统新产出，计入累计获得
         rec["award"] = reward
+        _invite_daily_add(cid, inviter, reward)   # 当日拉新统计（每日上限用）
         ledger_add(cid, 0, inviter, reward, "邀请奖励")
         await _check_level_change(app, cid, inviter, old_earned, _earn_get(cid, inviter))
     inviter_name = await get_name(app, inviter, cid=cid)
@@ -9377,6 +9969,49 @@ async def _invite_award(app, rec):
         except Exception:
             pass
     save_data()
+
+
+def _grant_newbie_reward(cid, uid, name=""):
+    """新人欢迎奖励（2026-09-09 用户规则）：新人首次发言时发放，帮助其有基础分。
+
+    幂等：`newbie_rewarded["cid:uid"]` 标记，重复调用不重复发。
+    只对「入群记录里能查到的新人」发（避免老成员补发）。
+    返回 (发放积分, 升级前的累计获得)；未发放返回 (0, None)。
+    """
+    if not NEWBIE_REWARD_ENABLED or int(NEWBIE_REWARD) <= 0:
+        return 0, None
+    key = f"{cid}:{uid}"
+    if newbie_rewarded.get(key):
+        return 0, None
+    if uid not in member_joined_at.get(cid, {}):
+        return 0, None                # 非本群记录过的新成员（老成员/重启后清空）不发
+    newbie_rewarded[key] = True
+    pts = int(NEWBIE_REWARD)
+    old_earned = _earn_get(cid, uid)
+    game_chips[cid][uid] += pts
+    _earn_add(cid, uid, pts)
+    ledger_add(cid, 0, uid, pts, "新人欢迎奖励")
+    save_data()
+    logger.info("新人欢迎奖励已发放 cid=%s uid=%s +%s（累计 %s）", cid, uid, pts, _earn_get(cid, uid))
+    return pts, old_earned
+
+
+def _invite_flag_ad(cid, uid, reason=""):
+    """风控连坐（2026-09-09 用户规则）：被邀请人发广告 → 标记其邀请记录，不再计入邀请人的合格数。
+
+    不追回已发奖励（钱已到账，追回会引起纠纷），只做「后续不计合格」+ 记录违规原因，
+    让邀请人无法继续靠拉广告号刷奖励。
+    """
+    rec = invite_records.get(f"{cid}:{uid}")
+    if not rec:
+        return False
+    rec["ad_flag"] = True
+    rec["ad_reason"] = str(reason or "")
+    rec["ad_ts"] = now_bj().strftime("%Y-%m-%d %H:%M")
+    save_data()
+    logger.warning("邀请连坐：被邀请人发广告 cid=%s uid=%s inviter=%s 原因=%s",
+                   cid, uid, rec.get("inviter"), reason)
+    return True
 
 
 async def _invite_track_join(cmu, cid, uid, name, context):
@@ -9477,7 +10112,7 @@ def _invite_rank_rows(scope):
     month = today[:7]
     counts = defaultdict(int)
     for rec in invite_records.values():
-        if not _rec_qualified(rec) or _rec_rejected(rec) or rec.get("left"):
+        if not _rec_valid(rec):
             continue
         ts = str(rec.get("ts", ""))
         if scope == "today" and not ts.startswith(today):
@@ -10381,6 +11016,7 @@ CMD_ALIASES = {
     "pointsrank": cmd_points_rank, "mall": cmd_mall, "buy": cmd_mall_buy,
     "禁言": cmd_mute, "mute": cmd_mute, "解禁": cmd_unmute, "unmute": cmd_unmute,
     "群封": cmd_groupban, "groupban": cmd_groupban, "群解封": cmd_groupunban, "groupunban": cmd_groupunban,
+    "放行": cmd_jv_pass, "验证放行": cmd_jv_pass, "jvpass": cmd_jv_pass,
     "白名单": cmd_whitelist, "加白": cmd_whitelist_add, "删白": cmd_whitelist_del,
     "群管理员": cmd_adminlist_tg, "admins": cmd_adminlist_tg,
     "转赠": cmd_inherit, "继承": cmd_inherit, "转让": cmd_inherit, "transfer": cmd_inherit,
@@ -11286,8 +11922,8 @@ def start_health_server():
                     for uid in d.get(today, {}).get(cid, {}))
                 # 今日有效邀请
                 g_invites = sum(1 for r in invite_records.values()
-                                if r.get("cid") == cid and _rec_qualified(r)
-                                and not r.get("left") and str(r.get("ts", "")).startswith(today))
+                                if r.get("cid") == cid and _rec_valid(r)
+                                and str(r.get("ts", "")).startswith(today))
                 g_race = "⏰ 开启" if hourly_race_enabled.get(cid, True) else "⏸ 关闭"
                 g_rows.append(
                     f"<tr><td><code>{cid}</code> {html.escape(gname)}</td>"
@@ -11390,6 +12026,24 @@ def start_health_server():
                         "<div class='lbl'>群组筛选</div><select name='cid' onchange='this.form.submit()'>"
                         "<option value='0'>全部群</option>" + _group_options(selected=sel_flt_cid)
                         + "</select><noscript><button style='margin:0'>查看</button></noscript></form>")
+            def _perm_boxes(picked, name="perms"):
+                # 8 类消息权限勾选（等级新增/编辑共用）
+                pk = {p.strip() for p in str(picked or "").split(",") if p.strip()}
+                out = []
+                for _k, _v in LEVEL_PERM_OPTIONS:
+                    ck = " checked" if _k in pk else ""
+                    out.append(f"<label class='cb' style='margin:0 14px 6px 0'>"
+                               f"<input type='checkbox' name='{name}' value='{_k}'{ck}>"
+                               f"<span>{html.escape(_v)}</span></label>")
+                return "<div class='cbs' style='flex-wrap:wrap'>" + "".join(out) + "</div>"
+            def _perm_summary(picked):
+                pk = {p.strip() for p in str(picked or "").split(",") if p.strip()}
+                if len(pk) >= len(LEVEL_PERM_OPTIONS):
+                    return "<span style='color:#6fd08c'>全部放行</span>"
+                if not pk:
+                    return "<span style='color:#f09595'>全部禁止</span>"
+                names = [LEVEL_PERM_NAMES.get(k, k) for k, _v in LEVEL_PERM_OPTIONS if k in pk]
+                return html.escape("、".join(names))
             if gkey == "members" and sub == "mlist":
                 fl = flt or {}
                 sel_cid = fl.get("cid", 0)
@@ -11813,6 +12467,8 @@ def start_health_server():
                     def _rec_badge(r):
                         if _rec_rejected(r):
                             return "<span style='color:#f09595'>拒绝</span>"
+                        if r.get("ad_flag"):
+                            return "<span style='color:#f09595'>连坐·发广告</span>"
                         if _rec_qualified(r):
                             return ("<span style='color:#6fd08c'>合格·已发放</span>" if _rec_awarded(r)
                                     else "<span style='color:#f0c060'>合格·超额未发</span>")
@@ -11846,7 +12502,7 @@ def start_health_server():
                 elif sub == "daily":
                     daily_counts = defaultdict(int)
                     for r in invite_records.values():
-                        if _rec_qualified(r) and not _rec_rejected(r) and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
+                        if _rec_ok(r) and (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
                             daily_counts[str(r.get("ts", ""))[:10]] += 1
                     rows_html = "".join(f"<tr><td>{d}</td><td>{n}</td></tr>"
                                         for d, n in sorted(daily_counts.items(), reverse=True)[:60])
@@ -11862,11 +12518,12 @@ def start_health_server():
                         if (not sel_icid or _inv_icid(r.get("cid")) == sel_icid):
                             if _rec_rejected(r) or r.get("left"):
                                 continue
-                            if _rec_qualified(r):
+                            if _rec_valid(r):
                                 sums[r.get("inviter")]["ok"] += 1
                                 sums[r.get("inviter")]["award"] += int(r.get("award", 0) or 0)
-                            else:
+                            elif not _rec_qualified(r):
                                 sums[r.get("inviter")]["pend"] += 1
+                            # 合格但发过广告（连坐）→ 既不算合格也不算待达标，只保留已发奖励
                     rows_html = ""
                     for uid, s in sorted(sums.items(), key=lambda kv: -kv[1]["ok"])[:50]:
                         rows_html += (f"<tr><td><code>{uid}</code> {html.escape(user_names.get(uid, ''))}</td>"
@@ -11923,27 +12580,95 @@ def start_health_server():
                             "<label style='display:flex;gap:8px;align-items:center'><input type='checkbox' name='confirm' value='1' required style='width:auto'> 我确认覆盖所选群的全部积分</label></div>"
                             "<button type='submit'>✅ 确认导入</button></form></div>")
                 elif gkey == "points" and sub == "level":
-                    lv_rows = "".join(
-                        f"<tr><td>{html.escape(str(x.get('name', '?')))}</td><td>{int(x.get('value', 0) or 0)}</td>"
-                        f"<td><a href='/level_del/{i}' style='color:#f09595'>删除</a></td></tr>"
-                        for i, x in enumerate(POINT_LEVELS))
+                    # 等级表：名称 / 最低积分 / 状态 / 消息权限（8 类勾选），支持行内编辑
+                    _normalize_levels()
+                    edit_i = int((flt or {}).get("edit", -1))
+                    if not (0 <= edit_i < len(POINT_LEVELS)):
+                        edit_i = -1
+                    lv_rows = ""
+                    for i, x in enumerate(POINT_LEVELS):
+                        on = int(x.get("on", 1) or 0)
+                        st = ("<span style='color:#6fd08c'>启用</span>" if on
+                              else "<span style='color:#8a89a0'>停用</span>")
+                        if i == edit_i:
+                            # 编辑态：整行换成表单（权限 8 勾选 + 状态开关）
+                            lv_rows += (
+                                f"<tr style='background:rgba(120,120,200,.08)'>"
+                                f"<td colspan='5'><form method='post' action='/level_edit'>"
+                                f"<input type='hidden' name='i' value='{i}'>"
+                                f"<div style='display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap'>"
+                                f"<div style='flex:2;min-width:140px'><div class='lbl'>等级名称</div>"
+                                f"<input type='text' name='name' value='{html.escape(str(x.get('name', '')))}' "
+                                f"required maxlength='12' style='width:100%'></div>"
+                                f"<div style='flex:1;min-width:110px'><div class='lbl'>最低积分</div>"
+                                f"<input type='number' name='value' value='{int(x.get('value', 0) or 0)}' "
+                                f"required min='0' style='width:100%'></div>"
+                                f"<div style='min-width:110px'><div class='lbl'>状态</div>"
+                                f"<label class='tg'><input type='checkbox' name='on' value='1'"
+                                f"{' checked' if on else ''}><span class='sl'></span></label></div></div>"
+                                f"<div style='margin-top:10px'><div class='lbl'>等级消息权限"
+                                f"<small>勾选=允许；未勾选的消息类型会被撤回并提示</small></div>"
+                                f"{_perm_boxes(x.get('perms'))}</div>"
+                                f"<div style='display:flex;gap:10px;margin-top:10px'>"
+                                f"<button style='margin:0'>💾 保存</button>"
+                                f"<a href='/page/points/level' style='align-self:center'>取消</a></div>"
+                                f"</form></td></tr>")
+                        else:
+                            lv_rows += (
+                                f"<tr><td><b>L{i + 1}</b> {html.escape(str(x.get('name', '?')))}</td>"
+                                f"<td>{int(x.get('value', 0) or 0)}</td><td>{st}</td>"
+                                f"<td>{_perm_summary(x.get('perms'))}</td>"
+                                f"<td><a href='/page/points/level?edit={i}'>编辑</a> · "
+                                f"<a href='/level_toggle/{i}'>{'停用' if on else '启用'}</a> · "
+                                f"<a href='/level_del/{i}' style='color:#f09595'>删除</a></td></tr>")
                     if not lv_rows:
-                        lv_rows = ("<tr><td colspan='3' style='text-align:center;color:#6a6982'>"
+                        lv_rows = ("<tr><td colspan='5' style='text-align:center;color:#6a6982'>"
                                    "暂无等级数据，先新增等级</td></tr>")
-                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>按「累计获得」判定等级（消费不掉级，只升不降）；升级自动群内通知（下方可开关）。保存立即生效</div>{msg}"
+                    body = (f"<h1>{gicon} {sname}</h1><div class='sub'>按「累计获得」判定等级（消费不掉级，只升不降）；"
+                            f"停用的等级不参与判定与权限；升级自动群内通知（下方可开关）。保存立即生效</div>{msg}"
                             "<div class='card'><h3>🎖 等级列表（按最低积分升序）</h3>"
-                            "<table class='tbl'><tr><th>等级名称</th><th>最低积分</th><th>操作</th></tr>"
+                            "<table class='tbl'><tr><th>等级名称</th><th>最低积分</th><th>状态</th>"
+                            "<th>消息权限</th><th>操作</th></tr>"
                             + lv_rows + "</table>"
-                            "<form method='post' action='/level_add' style='display:flex;gap:10px;margin-top:12px'>"
-                            "<input type='text' name='name' placeholder='等级名称(≤12字)' required maxlength='12' style='flex:2'>"
-                            "<input type='number' name='value' placeholder='最低积分' required min='0' style='flex:1'>"
-                            "<button style='margin:0'>➕ 新增等级</button></form></div>"
+                            "<form method='post' action='/level_add' style='margin-top:16px'>"
+                            "<h3 style='margin-bottom:8px'>➕ 新增积分等级</h3>"
+                            "<div style='display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap'>"
+                            "<div style='flex:2;min-width:140px'><div class='lbl'>等级名称</div>"
+                            "<input type='text' name='name' placeholder='≤12字，如 铜牌' required maxlength='12' style='width:100%'></div>"
+                            "<div style='flex:1;min-width:110px'><div class='lbl'>最低积分</div>"
+                            "<input type='number' name='value' placeholder='如 100' required min='0' style='width:100%'></div>"
+                            "<div style='min-width:110px'><div class='lbl'>状态</div>"
+                            "<label class='tg'><input type='checkbox' name='on' value='1' checked>"
+                            "<span class='sl'></span></label></div></div>"
+                            "<div style='margin-top:10px'><div class='lbl'>等级消息权限"
+                            "<small>勾选=允许；不勾则拦截。默认全勾（不限制）</small></div>"
+                            + _perm_boxes(LEVEL_PERM_DEFAULT) +
+                            "</div><button style='margin-top:10px'>➕ 新增等级</button></form></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/level'>"
                             + _field_rows("points/level")
                             + "<div class='sub' style='margin-top:16px'>占位符：<code>{name}</code> <code>{level}</code> <code>{balance}</code>；群内发「"
-                              + html.escape(str(LEVEL_CMD)) + "」查询自己的等级</div>" +
+                              + html.escape(str(LEVEL_CMD)) + "」查询自己的等级"
+                            + "（查询触发词在「命令管理」页改，本页不重复配置以免两处打架）</div>" +
                             _savebar("保存通知设置") + "</form></div>")
+                elif gkey == "points" and sub == "levelguard":
+                    body = (f"<h1>{gicon} {sname}</h1>"
+                            f"<div class='sub'>按等级限制群成员可发送的消息类型：越权消息立即撤回并提示，"
+                            f"窗口内连续违规按下方规则惩罚。等级权限在「积分等级」页逐级勾选</div>{msg}"
+                            "<div class='card'><form method='post' action='/save'>"
+                            "<input type='hidden' name='group' value='points/levelguard'>"
+                            + _field_rows("points/levelguard")
+                            + "<div class='sub' style='margin-top:16px'>占位符：<code>{name}</code> <code>{level}</code> "
+                              "<code>{kind}</code>（消息类型）<code>{seconds}</code>（禁言秒数）</div>"
+                            + _savebar("保存管控设置") + "</form></div>"
+                            "<div class='card' style='margin-top:18px'><h3>📋 当前等级权限一览</h3>"
+                            "<div class='sub'>改权限请去「积分等级」页点编辑</div>"
+                            + "<table class='tbl'><tr><th>等级</th><th>最低积分</th><th>允许发送</th></tr>"
+                            + "".join(
+                                f"<tr><td><b>L{i + 1}</b> {html.escape(str(x.get('name', '?')))}</td>"
+                                f"<td>{int(x.get('value', 0) or 0)}</td><td>{_perm_summary(x.get('perms'))}</td></tr>"
+                                for i, x in enumerate(POINT_LEVELS))
+                            + "</table></div>")
                 elif gkey == "points" and sub == "mall":
                     mall_rows = ""
                     for i, x in enumerate(MALL_ITEMS):
@@ -12484,10 +13209,11 @@ def start_health_server():
                             "level": "/page/points/level", "mall": "/page/points/mall",
                             "redeem": "/page/points/redeem"}[kind]
                     if 0 <= idx < len(lst):
-                        if act == "del" or kind == "level":  # 等级无启停，level 路径一律视为删除（防呆）
+                        if act == "del":
                             lst.pop(idx)
                         else:
-                            lst[idx]["on"] = not lst[idx].get("on", True)
+                            # 2026-09-09：等级也有启停（用户截图「状态」列），不再一律当删除
+                            lst[idx]["on"] = 0 if int(lst[idx].get("on", 1) or 0) else 1
                         save_settings({})
                     self._redirect(back); return
                 mm = re.fullmatch(r"/racegrp/(-?\d+)/toggle", path)
@@ -12566,6 +13292,7 @@ def start_health_server():
                         try: return int(qs.get(k, [str(dflt)])[0] or dflt)
                         except ValueError: return dflt
                     flt = {"cid": _qi("cid", 0), "q": (qs.get("q", [""])[0] or "")[:50],
+                           "edit": _qi("edit", -1),   # 等级页：点「编辑」带 ?edit=序号
                            "never": 1 if qs.get("never", [""])[0] else 0, "silent": _qi("silent", 0),
                            "join_from": (qs.get("join_from", [""])[0] or "")[:16],
                            "join_to": (qs.get("join_to", [""])[0] or "")[:16],
@@ -12973,14 +13700,34 @@ def start_health_server():
                                              "sort": _ipkg("sort", 0), "on": True})
                         save_settings({})
                     self._redirect("/page/points/buypkg"); return
-                if path == "/level_add":
+                if path in ("/level_add", "/level_edit"):
                     def _ilv(k, dflt=0):
                         try: return int(form.get(k, [str(dflt)])[0] or dflt)
                         except ValueError: return dflt
+                    def _lv_perms():
+                        raw = form.getlist("perms") if hasattr(form, "getlist") else form.get("perms", [])
+                        picked = {str(p).strip() for p in raw if str(p).strip()}
+                        # 只留合法键，按定义顺序排列
+                        return ",".join(k for k, _v in LEVEL_PERM_OPTIONS if k in picked)
+                    def _lv_on():
+                        v = form.get("on", [""])
+                        return 1 if str(v[0] if v else "").strip() in ("1", "on", "true") else 0
                     name = (form.get("name", [""])[0] or "").strip()[:12]
+                    val = max(0, _ilv("value"))
+                    if path == "/level_edit":
+                        try: idx = int(form.get("i", ["-1"])[0])
+                        except ValueError: idx = -1
+                        if 0 <= idx < len(POINT_LEVELS) and name and not any(ch in name for ch in "<>&"):
+                            it = POINT_LEVELS[idx]
+                            it["name"], it["value"] = name, val
+                            it["perms"], it["on"] = _lv_perms(), _lv_on()
+                            POINT_LEVELS.sort(key=lambda x: int(x.get("value", 0) or 0))
+                            save_settings({})
+                        self._redirect("/page/points/level?note=" + quote("✅ 等级已更新")); return
                     if name and not any(ch in name for ch in "<>&"):
-                        POINT_LEVELS.append({"name": name, "value": max(0, _ilv("value"))})
-                        POINT_LEVELS.sort(key=lambda x: x["value"])
+                        POINT_LEVELS.append({"name": name, "value": val,
+                                             "perms": _lv_perms(), "on": _lv_on()})
+                        POINT_LEVELS.sort(key=lambda x: int(x.get("value", 0) or 0))
                         save_settings({})
                     self._redirect("/page/points/level"); return
                 if path == "/mall_add":
@@ -13063,8 +13810,18 @@ def start_health_server():
                         _back(err="该玩家正在游戏中，请等牌局结束再调整积分"); return
                     if amount < 0 and game_chips[cid][uid] < -amount:
                         _back(err=f"扣分失败：该玩家当前积分 {game_chips[cid][uid]} 不足 {-amount}"); return
+                    _before_bal = int(game_chips[cid][uid] or 0)
                     game_chips[cid][uid] += amount
+                    if amount > 0:
+                        _earn_add(cid, uid, amount)   # 网页加分同样计入累计获得
                     force_save_now()
+                    if amount < 0 and _bot_app and _bot_loop:
+                        # 开启「允许降级」时扣分可能掉级 → 发降级通知（开关内自判，零开销）
+                        try:
+                            asyncio.run_coroutine_threadsafe(
+                                _check_level_drop_on_spend(_bot_app, cid, uid, _before_bal), _bot_loop).result(8)
+                        except Exception:
+                            logger.exception("网页扣分降级通知失败（已吞并）")
                     _back(note=f"✅ 已{'给' if amount > 0 else '扣除'} 用户 {uid} {abs(amount)} 积分，当前余额 {game_chips[cid][uid]}（群 {cid}）")
                     return
                 if path == "/save":

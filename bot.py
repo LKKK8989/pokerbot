@@ -3,7 +3,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-1330"
+BOT_VERSION = "2026-09-09-1400"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -1445,6 +1445,8 @@ def force_save_now():
                 # 进行中的红包（lock 不序列化）：不持久化的话重启后未领完的积分凭空消失
                 "rp_packets": {pid: {k: v for k, v in p.items() if k != "lock"}
                                for pid, p in rp_packets.items()},
+                # 待删消息队列：重启后重放，游戏面板不再因重部署而永久残留
+                "pending_deletes": [list(q) for q in _pending_deletes[-2000:]],
             }
             os.makedirs(os.path.dirname(os.path.abspath(DATA_FILE)), exist_ok=True)
             with open(DATA_TEMP_FILE, "w", encoding="utf-8") as file:
@@ -1634,6 +1636,9 @@ def load_data():
             if isinstance(v, dict): join_verify_pending[str(k)] = dict(v)
         observe_checked.update(str(x) for x in (data.get("observe_checked", []) or []))
         lurker_checked.update(str(x) for x in (data.get("lurker_checked", []) or []))
+        # 待删消息队列恢复：重启/重部署后由 restore_pending_deletes 重放，游戏面板不再永久残留
+        _pending_deletes[:] = [q for q in (data.get("pending_deletes") or [])
+                               if isinstance(q, (list, tuple)) and len(q) == 3]
         global announce_last_date
         announce_last_date = str(data.get("announce_last_date", "") or "")   # 重启同天不重发公告
         invite_debug.clear()
@@ -1940,17 +1945,72 @@ async def safe_delete(bot, cid, msg_id):
         except TelegramError: pass
 
 
+_pending_deletes = []      # 待删消息队列 [[cid, mid, 到期时间戳], ...]：随 bot_data 持久化，重启后重放，重部署不再残留消息
+_delete_tasks = set()      # 持有删除 task 的引用：裸 create_task 不保引用可能被事件循环 GC，删除凭空消失
+
+
+async def _flush_deletes(app):
+    """删除队列里所有已到期消息；未到期的留在队列等下一轮。"""
+    now = time.time()
+    due = [q for q in _pending_deletes if q[2] <= now]
+    if not due:
+        return
+    for cid, mid, _t in due:
+        await safe_delete(app.bot, cid, mid)
+    _pending_deletes[:] = [q for q in _pending_deletes if q[2] > now]
+
+
+def restore_pending_deletes(app):
+    """启动重放：把上次没删完的消息重新排程。已过期的立即补删，超过 1 天的陈条目直接丢弃。"""
+    if not _pending_deletes:
+        return
+    now = time.time()
+    old, _pending_deletes[:] = list(_pending_deletes), []
+    for cid, mid, due in old:
+        try:
+            cid, mid = int(cid), int(mid)
+        except (ValueError, TypeError):
+            continue
+        if now - due > 86400:
+            continue
+        if due <= now:
+            async def _del_now(_cid=cid, _mid=mid):
+                await safe_delete(app.bot, _cid, _mid)
+            try:
+                t = asyncio.create_task(_del_now())
+                _delete_tasks.add(t)
+                t.add_done_callback(_delete_tasks.discard)
+            except RuntimeError:
+                _pending_deletes.append([cid, mid, due])   # 无 loop：退回队列等周期兜底
+        else:
+            schedule_delete_ids(app, cid, [mid], int(due - now) + 1)
+    logger.info("已恢复 %d 条待删消息的删除排程", len(old))
+
+
 def schedule_delete_ids(app, cid, ids, seconds):
-    """延迟删除指定 message_id（用于只有 id、拿不到 Message 对象的场景，如原地编辑的下注面板）。"""
+    """延迟删除指定 message_id（用于只有 id、拿不到 Message 对象的场景，如原地编辑的下注面板）。
+
+    队列随 bot_data 持久化：容器重启/重部署后由 restore_pending_deletes 重放，
+    不再出现「消息说好自动删、重部署后永久残留」的问题。
+    """
     if seconds <= 0 or not ids: return
     if isinstance(ids, int): ids = [ids]
     ids = [int(i) for i in ids if i]
     if not ids: return
+    due = time.time() + int(seconds)
+    for mid in ids:
+        _pending_deletes.append([cid, mid, due])
+    if len(_pending_deletes) > 5000:
+        del _pending_deletes[:-2000]   # 防异常堆积
     async def _del_later():
         await asyncio.sleep(seconds)
-        for mid in ids: await safe_delete(app.bot, cid, mid)
-    try: asyncio.create_task(_del_later())
-    except RuntimeError: pass
+        await _flush_deletes(app)
+    try:
+        t = asyncio.create_task(_del_later())
+        _delete_tasks.add(t)
+        t.add_done_callback(_delete_tasks.discard)
+    except RuntimeError:
+        pass   # 无事件循环（如网页线程调用）：条目已在队列，由周期兜底/启动重放接管
 
 
 def schedule_delete(app, cid, msgs, seconds):
@@ -9595,6 +9655,17 @@ async def post_init(app):
         asyncio.create_task(data_save_worker())
     })
     background_tasks.add(asyncio.create_task(_warm_group_names(app)))   # 群名预热：网页/推送不再显示裸群ID
+    # 待删消息队列：重放上次没删完的（重部署不再残留游戏面板）+ 每 60 秒兜底 flush 一轮
+    try:
+        restore_pending_deletes(app)
+        async def _delete_sweeper():
+            while True:
+                await asyncio.sleep(60)
+                try: await _flush_deletes(app)
+                except Exception: pass
+        background_tasks.add(asyncio.create_task(_delete_sweeper()))
+    except Exception:
+        logger.exception("待删消息队列恢复失败（不影响主功能）")
     # 重启恢复：竞猜：未封盘且未到点的重建封盘倒计时；已封盘的原样等待结算
     for _cid, _g in list(guesses.items()):
         if not _g.get("locked") and not _g.get("task") and _g["end_ts"] > now_bj().timestamp():

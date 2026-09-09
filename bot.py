@@ -3,7 +3,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-1400"
+BOT_VERSION = "2026-09-09-1440"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -287,7 +287,7 @@ SETTINGS_FIELDS = [
     ("autodel_media_types",    "AUTODEL_MEDIA_TYPES",    "媒体/系统类规则",     "multi", 0, 0, "autodel"),
     ("autodel_media_seconds",  "AUTODEL_MEDIA_SECONDS",  "媒体类删除延迟(秒,0=立即删)", "int", 0, 86400, "autodel"),
     # ===== 群管中心（新功能全部默认关闭，网页手动开启） =====
-    ("sep_mod_verify",        None, "① 入群验证（新人点按钮才放行）", "sep", 0, 0, "mod"),
+    ("sep_mod_verify",        None, "入群验证（新人点按钮才放行）", "sep", 0, 0, "mod"),
     ("join_verify_enabled",   "JOIN_VERIFY_ENABLED",   "入群验证开关",            "bool", 0, 1, "mod"),
     ("join_verify_seconds",   "JOIN_VERIFY_SECONDS",   "验证超时(秒)",            "int",  10, 3600, "mod"),
     ("join_verify_action",    "JOIN_VERIFY_ACTION",    "超时处理(0=只提醒 1=禁言 2=踢出 3=封禁)", "int", 0, 3, "mod"),
@@ -302,26 +302,26 @@ SETTINGS_FIELDS = [
     ("sensitive_mute_seconds", "SENSITIVE_MUTE_SECONDS", "敏感词禁言时长(秒)",    "int",  0, 86400, "mod"),
     ("link_whitelist_enabled", "LINK_WHITELIST_ENABLED", "域名白名单开关(名单内链接不删)", "bool", 0, 1, "mod"),
     ("link_whitelist",        "LINK_WHITELIST",        "白名单域名(逗号分隔，子域名自动放行)", "names", 0, 0, "mod"),
-    ("sep_mod_observe",       None, "③ 观察期到期巡检", "sep", 0, 0, "mod"),
+    ("sep_mod_observe",       None, "观察期到期巡检", "sep", 0, 0, "mod"),
     ("observe_check_enabled", "OBSERVE_CHECK_ENABLED", "到期巡检开关(需先开观察期)", "bool", 0, 1, "mod"),
     ("observe_check_msgs",    "OBSERVE_CHECK_MSGS",    "发言少于N条视为不活跃",   "int",  0, 1000, "mod"),
     ("observe_check_avatar",  "OBSERVE_CHECK_AVATAR",  "无头像也算不活跃(查API，仅零发言者)", "bool", 0, 1, "mod"),
     ("observe_check_action",  "OBSERVE_CHECK_ACTION",  "处理方式(0=提醒管理员 1=禁言 2=踢出)", "int", 0, 2, "mod"),
-    ("sep_mod_gate",          None, "④ 进群硬门槛（不满足直接移出，不进验证流程）", "sep", 0, 0, "mod"),
+    ("sep_mod_gate",          None, "进群硬门槛（不满足直接移出，不进验证流程）", "sep", 0, 0, "mod"),
     ("join_gate_username",    "JOIN_GATE_USERNAME",    "须有用户名",              "bool", 0, 1, "mod"),
     ("join_gate_premium",     "JOIN_GATE_PREMIUM",     "须 Telegram Premium",     "bool", 0, 1, "mod"),
     ("join_gate_bio",         "JOIN_GATE_BIO",         "须有简介(需查API，失败放行)", "bool", 0, 1, "mod"),
-    ("sep_mod_lurker",        None, "⑤ 潜水号清理（老成员长期不冒泡）", "sep", 0, 0, "mod"),
+    ("sep_mod_lurker",        None, "潜水号清理（老成员长期不冒泡）", "sep", 0, 0, "mod"),
     ("lurker_enabled",        "LURKER_ENABLED",        "潜水清理开关",            "bool", 0, 1, "mod"),
     ("lurker_days",           "LURKER_DAYS",           "入群超过N天才纳入扫描",    "int",  1, 365, "mod"),
     ("lurker_msgs",           "LURKER_MSGS",           "累计发言少于N条视为潜水",  "int",  0, 1000, "mod"),
     ("lurker_action",         "LURKER_ACTION",         "处理方式(0=提醒管理员 1=禁言 2=踢出)", "int", 0, 2, "mod"),
-    ("sep_mod_raid",          None, "⑥ 防突袭（短时间大量进群自动人墙）", "sep", 0, 0, "mod"),
+    ("sep_mod_raid",          None, "防突袭（短时间大量进群自动人墙）", "sep", 0, 0, "mod"),
     ("raid_enabled",          "RAID_ENABLED",          "防突袭开关",              "bool", 0, 1, "mod"),
     ("raid_window",           "RAID_WINDOW",           "检测窗口(秒)",            "int",  10, 600, "mod"),
     ("raid_threshold",        "RAID_THRESHOLD",        "窗口内N人进群视为突袭",    "int",  3, 50, "mod"),
     ("raid_cooldown",         "RAID_COOLDOWN",         "人墙持续秒数(到期自动解除)", "int", 60, 86400, "mod"),
-    ("sep_mod_forcesub",      None, "⑦ 强制订阅频道（未订阅者发言即删+提示，管理员豁免）", "sep", 0, 0, "mod"),
+    ("sep_mod_forcesub",      None, "强制订阅频道（未订阅者发言即删+提示，管理员豁免）", "sep", 0, 0, "mod"),
     ("force_sub_enabled",     "FORCE_SUB_ENABLED",     "强制订阅开关",            "bool", 0, 1, "mod"),
     ("force_sub_channels",    "FORCE_SUB_CHANNELS",    "须订阅的频道(@用户名 或 频道id，多个逗号/回车分隔，订阅其一即可)", "names", 0, 0, "mod"),
     ("force_sub_only_new",    "FORCE_SUB_ONLY_NEW",    "只检测新用户(入群10分钟内)", "bool", 0, 1, "mod"),
@@ -479,6 +479,8 @@ REPLY_DELETE_SECONDS = 30   # 查询类命令的 bot 回复自动删除（0=不�
 SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
 PANEL_DELETE_SECONDS = 300 # 游戏卡片/下注面板：本局结束后自动删除（0=不删）
 RACE_NOTICE_DELETE_SECONDS = 60  # 赛车倒计时提示自动删除（0=不删）
+_pending_deletes = []      # 待删消息队列 [[cid, mid, 到期时间戳], ...]：随 bot_data 持久化，重启后重放，重部署不再残留消息
+_delete_tasks = set()      # 持有删除 task 的引用：裸 create_task 不保引用可能被事件循环 GC，删除凭空消失
 WEB_OTP_ENABLED = False  # 一键登录(/后台)为主，密码直登为备用；验证码步骤默认关闭（要开改这里）
 WEB_BASE_URL = ""  # 后台公网地址（如 https://xxx.northflank.app），/后台 一键登录链接用；不配则该功能不可用
 # ---------- 群组抽奖 ----------
@@ -1722,7 +1724,21 @@ def archive_old_profit_data(keep_days=90):
     logger.info(f"归档完成：保留 {keep_days} 天明细，旧数据已合并至 _archive")
 
 
+def _data_file_status():
+    """数据文件状态一行串：路径 + 存在/大小（供启动日志与 /health，让 Volume 是否生效一眼可见）。"""
+    try:
+        if os.path.exists(DATA_FILE):
+            kb = os.path.getsize(DATA_FILE) / 1024
+            return f"{DATA_FILE}（{kb:.0f} KB）"
+        return f"{DATA_FILE}（不存在，将新建）"
+    except Exception:
+        return DATA_FILE
+
+
+logger.info("数据文件：%s", _data_file_status())
 load_data()
+logger.info("数据加载完成：%s｜授权群 %d 个 · 管理员 %d 名 · 玩家名缓存 %d 条",
+            _data_file_status(), len(AUTHORIZED_GROUPS), len(BOT_ADMINS), len(user_names))
 archive_old_profit_data()
 force_save_now()  # 归档结果立即物理落盘，避免启动后 60 秒内崩溃丢失归档
 
@@ -1943,10 +1959,6 @@ async def safe_delete(bot, cid, msg_id):
     if msg_id:
         try: await bot.delete_message(chat_id=cid, message_id=msg_id)
         except TelegramError: pass
-
-
-_pending_deletes = []      # 待删消息队列 [[cid, mid, 到期时间戳], ...]：随 bot_data 持久化，重启后重放，重部署不再残留消息
-_delete_tasks = set()      # 持有删除 task 的引用：裸 create_task 不保引用可能被事件循环 GC，删除凭空消失
 
 
 async def _flush_deletes(app):
@@ -10173,6 +10185,18 @@ def start_health_server():
                     ".tagbox input[type=text]{flex:1;min-width:80px;background:transparent;border:none;"
                     "padding:4px 2px;color:#e8e6f2;font-size:14px;box-shadow:none!important}"
                     ".grid2 .tagbox{width:100%}"
+                    # 防护编辑弹窗（照方丈：一览点「编辑」弹出，内部仍是我们的表单排版）
+                    ".modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100;"
+                    "align-items:flex-start;justify-content:center;padding:6vh 16px;overflow:auto}"
+                    ".modal.open{display:flex}"
+                    ".modal .mbox{background:var(--card);border:1px solid var(--border);border-radius:14px;"
+                    "width:min(660px,94vw);padding:20px 24px 24px;box-shadow:0 18px 50px rgba(0,0,0,.45)}"
+                    ".modal .mhead{display:flex;align-items:center;margin-bottom:6px}"
+                    ".modal .mhead h3{margin:0}"
+                    ".modal .mclose{margin-left:auto;cursor:pointer;color:#8a89a0;font-size:22px;line-height:1;"
+                    "background:none;border:none;padding:2px 6px;box-shadow:none}"
+                    ".modal .mclose:hover{color:#f09595;transform:none}"
+                    ".modal .msub{font-size:13px;color:#8a89a0;margin-bottom:10px}"
                     # 开关
                     ".tg{position:relative;width:44px;height:24px;flex-shrink:0}"
                     ".tg input{opacity:0;width:0;height:0;position:absolute}"
@@ -10270,7 +10294,7 @@ def start_health_server():
                     "this.classList.remove('show')\"></div>"
                     "<div class='wrap'>"
                     f"<nav class='side'>{''.join(items)}</nav>"
-                    f"<main class='main'>{body}</main>{_id_picker_js()}{_sort_js()}</div>"
+                    f"<main class='main'>{body}</main>{_id_picker_js()}{_sort_js()}{_GUARD_JS}</div>"
                     "<footer class='ft'>© 机器人后台</footer>"
                     "</body></html>").encode("utf-8")
 
@@ -10458,7 +10482,41 @@ def start_health_server():
             return (f"<div class='savebar'><button type='submit'>💾 {label}</button>"
                     f"<span class='hint'>{hint}</span></div>")
 
-        def _field_rows(gkey):
+        _GUARD_JS = ("<script>function openModal(id){document.getElementById(id).classList.add('open')} "
+                     "function closeModal(id){document.getElementById(id).classList.remove('open')} "
+                     "document.addEventListener('click',function(e){"
+                     "if(e.target.classList&&e.target.classList.contains('modal'))e.target.classList.remove('open')});"
+                     "document.addEventListener('keydown',function(e){"
+                     "if(e.key==='Escape')document.querySelectorAll('.modal.open').forEach("
+                     "function(m){m.classList.remove('open')})});</script>")
+
+        def _guard_badge(on):
+            return ("<span style='color:#6fd08c;font-weight:500'>✅ 已启用</span>" if on
+                    else "<span style='color:#8a89a0'>⛔ 已停用</span>")
+
+        def _guard_row(name, on, summary, mid):
+            """防护类型一览行（照方丈）：名称 + 状态徽章 + 参数摘要 + 编辑按钮。"""
+            return (f"<tr><td style='width:32%'><b>{html.escape(name)}</b></td>"
+                    f"<td>{_guard_badge(on)}<div class='m-sum' style='font-size:12px;color:#8a89a0;margin-top:3px'>"
+                    f"{summary}</div></td>"
+                    f"<td style='width:90px'><a class='q' style='cursor:pointer' onclick=\"openModal('{mid}')\">✏️ 编辑</a></td></tr>")
+
+        def _guard_modal(mid, title, sub, group, keys):
+            """防护编辑弹窗：内部仍用我们自己的表单排版（_field_rows）；带 _fields 限定提交范围，
+            /save 只套用弹窗内的字段，组内其他开关不会被误清零。"""
+            from_mark = ",".join(sorted(keys))
+            return (f"<div class='modal' id='{mid}'><div class='mbox'>"
+                    f"<div class='mhead'><h3>{html.escape(title)}</h3>"
+                    f"<button class='mclose' type='button' onclick=\"closeModal('{mid}')\">✕</button></div>"
+                    f"<div class='msub'>{sub}</div>"
+                    f"<form method='post' action='/save'>"
+                    f"<input type='hidden' name='group' value='{group}'>"
+                    f"<input type='hidden' name='_fields' value=\"{html.escape(from_mark, quote=True)}\">"
+                    + _field_rows(group, keys=keys) +
+                    f"<button type='submit' style='margin-top:16px'>💾 保存（{html.escape(title)}）</button></form></div></div>")
+
+        def _field_rows(gkey, keys=None):
+            # keys=None 渲染组内全部字段；传键集合则只渲染这些字段（防护弹窗用）
             rows = []
             if gkey == "tpls":
                 # 跨组聚合：全部话术模板按所属模块分区，一次改完
@@ -10552,7 +10610,7 @@ def start_health_server():
                         f"<small>范围 {lo} ~ {hi}</small></div>"
                         f"<input type='number' name='{key}' value='{cur}' step='{'0.1' if ftype == 'float' else '1'}'></div>")
 
-            grp_fields = [f for f in SETTINGS_FIELDS if f[6] == gkey]
+            grp_fields = [f for f in SETTINGS_FIELDS if f[6] == gkey and (keys is None or f[0] in keys)]
             if not grp_fields:
                 return ""
             if any(f[3] == "sep" for f in grp_fields):
@@ -10602,7 +10660,9 @@ def start_health_server():
                 stat("🏘️ 授权群数", f"{group_count}", "Bot 服务覆盖的群") +
                 stat("🎮 今日局数", f"{today_bets:,}", f"德州+赛车+21点+炸金花 · {today}") +
                 stat("📈 今日净盈亏", f"{today_profit:+,}", "正=玩家净赚，负=玩家净输") +
-                stat("🏆 赛季", season_txt, f"ID {season_id}" if season_id else "")
+                stat("🏆 赛季", season_txt, f"ID {season_id}" if season_id else "") +
+                stat("💾 数据存储", "✔ 持久化" if str(_data_file_status()).startswith("/data") else "⚠ 容器内",
+                     _data_file_status())
             )
             quick = "".join(f"<a class='q' href='/page/{g}'>{i} {n}</a>" for g, n, i in SETTINGS_GROUPS if g != "dashboard")
             # 每群活动详情：你说的"分开的活跃度"——每群一行，玩了多少局/邀了多少人/赛车开关一眼看完
@@ -11516,7 +11576,63 @@ def start_health_server():
                                  "改完点底部保存，各页面同步生效（原页面里的同一项也已移除，不会两处打架）。"
                                  "点右侧「🔍 预览」看填充后的效果。</div></div>"
                                  "<div class='card' style='margin-top:18px'>")
+                _modals = ""
+                if gkey == "autodel":
+                    # 照方丈「垃圾防护」结合自身排版：顶部防护一览（名称+状态+摘要+编辑），点编辑弹窗内仍是我们的表单
+                    def _multi_names(key, val):
+                        mp = dict(MULTI_OPTIONS.get(key, []))
+                        return ("、".join(mp.get(v.strip(), v.strip()) for v in str(val or "").split(",") if v.strip())
+                                or "未勾选任何规则（全部放行）")
+                    _K_RECYCLE = {"panel_delete_seconds", "points_delete_seconds", "reply_delete_seconds",
+                                  "settle_delete_seconds", "race_notice_delete_seconds"}
+                    _K_ANTISPAM = {"antispam_enabled", "antispam_repeat_n", "antispam_window", "antispam_timer_n",
+                                   "antispam_timer_tol", "antispam_mute_seconds", "antispam_mute_escalate",
+                                   "antispam_notice_seconds"}
+                    _K_TEXT = {"autodel_text_rules", "autodel_long_len", "autodel_text_seconds"}
+                    _K_MEDIA = {"autodel_media_types", "autodel_media_seconds"}
+                    _on_rec = any(globals().get(g) for g in ("PANEL_DELETE_SECONDS", "POINTS_DELETE_SECONDS",
+                                                             "REPLY_DELETE_SECONDS", "SETTLE_DELETE_SECONDS",
+                                                             "RACE_NOTICE_DELETE_SECONDS"))
+                    _sum_rec = (" · ".join(t for t, g in (("面板", "PANEL_DELETE_SECONDS"), ("命令", "POINTS_DELETE_SECONDS"),
+                                                           ("回复", "REPLY_DELETE_SECONDS"), ("结算", "SETTLE_DELETE_SECONDS"),
+                                                           ("赛车提示", "RACE_NOTICE_DELETE_SECONDS")) if globals().get(g)
+                                ) + " 后删除") if _on_rec else "全部为 0（不自动删除）"
+                    _sum_anti = (f"复读 {ANTISPAM_REPEAT_N} 条/{ANTISPAM_WINDOW}s 内 · 定时器特征 {ANTISPAM_TIMER_N} 条"
+                                 + (f" · 禁言 {ANTISPAM_MUTE_SECONDS}s" if ANTISPAM_MUTE_SECONDS else " · 只删不禁")) \
+                        if ANTISPAM_ENABLED else "开关关闭"
+                    _rows_g = (_guard_row("消息自动回收", _on_rec, _sum_rec, "md_recycle")
+                               + _guard_row("刷屏识别", bool(ANTISPAM_ENABLED), _sum_anti, "md_antispam")
+                               + _guard_row("文本类规则", bool(AUTODEL_TEXT_RULES), _multi_names("autodel_text_rules", AUTODEL_TEXT_RULES)
+                                            + (f" · 阈值 {AUTODEL_LONG_LEN} 字" if "long" in str(AUTODEL_TEXT_RULES) else ""), "md_textrule")
+                               + _guard_row("媒体与系统类规则", bool(AUTODEL_MEDIA_TYPES),
+                                            _multi_names("autodel_media_types", AUTODEL_MEDIA_TYPES), "md_mediarule"))
+                    form_open = ("<div class='card'><h3>🛡 防护类型</h3>"
+                                 "<div class='sub'>点「✏️ 编辑」调整对应防护；弹窗内保存立即生效，只影响该防护的参数</div>"
+                                 "<table class='tbl'><tr><th>防护项</th><th>状态 / 摘要</th><th style='width:90px'>操作</th></tr>"
+                                 + _rows_g + "</table></div>")
+                    _modals = (_guard_modal("md_recycle", "消息自动回收", "游戏卡片/下注面板、命令、查询回复、结算消息、赛车提示的自动删除（秒，0=不删）",
+                                            "autodel", _K_RECYCLE)
+                               + _guard_modal("md_antispam", "刷屏识别", "复读机与定时脚本特征识别（管理员豁免）",
+                                              "autodel", _K_ANTISPAM)
+                               + _guard_modal("md_textrule", "文本类规则", "勾选即删；未勾选的类型一律放行",
+                                              "autodel", _K_TEXT)
+                               + _guard_modal("md_mediarule", "媒体与系统类规则", "勾选即删；未勾选的类型一律放行",
+                                              "autodel", _K_MEDIA))
                 if gkey == "mod":
+                    _SENS_KEYS = {"sensitive_enabled", "sensitive_words", "sensitive_action",
+                                  "sensitive_mute_seconds", "link_whitelist_enabled", "link_whitelist"}
+                    _sens_on = bool(SENSITIVE_ENABLED or LINK_WHITELIST_ENABLED)
+                    _act_cn = ("删除", "删除+禁言", "删除+踢出")
+                    _sens_sum = (f"敏感词 {len(SENSITIVE_WORDS)} 个 · 命中处理 {_act_cn[SENSITIVE_ACTION] if SENSITIVE_ACTION in (0, 1, 2) else SENSITIVE_ACTION}"
+                                 + (f" · 白名单 {len(LINK_WHITELIST)} 个域名" if LINK_WHITELIST_ENABLED else " · 白名单关闭")
+                                 ) if _sens_on else "开关关闭"
+                    _sens_card = ("<div class='card' style='margin-top:18px'><h3>🛡 防护类型</h3>"
+                                  "<table class='tbl'><tr><th>防护项</th><th>状态 / 摘要</th><th style='width:90px'>操作</th></tr>"
+                                  + _guard_row("敏感词与域名白名单", _sens_on, _sens_sum, "md_sensitive")
+                                  + "</table></div>")
+                    _modals += _guard_modal("md_sensitive", "敏感词与域名白名单",
+                                            "检测群里消息包含违禁词时按设置处理（明文子串或 /正则/）；域名白名单内的链接不按「链接消息」规则删",
+                                            "mod", _SENS_KEYS)
                     _mod_on = [n for k, n in (("JOIN_VERIFY_ENABLED", "入群验证"), ("SENSITIVE_ENABLED", "敏感词"),
                                               ("LINK_WHITELIST_ENABLED", "域名白名单"),
                                               ("OBSERVE_CHECK_ENABLED", "观察期巡检"),
@@ -11534,6 +11650,7 @@ def start_health_server():
                                  "<a class='q' href='/page/members/join'>👥 入群与观察</a>"
                                  "<a class='q' href='/page/members/ops'>🔒 白名单</a>"
                                  "<a class='q' href='/page/admin/blacklist'>🚫 拉黑管理</a></div></div>"
+                                 + _sens_card +
                                  "<div class='card' style='margin-top:18px'>")
                 if gkey == "schedule":
                     def _sched_card(title, task, items, selected, subtitle, path):
@@ -11611,12 +11728,23 @@ def start_health_server():
                                  "<div class='sub'>作用群空=全授权群；不勾选部分=只在该群触发</div>"
                                  "<table class='tbl'><tr><th>商品</th><th>作用群</th></tr>" + _redeem_rows + "</table></div>"
                                  "<div class='card' style='margin-top:18px'>")
-                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
-                        + form_open +
-                        "<form method='post' action='/save'>"
-                        f"<input type='hidden' name='group' value='{gkey}'>"
-                        + _field_rows(gkey) +
-                        _savebar() + "</form></div>")
+                if gkey != "autodel":
+                    _field_keys = None
+                    if gkey == "mod":   # 敏感词已移入防护弹窗，主表单剔除（含其分节标题）
+                        _field_keys = ({f[0] for f in SETTINGS_FIELDS if f[6] == "mod"}
+                                       - {"sensitive_enabled", "sensitive_words", "sensitive_action",
+                                          "sensitive_mute_seconds", "link_whitelist_enabled", "link_whitelist",
+                                          "sep_mod_word"})
+                    body = (f"<h1>{gicon} {gname}</h1><div class='sub'>保存立即生效，无需重启</div>{msg}"
+                            + form_open +
+                            "<form method='post' action='/save'>"
+                            f"<input type='hidden' name='group' value='{gkey}'>"
+                            + _field_rows(gkey, keys=_field_keys) +
+                            _savebar() + "</form>" + _modals + "</div>")
+                else:
+                    body = (f"<h1>{gicon} {gname}</h1>"
+                            "<div class='sub'>点「✏️ 编辑」调整对应防护；弹窗内保存立即生效，只影响该项参数</div>"
+                            f"{msg}" + form_open + _modals + "</div>")
             return _page(gname, gkey, body)
 
         def _tpl_preview(key):
@@ -11664,7 +11792,8 @@ def start_health_server():
             def do_GET(self):
                 path = urlparse(self.path).path
                 if path == "/health":
-                    self._send(200, f"ok {BOT_VERSION}".encode(), [("Content-Type", "text/plain")]); return
+                    self._send(200, f"ok {BOT_VERSION} | data={_data_file_status()}".encode(),
+                               [("Content-Type", "text/plain")]); return
                 if path == "/magic":
                     """Telegram 一键登录：校验一次性 token → 直接建会话 → 302 进后台。"""
                     qs_m = parse_qs(urlparse(self.path).query)
@@ -12342,19 +12471,24 @@ def start_health_server():
                             pass
                         self._redirect("/page/security?saved=1"); return
                     valid_keys = _cross_keys(group) or {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
+                    # _fields：弹窗表单声明本次只提交这些键 → bool 补 0 / multi 清空只作用于声明的键，
+                    # 组内其他开关参数不受影响（不然保存一个弹窗会把没提交的开关全部关掉）
+                    _only_raw = form.get("_fields", [""])[0]
+                    only_set = ({s.strip() for s in _only_raw.split(",") if s.strip()} or None)
                     cfg = {}
                     for k, v in form.items():
-                        if k not in valid_keys:
+                        if k not in valid_keys or (only_set and k not in only_set):
                             continue
                         ft = next((t for kk, _g, _l, t, _lo, _hi, _grp in SETTINGS_FIELDS if kk == k), "")
                         if ft == "sep":
                             continue          # 分组标题行不落盘
                         cfg[k] = ",".join(v) if ft == "multi" else v[0]
                     for k, _g, _l, ft, _lo, _hi, _grp in SETTINGS_FIELDS:  # checkbox 未勾选时表单不含该键 → 显式补 0（仅 bool）
-                        if k in valid_keys and ft == "bool":
-                            cfg.setdefault(k, "0")
-                        if k in valid_keys and ft == "multi":
-                            cfg.setdefault(k, "")   # 全不勾 = 关闭全部规则
+                        if k in valid_keys and (only_set is None or k in only_set):
+                            if ft == "bool":
+                                cfg.setdefault(k, "0")
+                            elif ft == "multi":
+                                cfg.setdefault(k, "")   # 全不勾 = 关闭全部规则
                     applied = save_settings(cfg)
                     skipped = [k for k in cfg if k not in applied]
                     self._redirect(f"/page/{group}?saved=1" + ("&bad=1" if skipped else ""))

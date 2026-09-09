@@ -1,9 +1,10 @@
 import asyncio
+import contextvars
 import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-2354"
+BOT_VERSION = "2026-09-10-0116"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -483,10 +484,203 @@ SETTINGS_FIELDS = [
     ("invite_qualify_avatar",   "INVITE_QUALIFY_AVATAR",   "质量要求-进群须有头像(无则拒)", "bool", 0,   1,      "invite/qualify"),
     ("invite_qualify_username", "INVITE_QUALIFY_USERNAME", "质量要求-进群须有用户名(无则拒)","bool",0,   1,      "invite/qualify"),
 ]
+# settings键 -> 模块全局变量名（群级读写与网页渲染共用）
+_KEY2VAR = {f[0]: f[1] for f in SETTINGS_FIELDS if f[1]}
+# 全站唯一、按群覆盖无意义的键（网页密码/备份接收人/调度作用对象/公网地址/功能开关类）
+_GROUP_NEVER = {
+    "web_base_url", "backup_interval_hours", "backup_enabled",
+    "admin_report_time", "admin_report_enabled", "announce_enabled", "announce_time", "announce_text",
+    "daily_reset_time", "daily_reset_enabled", "leaderboard_time", "leaderboard_enabled",
+    "race_hourly_minute", "race_auto_enabled", "race_hourly_start", "race_hourly_end",
+    "stale_text_command_seconds", "broadcast_enabled", "broadcast_min_amount",
+    "admin_adjust", "fund_flow_alert",
+    "rank_1_emoji", "rank_2_emoji", "rank_3_emoji",
+}
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时明文（仅内存，落盘绝不写它）；改密后由 hash 接管校验
 _web_password_hash = ""  # pbkdf2-sha256 hex：真正落盘/进备份的凭据（拿到备份也还原不出密码）
 _web_salt = ""           # 上面 hash 配套的盐
+
+# ---------- 群级设置覆盖（2026-09-10 用户诉求：后台按群切设置） ----------
+# 结构：{cid(int): {settings键: 值}}。语义 = **只存差异**：某群没覆盖的键，读取时继承全局默认。
+# 因此改全局默认，所有没覆盖该项的群自动跟着变；群级只放"这个群特意要不一样"的值。
+# 用 group_get(cid, key) 读取，永远不要直接 globals()[GNAME]——那样会绕过群级覆盖。
+GROUP_SETTINGS = {}
+
+# 哪些设置键支持群级覆盖（= 与具体群玩法/策略相关的键）。
+# 刻意排除的：网页密码、备份接收人、调度作用对象、web_base_url 等"全站唯一"的键——
+# 它们按群覆盖没有意义，反而会让管理员困惑。
+# 具体清单在 SETTINGS_FIELDS 之后填充（需先有字段表才能推导）。
+GROUP_SCOPED_KEYS = set()
+GROUP_SCOPED_KEYS.update(
+    f[0] for f in SETTINGS_FIELDS
+    if f[1] and f[3] not in ("sep", "levels", "items", "cmd") and f[0] not in _GROUP_NEVER
+)
+# 排除理由：
+#   sep   = 分组标题行，不是真设置
+#   levels/items = 积分等级表 / 商城表（全站共享的数据表，按群覆盖会让"等级"概念崩掉）
+#   cmd   = 自定义指令名（Telegram 命令是全 Bot 唯一，做不到按群）
+# 其余（数字/开关/多选/话术模板/表情/词表/下注档位）全部支持按群覆盖。
+
+def group_get(cid, key, default=None):
+    """读设置项：该群有覆盖用覆盖值，否则用全局默认。
+
+    cid 为 0/None/非法 → 直接走全局（全局页与所有旧调用点零影响）。
+    key 不在 GROUP_SCOPED_KEYS 里 → 也走全局（不支持的键不参与群级覆盖）。
+    """
+    gname = _KEY2VAR.get(key)
+    if gname is None:
+        return default
+    try:
+        cid = int(cid or 0)
+    except (TypeError, ValueError):
+        cid = 0
+    if cid and key in GROUP_SCOPED_KEYS:
+        rec = GROUP_SETTINGS.get(cid) or {}
+        if key in rec:
+            return rec[key]
+    return globals().get(gname, default)
+
+def group_set(cid, key, value):
+    """写群级覆盖。value=None 表示**清除覆盖**（回继承全局）。返回 True=写入成功。"""
+    gname = _KEY2VAR.get(key)
+    if gname is None:
+        return False
+    try:
+        cid = int(cid or 0)
+    except (TypeError, ValueError):
+        return False
+    if not cid or key not in GROUP_SCOPED_KEYS:
+        return False
+    if value is None:
+        rec = GROUP_SETTINGS.get(cid)
+        if rec:
+            rec.pop(key, None)
+            if not rec:
+                GROUP_SETTINGS.pop(cid, None)
+        return True
+    GROUP_SETTINGS.setdefault(cid, {})[key] = value
+    return True
+
+def group_effective(cid, key, default=None):
+    """该群当前生效值 + 是否来自群级覆盖。返回 (值, 是否覆盖)。网页回显用。"""
+    try:
+        cid = int(cid or 0)
+    except (TypeError, ValueError):
+        cid = 0
+    if cid and key in GROUP_SCOPED_KEYS and key in (GROUP_SETTINGS.get(cid) or {}):
+        return GROUP_SETTINGS[cid][key], True
+    return group_get(cid, key, default), False
+
+# ---------- 当前群上下文（contextvars）：业务读取点零改动拿到群级值 ----------
+# 设计要点：业务代码里 500+ 处直接读模块全局（如 BJ_MIN_BET），不可能逐个改签名传 cid。
+# 改用「上下文变量」承载"这条消息属于哪个群"，再让统一读取入口 sget() 按上下文解析：
+#   - 处理某群更新时（handler / 定时任务 / 网页请求）set 一次 cid，整条调用链自动生效；
+#   - 没 set（启动初始化、跨群聚合、私聊命令）→ cid=0 → 读全局默认，**行为与改前逐字节一致**。
+# 这是「零回归」的关键：GROUP_SETTINGS 为空时 sget("X") 恒等于裸全局 X。
+_CUR_CID = contextvars.ContextVar("cur_cid", default=0)
+_VAR2KEY = {f[1]: f[0] for f in SETTINGS_FIELDS if f[1]}   # 全局变量名 -> settings键
+_MISS = object()
+
+def cur_cid():
+    """当前上下文群 ID（0=无群上下文，走全局默认）。"""
+    try:
+        return int(_CUR_CID.get() or 0)
+    except (TypeError, ValueError):
+        return 0
+
+@asynccontextmanager
+async def group_ctx_async(cid):
+    tok = _CUR_CID.set(_safe_cid(cid))
+    try: yield
+    finally: _CUR_CID.reset(tok)
+
+class group_ctx:
+    """同步上下文管理器：with group_ctx(cid): ... 期间 sget() 按该群解析。
+
+    用于定时任务按群循环、网页请求渲染等**同步**场景。
+    """
+    __slots__ = ("_cid", "_tok")
+
+    def __init__(self, cid):
+        self._cid = _safe_cid(cid)
+
+    def __enter__(self):
+        self._tok = _CUR_CID.set(self._cid)
+        return self._cid
+
+    def __exit__(self, *exc):
+        _CUR_CID.reset(self._tok)
+        return False
+
+def _safe_cid(cid):
+    try:
+        return int(cid or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def sget(name, default=None):
+    """读设置项（**业务代码统一入口**）：name 是模块全局变量名，如 sget("BJ_MIN_BET")。
+
+    解析顺序：当前群覆盖 → 全局默认。cid 来自 contextvars（handler/定时任务/网页请求会设）。
+    GROUP_SETTINGS 为空或该群没覆盖该键时，返回值与直接读全局变量完全一致。
+    """
+    cid = cur_cid()
+    if cid:
+        key = _VAR2KEY.get(name)
+        if key is not None:
+            rec = GROUP_SETTINGS.get(cid)
+            if rec:
+                v = rec.get(key, _MISS)
+                if v is not _MISS:
+                    return v
+    return globals().get(name, default)
+
+def sget_key(key, default=None):
+    """按 settings 键读（等价 sget，键名更顺手时用）。"""
+    gname = _KEY2VAR.get(key)
+    if gname is None:
+        return default
+    return sget(gname, default)
+
+def _bind_update_cid(update):
+    """把「这条更新属于哪个群」写进上下文，让整条调用链的 sget() 自动解析群级覆盖。
+
+    7 个更新入口（命令/回调/文本/媒体/成员变动/入群消息/入群申请）第一行调用。
+    私聊、频道、无 chat 的更新 → cid=0 → 全部走全局默认（与改前一致）。
+    """
+    try:
+        chat = update.effective_chat
+        _CUR_CID.set(int(chat.id) if chat is not None else 0)
+    except Exception:
+        _CUR_CID.set(0)
+    return cur_cid()
+
+def _group_settings_json():
+    """群级覆盖的落盘形式（json 的键必须是字符串，读回时再转 int）。"""
+    return {str(cid): dict(rec) for cid, rec in GROUP_SETTINGS.items() if rec}
+
+def _normalize_settings_values(cfg: dict):
+    """按 apply_settings 的规则算出"标准值"，但**不改动**内存里的全局设置。
+
+    用途：群级保存要拿"标准值"跟全局默认比对，才能只存差异。
+    做法：先快照所有设置全局变量 → 调 apply_settings 归一化 → 立刻还原。
+    只传入群级键（levels/items/cmd 已在 GROUP_SCOPED_KEYS 里排除），
+    因此 _normalize_levels() 之类会原地改列表的分支不会被触发。
+    """
+    sub = {k: v for k, v in cfg.items() if k in GROUP_SCOPED_KEYS}
+    if not sub:
+        return {}
+    snap = {}
+    for _f in SETTINGS_FIELDS:
+        _g = _f[1]
+        if _g and _g not in snap:
+            snap[_g] = globals().get(_g)
+    try:
+        return apply_settings(sub)
+    finally:
+        for _g, _v in snap.items():
+            globals()[_g] = _v
 
 def _hash_web_pwd(pwd, salt):
     """后台密码摘要（pbkdf2-sha256）。落盘只存它，明文只活在内存里。"""
@@ -923,6 +1117,8 @@ def _write_settings_file(cfg: dict, password: str, cmd_aliases=None, tg_menu=Non
                "web_password_salt": _web_salt,
                "cmd_aliases": cmd_aliases or {}, "tg_menu": tg_menu or [],
                "sidebar_order": sidebar_order,
+               # 群级覆盖：{群ID: {设置键: 值}}，只存与该群"全局默认"不同的项
+               "group_settings": _group_settings_json(),
                "chat_rules": list(chat_rules), "buy_packages": list(buy_packages),
                "point_levels": list(POINT_LEVELS), "mall_items": list(MALL_ITEMS),
                "redeem_goods": list(redeem_goods),
@@ -1300,6 +1496,19 @@ def load_settings():
             if isinstance(v, list):
                 gl.clear(); gl.extend(x for x in v if isinstance(x, dict))
         _normalize_levels()   # 旧存档等级表补 perms/on（幂等）
+        # 群级覆盖：{群ID: {设置键: 值}}。旧存档没有这个键 → 不动内存（避免把已恢复的覆盖清掉）
+        if "group_settings" in payload:
+            _gs = payload.get("group_settings")
+            GROUP_SETTINGS.clear()
+            if isinstance(_gs, dict):
+                for _cid, _rec in _gs.items():
+                    try:
+                        _c = int(_cid)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(_rec, dict) and _rec:
+                        GROUP_SETTINGS[_c] = {str(k): v for k, v in _rec.items()}
+            logger.info("群级覆盖已恢复：%d 个群", len(GROUP_SETTINGS))
         # 4 个调度任务的作用对象
         st = payload.get("schedule_targets") or {}
         if isinstance(st, dict):
@@ -1340,15 +1549,49 @@ def save_settings(cfg: dict, new_password: str = ""):
             _web_password = new_password.strip()
         _write_settings_file(stored, _web_password, raw.get("cmd_aliases") or {}, raw.get("tg_menu") or [])
     return applied
+
+def save_group_settings(cid, cfg: dict):
+    """网页在「某个群」下保存：只把与该群全局默认不同的项存成群级覆盖。
+
+    用户确认的口径：① 全部设置项都能按群覆盖 ② 继承全局、只存差异。
+    因此：
+      - 标准值 == 全局默认 → **清除**该群覆盖（回继承）。否则会出现"存了个和全局一样的值，
+        以后改全局这个群却不跟着变"的反直觉行为。
+      - 标准值 != 全局默认 → 写入群级覆盖。
+      - 不属于群级范围的键（密码/调度/备份/等级表/指令名）→ 退回按全局保存，行为与改前一致。
+    返回 applied（键 → 标准值），网页据此提示"已保存/已跳过"。
+    """
+    cid = _safe_cid(cid)
+    if not cid:
+        return save_settings(cfg)
+    scoped = {k: v for k, v in cfg.items() if k in GROUP_SCOPED_KEYS}
+    rest = {k: v for k, v in cfg.items() if k not in GROUP_SCOPED_KEYS}
+    norm = _normalize_settings_values(scoped)
+    applied = {}
+    for key, val in norm.items():
+        gname = _KEY2VAR.get(key)
+        if gname is None:
+            continue
+        if val == globals().get(gname):
+            group_set(cid, key, None)      # 与全局一致 → 不存差异，回继承
+        else:
+            group_set(cid, key, val)       # 该群专属
+        applied[key] = val
+    if rest:
+        applied.update(save_settings(rest))   # 全局键：照旧写全局
+    else:
+        save_settings({})                     # 仅触发落盘（把 group_settings 写进设置文件）
+    logger.info("群 %s 保存群级设置：覆盖 %d 项，全局 %d 项", cid, len(norm), len(rest))
+    return applied
 BEIJING_TZ = timezone(timedelta(hours=8))
 HAND_NAME_CN = {"High Card":"高牌", "Pair":"一对", "One Pair":"一对", "Two Pair":"两对", "Three of a Kind":"三条", "Straight":"顺子", "Flush":"同花", "Full House":"葫芦", "Four of a Kind":"四条", "Straight Flush":"同花顺", "Royal Flush":"皇家同花顺"}
 RANK_ICONS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 
 def rank_marker(index):
-    if index == 1 and RANK_1_EMOJI: return RANK_1_EMOJI
-    if index == 2 and RANK_2_EMOJI: return RANK_2_EMOJI
-    if index == 3 and RANK_3_EMOJI: return RANK_3_EMOJI
+    if index == 1 and sget("RANK_1_EMOJI"): return sget("RANK_1_EMOJI")
+    if index == 2 and sget("RANK_2_EMOJI"): return sget("RANK_2_EMOJI")
+    if index == 3 and sget("RANK_3_EMOJI"): return sget("RANK_3_EMOJI")
     return RANK_ICONS[index - 1] if 1 <= index <= len(RANK_ICONS) else f"🔸{index}"
 
 
@@ -1362,12 +1605,12 @@ def total_profit_by_game(game_profit, chat_id):
 
 
 # ---------- 数据 ----------
-game_chips = defaultdict(lambda: defaultdict(lambda: GAME_STARTING_CHIPS))  # 统一积分钱包（全游戏/签到/红包/商城共用，初始 5W）
+game_chips = defaultdict(lambda: defaultdict(lambda: sget("GAME_STARTING_CHIPS")))  # 统一积分钱包（全游戏/签到/红包/商城共用，初始 5W）
 AUTHORIZED_GROUPS = set()
 BLACKLISTED_USERS = set()  # 被拉黑、禁止使用该机器人的用户（管理员可解封）
 race_history = defaultdict(list)
 blackjack_history = defaultdict(list) # 新增 21点历史
-race_daily_stats = defaultdict(lambda: [0] * HORSE_COUNT)
+race_daily_stats = defaultdict(lambda: [0] * sget("HORSE_COUNT"))
 poker_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 race_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 blackjack_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -1631,7 +1874,7 @@ def force_save_now():
                 # 设置快照内嵌进数据：跟着备份/恢复一起走，容器重建后设置不回退
                 "_settings": dict(SETTINGS_SNAPSHOT, chat_rules=list(chat_rules),
                                   buy_packages=list(buy_packages),
-                                  point_levels=list(POINT_LEVELS), mall_items=list(MALL_ITEMS),
+                                  point_levels=list(sget("POINT_LEVELS")), mall_items=list(sget("MALL_ITEMS")),
                                   redeem_goods=list(redeem_goods)),
                 # 群组抽奖：每群活动（含已结束的，方便历史展示）
                 "_lotteries": {str(cid): {k: v for k, v in lo.items() if k != "msg_id"}
@@ -1913,9 +2156,9 @@ def load_data():
         for cid, value in data.get("hourly_race_enabled", {}).items(): hourly_race_enabled[int(cid)] = bool(value)
         for cid, value in data.get("race_history", {}).items(): race_history[int(cid)] = list(value)[-10:]
         for cid, value in data.get("blackjack_history", {}).items(): blackjack_history[int(cid)] = list(value)[-10:]
-        for cid, value in data.get("race_daily_stats", {}).items(): race_daily_stats[int(cid)] = list(value)[:HORSE_COUNT]
+        for cid, value in data.get("race_daily_stats", {}).items(): race_daily_stats[int(cid)] = list(value)[:sget("HORSE_COUNT")]
         for cid, users in data.get("daily_emergency_used", {}).items():
-            for uid, used in users.items(): daily_emergency_used[int(cid)][int(uid)] = min(int(used), EMERGENCY_MAX_USES)
+            for uid, used in users.items(): daily_emergency_used[int(cid)][int(uid)] = min(int(used), sget("EMERGENCY_MAX_USES"))
         last_business_date = data.get("last_business_date", "")
         # 全系游戏退款恢复逻辑
         for cid, users in data.get("pending_game_bets", {}).items():
@@ -2305,7 +2548,7 @@ async def send_settle(app, cid, text, kb=None, parse_mode="HTML", delete_after=N
     结算自动删除在这里是默认行为，不用（也不会忘）另写 schedule_delete。
     回收时长由网页「通用与应急 → 游戏结算消息自动删除(秒)」控制，设 0 = 永久保留。
     """
-    secs = int(SETTLE_DELETE_SECONDS if delete_after is None else delete_after)
+    secs = int(sget("SETTLE_DELETE_SECONDS") if delete_after is None else delete_after)
     kwargs = {"parse_mode": parse_mode}
     if kb is not None:
         kwargs["reply_markup"] = kb
@@ -2323,7 +2566,7 @@ async def send_reply(update, context, text, kb=None, parse_mode=None, delete_aft
     时长由网页「积分系统 → 积分设置 → 查询回复自动删除(秒)」控制，0 = 永久保留。
     注意：用户发的命令本身按 POINTS_DELETE_SECONDS 在 _dispatch_alias 全局统一删，无需关心。
     """
-    secs = int(REPLY_DELETE_SECONDS if delete_after is None else delete_after)
+    secs = int(sget("REPLY_DELETE_SECONDS") if delete_after is None else delete_after)
     kwargs = {}
     if parse_mode is None:
         parse_mode = "HTML"   # 默认 HTML：<b>/<code> 生效；解析失败自动回退纯文本
@@ -2366,15 +2609,15 @@ def ledger_add(cid, frm, to, amt, typ):
 
 def calc_rake(nets):
     """计算抽水（纯计算不扣款）：对赢家净赢按 RAKE_PERCENT% 抽成。返回 (总抽水, {uid: 金额})。"""
-    if not RAKE_ENABLED or RAKE_PERCENT <= 0:
+    if not sget("RAKE_ENABLED") or sget("RAKE_PERCENT") <= 0:
         return 0, {}
     rake_total, rake_per = 0, {}
     for uid, net in (nets or {}).items():
         if not isinstance(uid, int) or uid <= 0 or net <= 0:
             continue
-        if net < RAKE_MIN_NET:
+        if net < sget("RAKE_MIN_NET"):
             continue
-        amt = int(net * RAKE_PERCENT / 100)
+        amt = int(net * sget("RAKE_PERCENT") / 100)
         if amt <= 0:
             continue
         rake_per[uid] = amt
@@ -2439,7 +2682,7 @@ def record_game_flows(cid, nets, typ):
 async def broadcast_big_win(app, cid, uid, game_name, net, detail=""):
     """大奖战报：单局净赢超阈值时推送到其他授权群（排除事发群），制造全群气氛。"""
     try:
-        if not BROADCAST_ENABLED or net < max(1, BROADCAST_MIN_AMOUNT): return
+        if not sget("BROADCAST_ENABLED") or net < max(1, sget("BROADCAST_MIN_AMOUNT")): return
         if cid not in AUTHORIZED_GROUPS: return
         name = await get_name(app, uid, cid=cid)
         extra = f"\n{detail}" if detail else ""
@@ -2454,16 +2697,16 @@ async def broadcast_big_win(app, cid, uid, game_name, net, detail=""):
 async def emergency_if_needed(cid, uid, app, wallet=None, poker=None):
     used = daily_emergency_used[cid][uid]
     wallet = wallet or game_chips
-    if wallet[cid][uid] != 0 or used >= EMERGENCY_MAX_USES: return False
+    if wallet[cid][uid] != 0 or used >= sget("EMERGENCY_MAX_USES"): return False
     # 参与门槛：纯靠归零白嫖的小号不给（本群累计玩过 EMERGENCY_MIN_GAMES 局才发）
-    if int(EMERGENCY_MIN_GAMES or 0) > 0 and int(games_played[cid][uid] or 0) < int(EMERGENCY_MIN_GAMES):
+    if int(sget("EMERGENCY_MIN_GAMES") or 0) > 0 and int(games_played[cid][uid] or 0) < int(sget("EMERGENCY_MIN_GAMES")):
         return False
-    wallet[cid][uid] = EMERGENCY_CHIPS
-    if poker and uid in poker.chips: poker.chips[uid] += EMERGENCY_CHIPS
-    _earn_add(cid, uid, EMERGENCY_CHIPS)   # 归零赠送属于「白给分」，计入累计获得
+    wallet[cid][uid] = sget("EMERGENCY_CHIPS")
+    if poker and uid in poker.chips: poker.chips[uid] += sget("EMERGENCY_CHIPS")
+    _earn_add(cid, uid, sget("EMERGENCY_CHIPS"))   # 归零赠送属于「白给分」，计入累计获得
     daily_emergency_used[cid][uid] = used + 1; save_data()
-    remaining = EMERGENCY_MAX_USES - daily_emergency_used[cid][uid]
-    await safe_send(app.bot, cid, f"🆘 {await get_name(app, uid)} 积分归零，已赠送 {EMERGENCY_CHIPS} 应急积分（今日已补充 {daily_emergency_used[cid][uid]}/{EMERGENCY_MAX_USES} 次，剩余 {remaining} 次）。")
+    remaining = sget("EMERGENCY_MAX_USES") - daily_emergency_used[cid][uid]
+    await safe_send(app.bot, cid, f"🆘 {await get_name(app, uid)} 积分归零，已赠送 {sget('EMERGENCY_CHIPS')} 应急积分（今日已补充 {daily_emergency_used[cid][uid]}/{sget('EMERGENCY_MAX_USES')} 次，剩余 {remaining} 次）。")
     return True
 
 
@@ -2504,7 +2747,7 @@ class BlackjackGame:
     def start(self):
         if not self.players: return False
         self.phase = "playing"
-        self.deck = [r + s for r in "23456789TJQKA" for s in "shdc"] * BLACKJACK_DECKS
+        self.deck = [r + s for r in "23456789TJQKA" for s in "shdc"] * sget("BLACKJACK_DECKS")
         random.shuffle(self.deck)
         # 发初始牌
         for _ in range(2):
@@ -2528,7 +2771,7 @@ class BlackjackGame:
     def _draw(self):
         """发牌；牌堆耗尽时自动重洗一副新牌，避免抽牌崩溃。"""
         if not self.deck:
-            self.deck = [r + s for r in "23456789TJQKA" for s in "shdc"] * BLACKJACK_DECKS
+            self.deck = [r + s for r in "23456789TJQKA" for s in "shdc"] * sget("BLACKJACK_DECKS")
             random.shuffle(self.deck)
         return self.deck.pop()
 
@@ -2646,7 +2889,7 @@ def _season_blind(game, daily_val, season_val):
     此时三个值整体按排位参数走（填 0 的项即「排位局该项为 0」）。
     全部为 0 = 没动过 → 沿用日常德州。
     """
-    if getattr(game, "season", False) and (SEASON_SMALL_BLIND or SEASON_BIG_BLIND or SEASON_ANTE):
+    if getattr(game, "season", False) and (sget("SEASON_SMALL_BLIND") or sget("SEASON_BIG_BLIND") or sget("SEASON_ANTE")):
         return season_val
     return daily_val
 
@@ -2672,32 +2915,32 @@ class PokerGame:
     @property
     def min_raise(self):
         """最低加注额。"""
-        return _season_rule(self, FIXED_MIN_RAISE, SEASON_FIXED_MIN_RAISE)
+        return _season_rule(self, sget("FIXED_MIN_RAISE"), sget("SEASON_FIXED_MIN_RAISE"))
 
     @property
     def turn_timeout(self):
         """单回合思考时间（秒）。"""
-        return _season_rule(self, TURN_TIMEOUT, SEASON_TURN_TIMEOUT)
+        return _season_rule(self, sget("TURN_TIMEOUT"), sget("SEASON_TURN_TIMEOUT"))
 
     @property
     def wait_timeout(self):
         """等待房倒计时（秒）。"""
-        return _season_rule(self, ROOM_WAIT_TIMEOUT, SEASON_ROOM_WAIT_TIMEOUT)
+        return _season_rule(self, sget("ROOM_WAIT_TIMEOUT"), sget("SEASON_ROOM_WAIT_TIMEOUT"))
 
     @property
     def ante_value(self):
         """前注。"""
-        return _season_blind(self, ANTE, SEASON_ANTE)
+        return _season_blind(self, sget("ANTE"), sget("SEASON_ANTE"))
 
     @property
     def small_blind_value(self):
         """小盲注。"""
-        return _season_blind(self, SMALL_BLIND, SEASON_SMALL_BLIND)
+        return _season_blind(self, sget("SMALL_BLIND"), sget("SEASON_SMALL_BLIND"))
 
     @property
     def big_blind_value(self):
         """大盲注。"""
-        return _season_blind(self, BIG_BLIND, SEASON_BIG_BLIND)
+        return _season_blind(self, sget("BIG_BLIND"), sget("SEASON_BIG_BLIND"))
 
     def add(self, uid):
         if self.phase != "waiting" or uid in self.players: return False
@@ -2707,10 +2950,10 @@ class PokerGame:
                 return False
             wallet = season_points
             if wallet[self.chat_id][uid] <= 0: return False
-            if SEASON_MIN_ENTRY_CHIPS and wallet[self.chat_id][uid] < SEASON_MIN_ENTRY_CHIPS: return False
+            if sget("SEASON_MIN_ENTRY_CHIPS") and wallet[self.chat_id][uid] < sget("SEASON_MIN_ENTRY_CHIPS"): return False
         else:
             wallet = game_chips
-            if wallet[self.chat_id][uid] < MIN_ENTRY_CHIPS: return False
+            if wallet[self.chat_id][uid] < sget("MIN_ENTRY_CHIPS"): return False
         self.players.append(uid); self.chips[uid] = wallet[self.chat_id][uid]; self.total_bet[uid] = 0
         return True
 
@@ -3072,10 +3315,10 @@ async def settle_poker(game, app):
             for p in game.players:
                 if p < 0: continue
                 if season_points[game.chat_id][p] <= 0:
-                    if season_rebuy[game.chat_id][p] < SEASON_REBUY_COUNT:
+                    if season_rebuy[game.chat_id][p] < sget("SEASON_REBUY_COUNT"):
                         season_rebuy[game.chat_id][p] += 1
-                        season_points[game.chat_id][p] = SEASON_REBUY_AMOUNT
-                        lines.append(f"⚠️ {names[p]} 破产，启用应急筹码 +{SEASON_REBUY_AMOUNT}（剩 {SEASON_REBUY_COUNT - season_rebuy[game.chat_id][p]} 次）")
+                        season_points[game.chat_id][p] = sget("SEASON_REBUY_AMOUNT")
+                        lines.append(f"⚠️ {names[p]} 破产，启用应急筹码 +{sget('SEASON_REBUY_AMOUNT')}（剩 {sget('SEASON_REBUY_COUNT') - season_rebuy[game.chat_id][p]} 次）")
             # 排位赛跨午夜补重置：本局横跨业务日结束，错过的午夜刷新在此补记当日盈亏并归位到基准分
             if game.start_date and business_date() != game.start_date:
                 for uid in game.players:
@@ -3094,10 +3337,10 @@ async def settle_poker(game, app):
             lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
             
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
-        if SETTLE_DELETE_SECONDS > 0:
-            schedule_delete(app, game.chat_id, delivered, SETTLE_DELETE_SECONDS)
+        if sget("SETTLE_DELETE_SECONDS") > 0:
+            schedule_delete(app, game.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
         # 牌桌卡片此前结算后一直留在群里，结束后延迟清理
-        schedule_delete_ids(app, game.chat_id, game.game_msg_id, PANEL_DELETE_SECONDS)
+        schedule_delete_ids(app, game.chat_id, game.game_msg_id, sget("PANEL_DELETE_SECONDS"))
         # 单赢场景（只剩一人未弃牌）：提供可选亮牌按钮，尊重德州 muck 规则，不强制亮牌
         if len(game.showdown_order) <= 1:
             winner = game.showdown_order[0] if game.showdown_order else None
@@ -3162,9 +3405,9 @@ class HorseRace:
     def __init__(self, cid, owner, jackpot, mode=None):
         self.chat_id, self.owner_id, self.jackpot = cid, owner, jackpot
         self.mode = mode or current_game_mode()
-        self.bets, self.total_bets, self.pool = defaultdict(dict), [0] * HORSE_COUNT, 0
-        self.phase, self.create_time, self.positions, self.arrivals = "betting", time.time(), [0.0] * HORSE_COUNT, []
-        self.display_positions = [0] * HORSE_COUNT  # 显示格（=节奏曲线进度的整数部分，严格跟随真实进度）
+        self.bets, self.total_bets, self.pool = defaultdict(dict), [0] * sget("HORSE_COUNT"), 0
+        self.phase, self.create_time, self.positions, self.arrivals = "betting", time.time(), [0.0] * sget("HORSE_COUNT"), []
+        self.display_positions = [0] * sget("HORSE_COUNT")  # 显示格（=节奏曲线进度的整数部分，严格跟随真实进度）
         self.arrival_times, self.race_start_time = {}, None
         self.notified, self.name_cache = set(), {}
         self.game_msg_id = self.animation_msg_id = None
@@ -3172,7 +3415,7 @@ class HorseRace:
         self.final_odds = None
         self.bet_odds = defaultdict(dict)  # 每注下注瞬间锁定的赔率（uid->horse 金额加权平均）
         self.panel_cd = 0.0  # 看板重发冷却：重复发 /赛车 时避免刷屏（未超时只回一句文字）
-        rates = [random.uniform(.18, .35) for _ in range(HORSE_COUNT)]
+        rates = [random.uniform(.18, .35) for _ in range(sget("HORSE_COUNT"))]
         # 先按显示精度（整数%）四舍五入再归一化，避免"显示胜率相同、真实胜率不同"导致同胜率马赔率不同
         rates = [round(r, 2) for r in rates]
         total = sum(rates)
@@ -3186,9 +3429,9 @@ class HorseRace:
         # - 注额越多 -> 因子越小 -> 赔率越低（热门马赔得少，标准押注池逻辑）
         # - 单调约束：胜率越低赔率必须越高，杜绝「低胜率马赔率反而更低」的怪象
         total = sum(self.total_bets)
-        avg = 1.0 / HORSE_COUNT
+        avg = 1.0 / sget("HORSE_COUNT")
         raw = []
-        for i in range(HORSE_COUNT):
+        for i in range(sget("HORSE_COUNT")):
             base = 1.0 / self.rates[i]                       # 自然公平赔率，无封顶
             if total > 0 and self.total_bets[i] > 0:
                 share = self.total_bets[i] / total
@@ -3198,17 +3441,17 @@ class HorseRace:
                 factor = 1.0
             raw.append(base * factor)
         # 赔率上限（经济保护）：默认 10 倍，0=无上限（旧行为）。封顶在单调约束前统一应用
-        if RACE_ODDS_CAP > 0:
-            raw = [min(value, RACE_ODDS_CAP) for value in raw]
+        if sget("RACE_ODDS_CAP") > 0:
+            raw = [min(value, sget("RACE_ODDS_CAP")) for value in raw]
         # 单调约束：按胜率升序，确保低胜率马的赔率不低于高胜率马
-        order = sorted(range(HORSE_COUNT), key=lambda i: self.rates[i])
+        order = sorted(range(sget("HORSE_COUNT")), key=lambda i: self.rates[i])
         for a, b in zip(order, order[1:]):
             if raw[a] < raw[b]:
                 raw[b] = raw[a]
         # 同显示胜率（整数%）的馬，赔率必须完全一致，避免"胜率一样赔率却不同"的困惑。
         # 取组内最低赔率统一，不抬高任一匹，保证庄家不被过度赔付。
         groups = {}
-        for i in range(HORSE_COUNT):
+        for i in range(sget("HORSE_COUNT")):
             groups.setdefault(round(self.rates[i] * 100), []).append(i)
         for grp in groups.values():
             if len(grp) > 1:
@@ -3220,7 +3463,7 @@ class HorseRace:
     async def bet(self, uid, horse, amount):
         if self.phase != "betting" or self.cancelled: return False, "当前不是下注阶段"
         wallet = game_chips
-        if not 0 <= horse < HORSE_COUNT or amount <= 0: return False, "马号或金额无效"
+        if not 0 <= horse < sget("HORSE_COUNT") or amount <= 0: return False, "马号或金额无效"
         async with wallet_locks[uid]:
             # 锁内重校阶段：等锁期间比赛可能已开跑，避免按旧赔率接受下注
             if self.phase != "betting" or self.cancelled: return False, "当前不是下注阶段"
@@ -3239,37 +3482,37 @@ class HorseRace:
         save_data(); return True, "下注成功"
 
     def buttons(self):
-        return InlineKeyboardMarkup([[InlineKeyboardButton(f"{HORSE_EMOJI[i]} {amount}", callback_data=f"horsebet_{i}_{amount}") for i in range(HORSE_COUNT)] for amount in FIXED_BET_AMOUNTS])
+        return InlineKeyboardMarkup([[InlineKeyboardButton(f"{sget('HORSE_EMOJI')[i]} {amount}", callback_data=f"horsebet_{i}_{amount}") for i in range(sget("HORSE_COUNT"))] for amount in sget("FIXED_BET_AMOUNTS")])
 
     async def view(self, app):
         """保持原版赛车下注界面的赛道、路书、胜率和投注信息结构。"""
-        remain = max(0, int(RACE_AUTO_START - (time.time() - self.create_time)))
+        remain = max(0, int(sget("RACE_AUTO_START") - (time.time() - self.create_time)))
         minutes, seconds = divmod(remain, 60)
-        history = "".join(HORSE_EMOJI[index] for index in race_history[self.chat_id][-10:]) or "暂无"
+        history = "".join(sget("HORSE_EMOJI")[index] for index in race_history[self.chat_id][-10:]) or "暂无"
         stats = race_daily_stats[self.chat_id]
         total_wins = sum(stats)
         odds = self.odds()
         lines = [
             f"🏁 赛车大赛 {race_id(self.create_time)} 🏁 【下注中】",
             "━" * 14,
-            *[f"🏁{'━' * 13}{HORSE_EMOJI[i]}" for i in range(HORSE_COUNT)],
+            *[f"🏁{'━' * 13}{sget('HORSE_EMOJI')[i]}" for i in range(sget("HORSE_COUNT"))],
             "━" * 14,
             "📊 路书",
             f"近10场: {history}",
             "📜 当日胜率:",
-            "  " + " | ".join(f"{HORSE_EMOJI[i]} {stats[i]}胜" for i in range(HORSE_COUNT)),
-            "  " + " | ".join(f"{HORSE_EMOJI[i]} {stats[i] / total_wins * 100:.0f}%" if total_wins else f"{HORSE_EMOJI[i]} 0%" for i in range(HORSE_COUNT)),
+            "  " + " | ".join(f"{sget('HORSE_EMOJI')[i]} {stats[i]}胜" for i in range(sget("HORSE_COUNT"))),
+            "  " + " | ".join(f"{sget('HORSE_EMOJI')[i]} {stats[i] / total_wins * 100:.0f}%" if total_wins else f"{sget('HORSE_EMOJI')[i]} 0%" for i in range(sget("HORSE_COUNT"))),
             "📊 投注情况:",
         ]
         for i, odd in enumerate(odds):
-            lines.append(f"{HORSE_EMOJI[i]} {HORSE_NAMES[i]}: 胜率{self.rates[i] * 100:.0f}% | {self.total_bets[i]}积分 | 赔率 {odd:.2f}x")
+            lines.append(f"{sget('HORSE_EMOJI')[i]} {sget('HORSE_NAMES')[i]}: 胜率{self.rates[i] * 100:.0f}% | {self.total_bets[i]}积分 | 赔率 {odd:.2f}x")
         lines.append("━" * 14)
         if self.bets:
             lines.append("📋 玩家下注：")
             for uid, bets in self.bets.items():
                 name = self.name_cache.get(uid) or await get_name(app, uid)
                 self.name_cache[uid] = name
-                lines.append(f"{name}: " + " ".join(f"{HORSE_EMOJI[h]}{amount}" for h, amount in bets.items()))
+                lines.append(f"{name}: " + " ".join(f"{sget('HORSE_EMOJI')[h]}{amount}" for h, amount in bets.items()))
             lines.append("")
         lines.extend([f"⏰ 距离开赛还有 {minutes} 分 {seconds:02d} 秒", "🔒 开赛后无法投注", "💡 赔率随下注实时浮动，下注瞬间锁定"])
         return "\n".join(lines)
@@ -3277,10 +3520,10 @@ class HorseRace:
     def animation(self):
         lines = ["🏁 赛车进行中", "━" * 14]
         for i, pos in enumerate(self.display_positions):
-            track_pos = max(0, min(RACE_TRACK_LENGTH, int(pos)))
-            track = "🏁" + (HORSE_EMOJI[i] + "━" * RACE_TRACK_LENGTH if track_pos >= RACE_TRACK_LENGTH else "━" * (RACE_TRACK_LENGTH - track_pos - 1) + HORSE_EMOJI[i] + "━" * track_pos)
+            track_pos = max(0, min(sget("RACE_TRACK_LENGTH"), int(pos)))
+            track = "🏁" + (sget("HORSE_EMOJI")[i] + "━" * sget("RACE_TRACK_LENGTH") if track_pos >= sget("RACE_TRACK_LENGTH") else "━" * (sget("RACE_TRACK_LENGTH") - track_pos - 1) + sget("HORSE_EMOJI")[i] + "━" * track_pos)
             lines.append(track)
-        if self.arrivals: lines.append("✅ 到达：" + " ".join(HORSE_EMOJI[i] for i in self.arrivals))
+        if self.arrivals: lines.append("✅ 到达：" + " ".join(sget("HORSE_EMOJI")[i] for i in self.arrivals))
         return "\n".join(lines)
 
     async def _push_animation_frame(self, app):
@@ -3316,7 +3559,7 @@ class HorseRace:
             thresholds = [60, 30]
             while self.phase == "betting" and not self.cancelled:
                 # 实时计算剩余时间
-                remain = max(0, int(RACE_AUTO_START - (time.time() - self.create_time)))
+                remain = max(0, int(sget("RACE_AUTO_START") - (time.time() - self.create_time)))
                 
                 # 只有在整秒点附近才发出推送通知，防止重复发送
                 for threshold in thresholds:
@@ -3324,7 +3567,7 @@ class HorseRace:
                         self.notified.add(threshold)
                         notice = await safe_send(app.bot, self.chat_id, f"⏰ 赛车还剩 {threshold // 60} 分钟 {threshold % 60} 秒！")
                         # 之前这条提示发出后就一直留在群里，需要自动删除
-                        schedule_delete(app, self.chat_id, notice, RACE_NOTICE_DELETE_SECONDS)
+                        schedule_delete(app, self.chat_id, notice, sget("RACE_NOTICE_DELETE_SECONDS"))
                 
                 if not remain: break
                 
@@ -3342,7 +3585,7 @@ class HorseRace:
             msg = await safe_send(app.bot, self.chat_id, "🏁 比赛开始！正在奔跑中……"); self.animation_msg_id = msg.message_id if msg else None
             # 先按胜率加权抽取完整名次，再分配有间隔的完赛时间。
             # 这样长期夺冠率接近显示胜率，同时不会出现开赛第一帧直接到终点。
-            remaining = list(range(HORSE_COUNT))
+            remaining = list(range(sget("HORSE_COUNT")))
             finish_order = []
             while remaining:
                 total_rate = sum(self.rates[index] for index in remaining)
@@ -3370,34 +3613,34 @@ class HorseRace:
             self.race_tempo = {}
             for rank, horse in enumerate(finish_order):
                 T = self.finish_durations[horse]
-                a_cap = max(0.0, (1 - T / (RACE_TRACK_LENGTH * RACE_ANIMATION_INTERVAL)) / math.pi)
+                a_cap = max(0.0, (1 - T / (sget("RACE_TRACK_LENGTH") * sget("RACE_ANIMATION_INTERVAL"))) / math.pi)
                 if random.random() < 0.25:
                     a = random.uniform(0.05, 0.35) * a_cap    # 四分之一概率接近匀速，增加剧本多样性
                 else:
                     a = random.uniform(0.4, 0.95) * a_cap
                 sign = random.choice([-1, 1])                  # -1 先慢后快（反超），+1 先快后慢（守擂）
                 self.race_tempo[horse] = (sign, a)
-            while not self.cancelled and len(self.arrivals) < HORSE_COUNT:
+            while not self.cancelled and len(self.arrivals) < sget("HORSE_COUNT"):
                 now = time.time()
-                for i in range(HORSE_COUNT):
+                for i in range(sget("HORSE_COUNT")):
                     if i in self.arrival_times:
                         continue
                     duration = self.finish_durations[i]
                     progress = min(1.0, max(0.0, (now - self.race_start_time) / duration))
                     sign, amp = self.race_tempo.get(i, (0, 0.0))
                     tempo = progress + sign * amp * math.sin(progress * math.pi)
-                    self.positions[i] = max(0.0, min(float(RACE_TRACK_LENGTH),
-                                                     RACE_TRACK_LENGTH * tempo))
+                    self.positions[i] = max(0.0, min(float(sget("RACE_TRACK_LENGTH")),
+                                                     sget("RACE_TRACK_LENGTH") * tempo))
                     if progress >= 1.0:
                         self.arrival_times[i] = self.race_start_time + duration
-                        self.positions[i] = float(RACE_TRACK_LENGTH)
-                        self.display_positions[i] = RACE_TRACK_LENGTH
+                        self.positions[i] = float(sget("RACE_TRACK_LENGTH"))
+                        self.display_positions[i] = sget("RACE_TRACK_LENGTH")
                     else:
                         # 画面格子严格跟随真实节奏进度：既不超前（不会提前压线）也不滞后（不会钉死）
-                        self.display_positions[i] = max(0, min(RACE_TRACK_LENGTH, int(self.positions[i])))
+                        self.display_positions[i] = max(0, min(sget("RACE_TRACK_LENGTH"), int(self.positions[i])))
                 self.arrivals = sorted(self.arrival_times, key=self.arrival_times.get)
                 await self._push_animation_frame(app)
-                if len(self.arrivals) < HORSE_COUNT: await asyncio.sleep(RACE_ANIMATION_INTERVAL)
+                if len(self.arrivals) < sget("HORSE_COUNT"): await asyncio.sleep(sget("RACE_ANIMATION_INTERVAL"))
             if not self.cancelled: await self.settle(app)
         except asyncio.CancelledError: raise
         except Exception:
@@ -3419,7 +3662,7 @@ class HorseRace:
                     race_history[self.chat_id] = (race_history[self.chat_id] + [winner])[-10:]
                 standings = ["🥇", "🥈", "🥉", "🏅"]
                 lines = [f"🏆 赛车大赛 {race_id(self.create_time)} 结果 🏆", "━━━━━━━━━━━━━━━━━"]
-                lines.extend(f"{standings[index]} {HORSE_EMOJI[horse]} {HORSE_NAMES[horse]}" for index, horse in enumerate(self.arrivals))
+                lines.extend(f"{standings[index]} {sget('HORSE_EMOJI')[horse]} {sget('HORSE_NAMES')[horse]}" for index, horse in enumerate(self.arrivals))
 
                 # 先获取所有玩家名字：避免派彩后因取名字失败触发异常退款，导致已派彩玩家被双重派彩
                 for uid in self.bets:
@@ -3446,7 +3689,7 @@ class HorseRace:
                 # 大奖战报：押中独赢且净赢超阈值 → 广播其他授权群
                 best = max(settlements, key=lambda s: s[5]) if settlements else None
                 if best and best[5] > 0:
-                    detail = f"🐴 押中 {HORSE_EMOJI[winner]}{HORSE_NAMES[winner]}（赔率 {best[6]:.1f}）"
+                    detail = f"🐴 押中 {sget('HORSE_EMOJI')[winner]}{sget('HORSE_NAMES')[winner]}（赔率 {best[6]:.1f}）"
                     await broadcast_big_win(app, self.chat_id, best[0], "🏎️ 赛车大赛", best[5], detail)
                 if self.mode == "official":
                     await commit_rake(app, self.chat_id, rake_per, "赛车")
@@ -3494,8 +3737,8 @@ class HorseRace:
                 # 清除退款记录
                 for uid in self.bets: pending_game_bets[self.chat_id].get(uid, {}).pop("horse", None)
                 delivered = await safe_send_long(app.bot, self.chat_id, "\n".join(lines), parse_mode="HTML")
-                if SETTLE_DELETE_SECONDS > 0:
-                    schedule_delete(app, self.chat_id, delivered, SETTLE_DELETE_SECONDS)
+                if sget("SETTLE_DELETE_SECONDS") > 0:
+                    schedule_delete(app, self.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
 
                 if delivered is None:
                     await safe_send(app.bot, self.chat_id, "⚠️ 赛车已完成结算，但详细结果消息发送失败。积分与当日盈亏已保存，可使用 /cx 查看排行榜。")
@@ -3512,7 +3755,7 @@ class HorseRace:
             finally:
                 await safe_delete(app.bot, self.chat_id, self.animation_msg_id)
                 # 下注面板此前全程只做原地编辑、从不删除，会一直堆在群里；结算后延迟清理
-                schedule_delete_ids(app, self.chat_id, self.game_msg_id, PANEL_DELETE_SECONDS)
+                schedule_delete_ids(app, self.chat_id, self.game_msg_id, sget("PANEL_DELETE_SECONDS"))
                 if active_horse_races.get(self.chat_id) is self: active_horse_races.pop(self.chat_id, None)
                 if self.mode == "official":
                     for uid in self.bets: await emergency_if_needed(self.chat_id, uid, app)
@@ -3537,7 +3780,7 @@ class HorseRace:
             if active_horse_races.get(self.chat_id) is self: active_horse_races.pop(self.chat_id, None)
             await safe_edit(app.bot, self.chat_id, self.game_msg_id, notice, reply_markup=None)
             # 取消/退款后的面板同样只留一小会儿，避免残留占位
-            schedule_delete_ids(app, self.chat_id, self.game_msg_id, PANEL_DELETE_SECONDS)
+            schedule_delete_ids(app, self.chat_id, self.game_msg_id, sget("PANEL_DELETE_SECONDS"))
 
 
 # ---------- 权限与命令 ----------
@@ -3610,7 +3853,7 @@ async def start_bj_turn_timer(game, app):
     game.cancel_timer()
     curr_uid = game.players[game.current_player_idx]
     async def timeout():
-        await asyncio.sleep(TURN_TIMEOUT)
+        await asyncio.sleep(sget("TURN_TIMEOUT"))
         if active_blackjack_games.get(game.chat_id) is not game: return  # 游戏已终止或被替换
         if game.phase == "playing" and game.players[game.current_player_idx] == curr_uid:
             game.next_player()
@@ -3623,7 +3866,7 @@ async def start_bj_wait_timeout(game, app):
     """21点等待房倒计时：有人加入则自动开局，无人加入自动解散。"""
     game.cancel_wait()
     async def expire():
-        _wait = ROOM_WAIT_TIMEOUT
+        _wait = sget("ROOM_WAIT_TIMEOUT")
         await asyncio.sleep(_wait)
         if game.phase != "waiting" or active_blackjack_games.get(game.chat_id) is not game:
             return
@@ -3649,8 +3892,10 @@ async def build_blackjack_wait_board(game, app):
     )
     for uid in game.players:
         text += f"- {await get_name(app, uid)} (下注: {game.bets[uid]})\n"
-    text += f"\n⏰ 有人加入后 {ROOM_WAIT_TIMEOUT} 秒自动开局，无人加入自动解散。\n"
-    kb = [[InlineKeyboardButton(f"📥 加入 (下注{b})", callback_data=f"bj_join_{b}") for b in BJ_JOIN_BETS]]
+    text += f"\n⏰ 有人加入后 {sget('ROOM_WAIT_TIMEOUT')} 秒自动开局，无人加入自动解散。\n"
+    # 按钮每行最多 2 个：Telegram 一行挤 4 个会截断成「📥 加入 (下...」（用户 2026-09-10 截图报障）
+    kb = [[InlineKeyboardButton(f"📥 加入 {b}", callback_data=f"bj_join_{b}") for b in sget("BJ_JOIN_BETS")[i:i + 2]]
+          for i in range(0, len(sget("BJ_JOIN_BETS")), 2)]
     if game.players: kb.append([InlineKeyboardButton("🎮 开始游戏", callback_data="bj_start")])
     kb.append([InlineKeyboardButton("❌ 终止", callback_data="bj_end")])
     return text, InlineKeyboardMarkup(kb)
@@ -3708,7 +3953,10 @@ async def update_blackjack_ui(game, app):
             payments_applied = False
             await safe_delete(app.bot, game.chat_id, game.action_msg_id)
             d_score = game.get_score(game.dealer_hand)
-            text = f"🃏 <b>21点 结算</b>\n━━━━━━━━━━━━━━━━━\n🏛 <b>庄家</b>：{game.get_card_str(game.dealer_hand)} ({d_score})\n\n"
+            d_bust = d_score > 21
+            text = (f"🃏 <b>21点 · 结算</b>\n━━━━━━━━━━━━━━━━━\n"
+                    f"🏛 <b>庄家</b> {game.get_card_str(game.dealer_hand)} · <b>{d_score}</b>"
+                    f"{' 💥 爆牌' if d_bust else ''}\n")
             date = business_date()
             wallet = game_chips
 
@@ -3729,27 +3977,33 @@ async def update_blackjack_ui(game, app):
                 dealer_bj = game.is_blackjack(game.dealer_hand)
                 player_bj = game.is_blackjack(game.hands[uid])
                 if p_score > 21:
-                    result_str = "💥 爆牌 (负)"; payout = 0
+                    result_str = "💥 爆牌"; payout = 0
                 elif dealer_bj and not player_bj:
-                    result_str = "🏛 庄家天生21 (负)"; payout = 0
+                    result_str = "🏛 庄家天生21"; payout = 0
                 elif d_score > 21:
-                    if player_bj: result_str = "🃏 Blackjack (胜)"; payout = int(bet * 2.5)
-                    else: result_str = "🏛 庄爆 (胜)"; payout = bet * 2
+                    if player_bj: result_str = "🃏 Blackjack"; payout = int(bet * 2.5)
+                    else: result_str = "🏛 庄家爆牌"; payout = bet * 2
                 elif p_score > d_score:
-                    if player_bj: result_str = "🃏 Blackjack (胜)"; payout = int(bet * 2.5)
+                    if player_bj: result_str = "🃏 Blackjack"; payout = int(bet * 2.5)
                     else: result_str = "🎉 获胜"; payout = bet * 2
                 elif p_score < d_score:
                     result_str = "💸 战败"; payout = 0
                 else:
-                    if player_bj and dealer_bj: result_str = "🤝 双天生21 平局"; payout = bet
+                    if player_bj and dealer_bj: result_str = "🤝 双天生21"; payout = bet
                     else: result_str = "🤝 平局"; payout = bet
                 
                 net = payout - bet
                 hand_text = game.get_card_str(game.hands[uid])
-                # 抽水在面板体现：赢家用「实收」显示税后，不再单独发抽水消息
+                # 抽水在面板体现：赢家单独一行标「抽水」，不再塞进盈亏后面的括号里
                 r_amt = calc_rake({uid: net})[1].get(uid, 0) if game.mode == "official" else 0
-                rake_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
-                lines.append(f"👤 <b>玩家</b>：{player_names[uid]} | {hand_text} ({p_score})\n<b>结果</b>：{result_str} | 盈亏 {net:+d}{rake_txt}")
+                head = f"👤 <b>{player_names[uid]}</b> {hand_text} · <b>{p_score}</b>\n"
+                if r_amt:
+                    lines.append(f"{head}"
+                                 f"　　{result_str}｜盈亏 <b>{net:+d}</b>\n"
+                                 f"　　　└ 实收 <b>{net - r_amt:+d}</b>（抽水 {r_amt}）")
+                else:
+                    lines.append(f"{head}"
+                                 f"　　{result_str}｜盈亏 <b>{net:+d}</b>")
                 payout_plan.append((uid, payout, net))
             # 抽水金额先算好（与面板一致），结算落账时一并扣
             rake_per = calc_rake({uid: net for uid, _p, net in payout_plan})[1] if game.mode == "official" else {}
@@ -3800,8 +4054,8 @@ async def update_blackjack_ui(game, app):
                 
             await safe_delete(app.bot, game.chat_id, game.game_msg_id)
             settled_msgs = await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
-            if SETTLE_DELETE_SECONDS > 0:
-                schedule_delete(app, game.chat_id, settled_msgs, SETTLE_DELETE_SECONDS)
+            if sget("SETTLE_DELETE_SECONDS") > 0:
+                schedule_delete(app, game.chat_id, settled_msgs, sget("SETTLE_DELETE_SECONDS"))
         except Exception:
             logger.exception("21点结算显示失败")
             if not payments_applied:
@@ -3829,19 +4083,19 @@ async def _game_gate(update, context, game, ranked=None):
     德州额外受「日常/排位」两个独立开关控制，管理员可只开一种模式。
     """
     label, enabled, admin_only = {
-        "texas":     ("德州扑克", TEXAS_ENABLED, TEXAS_ADMIN_ONLY),
-        "blackjack": ("21点", BJ_ENABLED, BJ_ADMIN_ONLY),
-        "jinhua":    ("炸金花", JINHUA_ENABLED, JINHUA_ADMIN_ONLY),
-        "race":      ("赛车", RACE_ENABLED, RACE_ADMIN_ONLY),
+        "texas":     ("德州扑克", sget("TEXAS_ENABLED"), sget("TEXAS_ADMIN_ONLY")),
+        "blackjack": ("21点", sget("BJ_ENABLED"), sget("BJ_ADMIN_ONLY")),
+        "jinhua":    ("炸金花", sget("JINHUA_ENABLED"), sget("JINHUA_ADMIN_ONLY")),
+        "race":      ("赛车", sget("RACE_ENABLED"), sget("RACE_ADMIN_ONLY")),
     }[game]
     if not enabled:
         await send_reply(update, context, f"❌ {label}已关闭（管理员可在后台「{label}」分组重新开启）。")
         return False
     if game == "texas" and ranked is not None:
-        if ranked and not RANKED_TEXAS_ENABLED:
+        if ranked and not sget("RANKED_TEXAS_ENABLED"):
             await send_reply(update, context, "❌ 排位德州已关闭（管理员可在后台「德州扑克」分组开启）。")
             return False
-        if not ranked and not DAILY_TEXAS_ENABLED:
+        if not ranked and not sget("DAILY_TEXAS_ENABLED"):
             await send_reply(update, context, "❌ 日常德州已关闭（管理员可在后台「德州扑克」分组开启）。")
             return False
     if admin_only and not is_bot_admin(update.effective_user.id):
@@ -4052,7 +4306,7 @@ class JinhuaGame:
 
     def add(self, uid):
         if self.phase != "waiting" or uid in self.players: return False
-        if game_chips[self.chat_id][uid] < MIN_ENTRY_CHIPS: return False
+        if game_chips[self.chat_id][uid] < sget("MIN_ENTRY_CHIPS"): return False
         self.players.append(uid)
         return True
 
@@ -4066,7 +4320,7 @@ class JinhuaGame:
         for uid in self.players:
             self.chips[uid] = game_chips[self.chat_id][uid]; self.initial_chips[uid] = self.chips[uid]
             self.total_bet[uid] = self.round_bets[uid] = 0
-            ante = min(JINHUA_ANTE, self.chips[uid]); self.chips[uid] -= ante; self.total_bet[uid] += ante; self.pot += ante
+            ante = min(sget("JINHUA_ANTE"), self.chips[uid]); self.chips[uid] -= ante; self.total_bet[uid] += ante; self.pot += ante
             if not self.chips[uid]: self.all_in.add(uid)
             self.hands[uid] = [self.deck.pop(), self.deck.pop(), self.deck.pop()]
         self.phase = "betting"
@@ -4080,7 +4334,7 @@ class JinhuaGame:
     def _target(self, uid):
         """该玩家本轮应投入的实际金额 = 闷牌单位 × (看牌 2 倍 / 闷牌 1 倍)。
         加倍开关关闭时看牌与闷牌同价。"""
-        mult = 2 if (uid in self.seen and JINHUA_SEEN_DOUBLE) else 1
+        mult = 2 if (uid in self.seen and sget("JINHUA_SEEN_DOUBLE")) else 1
         return self.current_bet * mult
 
     def current(self):
@@ -4104,10 +4358,10 @@ class JinhuaGame:
     def _do_raise(self, uid, extra):
         try: extra = int(extra)
         except (TypeError, ValueError): return False, "无效加注额"
-        if extra < JINHUA_BASE: return False, f"最低加注为 {JINHUA_BASE}"
+        if extra < sget("JINHUA_BASE"): return False, f"最低加注为 {sget('JINHUA_BASE')}"
         if uid in self.raise_locked: return False, "短全下后已行动玩家只能跟注或弃牌"
         # 先按校验后的值计算目标投入，余额不足直接拒绝，绝不先改 current_bet
-        mult = 2 if (uid in self.seen and JINHUA_SEEN_DOUBLE) else 1
+        mult = 2 if (uid in self.seen and sget("JINHUA_SEEN_DOUBLE")) else 1
         new_current_bet = self.current_bet + extra
         new_target = new_current_bet * mult
         paid = new_target - self.round_bets[uid]
@@ -4124,7 +4378,7 @@ class JinhuaGame:
         """炸金花全下：不足跟注或部分高出(不足一个单位加注)按 call 处理；超出足够则全下并加注、重开下注。"""
         if self.chips[uid] <= 0:
             return False, "你没有可下的筹码"
-        mult = 2 if (uid in self.seen and JINHUA_SEEN_DOUBLE) else 1
+        mult = 2 if (uid in self.seen and sget("JINHUA_SEEN_DOUBLE")) else 1
         to_call = max(0, self._target(uid) - self.round_bets[uid])
         paid = self.chips[uid]
         if paid <= to_call or (paid - to_call) < mult:
@@ -4147,7 +4401,7 @@ class JinhuaGame:
             self.pot += shove
             self.current_bet += raise_units
             prior_actors = self.acted.copy()
-            if raise_units * mult < JINHUA_BASE:
+            if raise_units * mult < sget("JINHUA_BASE"):
                 # 短全下(加注不足一个单位)：已行动者只能跟注/弃牌，不能再加注
                 self.raise_locked.update(prior_actors - {uid})
             else:
@@ -4187,7 +4441,7 @@ class JinhuaGame:
             penalty = 0
             # 官方规则：看牌者向闷牌者比牌落败 → 倒赔 2 倍底注
             if loser == uid and uid in self.seen and extra not in self.seen:
-                penalty = min(2 * JINHUA_BASE, self.chips[uid])
+                penalty = min(2 * sget("JINHUA_BASE"), self.chips[uid])
                 self.chips[uid] -= penalty; self.chips[extra] += penalty
                 self.penalty_log.append((uid, extra, penalty))
             self.folded.add(loser)
@@ -4321,7 +4575,7 @@ class JinhuaGame:
 
 async def jinhua_waiting_text(game, app):
     players = [f"{i}. {await get_name(app, uid)}" for i, uid in enumerate(game.players, 1)]
-    return f"🌸 新一局炸金花\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players) + f"\n\n点击加入，发起人可立即开始。\n⏰ 满 2 人后 {ROOM_WAIT_TIMEOUT} 秒自动开局，不足 2 人 {ROOM_WAIT_TIMEOUT} 秒后自动解散。"
+    return f"🌸 新一局炸金花\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players) + f"\n\n点击加入，发起人可立即开始。\n⏰ 满 2 人后 {sget('ROOM_WAIT_TIMEOUT')} 秒自动开局，不足 2 人 {sget('ROOM_WAIT_TIMEOUT')} 秒后自动解散。"
 
 
 async def update_jinhua_waiting(game, app):
@@ -4334,7 +4588,7 @@ async def update_jinhua_waiting(game, app):
 async def jinhua_table_text(game, app):
     lines = [
         "🌸 炸金花",
-        f"💰 奖池 {game.pot}｜单注 {game.current_bet}" + ("（看牌者×2）" if JINHUA_SEEN_DOUBLE else ""),
+        f"💰 奖池 {game.pot}｜单注 {game.current_bet}" + ("（看牌者×2）" if sget("JINHUA_SEEN_DOUBLE") else ""),
     ]
     if game.last_action:
         lines.append(f"🔔 上一手：{game.last_action}")
@@ -4368,8 +4622,8 @@ def jinhua_buttons(game, uid):
         row_call.append(InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"))
     rows.append(row_call)
     row_raise = []
-    if uid not in game.raise_locked and game.chips[uid] >= to_call + JINHUA_BASE:
-        row_raise.append(InlineKeyboardButton(f"🔼 加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}"))
+    if uid not in game.raise_locked and game.chips[uid] >= to_call + sget("JINHUA_BASE"):
+        row_raise.append(InlineKeyboardButton(f"🔼 加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"))
     row_raise.append(InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh"))
     rows.append(row_raise)
     if game.chips[uid] > 0:
@@ -4425,7 +4679,7 @@ async def show_jinhua_action(game, app):
             [InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold"),
              InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"),
              InlineKeyboardButton("🃏 开牌比大小", callback_data="jh_open")],
-            [InlineKeyboardButton(f"🔼 继续加注 {JINHUA_BASE}", callback_data=f"jh_raise_{JINHUA_BASE}"),
+            [InlineKeyboardButton(f"🔼 继续加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"),
              InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh")],
         ])
         await _sync_jinhua_msg(game, app, text, kb)
@@ -4442,7 +4696,7 @@ async def show_jinhua_action(game, app):
                 nxt = game._next()
                 if nxt: await start_jinhua_turn_timer(game, app)
         return
-    text = f"{await jinhua_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {TURN_TIMEOUT} 秒内行动。"
+    text = f"{await jinhua_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {sget('TURN_TIMEOUT')} 秒内行动。"
     await _sync_jinhua_msg(game, app, text, jinhua_buttons(game, uid))
 
 
@@ -4463,7 +4717,7 @@ async def start_jinhua_turn_timer(game, app):
     uid = game.current()
 
     async def timeout_action():
-        await asyncio.sleep(TURN_TIMEOUT)
+        await asyncio.sleep(sget("TURN_TIMEOUT"))
         if game.settled or game.phase == "showdown": return
         if game.phase == "open_pending": return
         if game.current() != uid: return
@@ -4554,8 +4808,8 @@ async def settle_jinhua(game, app):
             lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
         await safe_delete(app.bot, game.chat_id, game.game_msg_id)
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
-        if SETTLE_DELETE_SECONDS > 0:
-            schedule_delete(app, game.chat_id, delivered, SETTLE_DELETE_SECONDS)
+        if sget("SETTLE_DELETE_SECONDS") > 0:
+            schedule_delete(app, game.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
         if delivered is None:
             await safe_send(app.bot, game.chat_id, "⚠️ 炸金花已完成结算，但详细结算消息发送失败。")
     except Exception:
@@ -4570,7 +4824,7 @@ async def settle_jinhua(game, app):
 async def start_jinhua_wait_timeout(game, app):
     game.cancel_wait()
     async def countdown():
-        _wait = ROOM_WAIT_TIMEOUT
+        _wait = sget("ROOM_WAIT_TIMEOUT")
         await asyncio.sleep(_wait)
         if game.phase != "waiting" or active_jinhua_games.get(game.chat_id) is not game:
             return
@@ -4603,8 +4857,8 @@ async def cmd_jinhua(update, context):
     if room_name:
         await send_reply(update, context, f"⚠️ 你已在 {room_name} 房间，请先结束再开新的扑克游戏。"); return
     mode = game.mode if game and game.phase == "waiting" else current_game_mode()
-    if game_chips[cid][uid] < MIN_ENTRY_CHIPS:
-        await send_reply(update, context, f"❌ 进入炸金花至少需要 {MIN_ENTRY_CHIPS} 积分。"); return
+    if game_chips[cid][uid] < sget("MIN_ENTRY_CHIPS"):
+        await send_reply(update, context, f"❌ 进入炸金花至少需要 {sget('MIN_ENTRY_CHIPS')} 积分。"); return
     if game:
         if game.phase != "waiting": await send_reply(update, context, "当前已有进行中的炸金花。"); return
         if game.add(uid):
@@ -4676,9 +4930,9 @@ async def cmd_dz(update, context):
         await send_reply(update, context, f"⚠️ 你已在 {room_name} 房间，请先结束再开新的扑克游戏。"); return
     mode = game.mode if game and game.phase == "waiting" else current_game_mode()
     wallet = game_chips
-    if wallet[cid][uid] < MIN_ENTRY_CHIPS:
+    if wallet[cid][uid] < sget("MIN_ENTRY_CHIPS"):
         label = "积分"
-        await send_reply(update, context, f"❌ 进入德州至少需要 {MIN_ENTRY_CHIPS} {label}。"); return
+        await send_reply(update, context, f"❌ 进入德州至少需要 {sget('MIN_ENTRY_CHIPS')} {label}。"); return
     if game:
         if game.season:
             await send_reply(update, context, "当前有排位赛房间，请用 /排位 加入或开局。"); return
@@ -4701,15 +4955,15 @@ async def start_season(cid, name="", forced=False):
     if season_active:
         return True, "already_active"  # 幂等：已在赛季中，不重复初始化（防自动开赛竞态双击）
     joined = season_joined.get(cid, set())
-    if not forced and len(joined) < SEASON_MIN_PLAYERS:
-        return False, f"需满 {SEASON_MIN_PLAYERS} 人报名才能开赛（当前 {len(joined)} 人）"
+    if not forced and len(joined) < sget("SEASON_MIN_PLAYERS"):
+        return False, f"需满 {sget('SEASON_MIN_PLAYERS')} 人报名才能开赛（当前 {len(joined)} 人）"
     if forced and not joined:
         return False, "尚无任何人报名，无法强制开赛"
     season_active = True
     season_id = now_bj().strftime("%Y%m%d")
     season_name = name or f"第{season_id}赛季"
     season_start_ts = int(now_bj().timestamp())
-    season_end_ts = season_start_ts + SEASON_DAYS * 86400
+    season_end_ts = season_start_ts + sget("SEASON_DAYS") * 86400
     season_points[cid] = defaultdict(int)
     season_games[cid] = defaultdict(int)
     season_rebuy[cid] = defaultdict(int)
@@ -4734,7 +4988,7 @@ async def season_settle(app, manual=False):
     season_snapshot = {cid: dict(users) for cid, users in season_points.items()}
     for cid, users in season_snapshot.items():
         standings = sorted(users.items(), key=lambda x: (-season_total_profit(cid, x[0]), x[0]))
-        eligible = [(uid, val) for uid, val in standings if uid >= 0 and season_games[cid].get(uid, 0) >= SEASON_MIN_GAMES]
+        eligible = [(uid, val) for uid, val in standings if uid >= 0 and season_games[cid].get(uid, 0) >= sget("SEASON_MIN_GAMES")]
         lines = [f"🏆 第{season_id}赛季最终榜（{season_name or '排位赛'}）", "━" * 18]
         if not eligible:
             lines.append("本赛季无达标玩家，赌神称号保留在任者。")
@@ -4784,7 +5038,7 @@ async def season_settle(app, manual=False):
 def _season_base(cid, uid):
     """当日基准分 = 起始分 + 本赛季累计兑换分。
     兑换分是「额外底分」：每日 0 点重置时保留，且不计入任何盈亏榜（否则花钱买的分会虚增名次）。"""
-    return SEASON_START_CHIPS + season_exchange_bonus.get(cid, {}).get(uid, 0)
+    return sget("SEASON_START_CHIPS") + season_exchange_bonus.get(cid, {}).get(uid, 0)
 
 
 def season_daily_refresh(day_key, cids, protected=None):
@@ -4826,12 +5080,12 @@ async def season_standings_lines(app, cid, uid=None):
     standings = sorted(users.items(), key=lambda x: (-season_total_profit(cid, x[0]), x[0]))
     remain = max(0, int((season_end_ts - now_bj().timestamp()) / 86400))
     lines = [f"🏆 第{season_id}赛季排位榜（{season_name or '排位赛'}）",
-             f"⏳ 剩余约 {remain} 天｜上榜需≥{SEASON_MIN_GAMES}局", "━" * 18]
+             f"⏳ 剩余约 {remain} 天｜上榜需≥{sget('SEASON_MIN_GAMES')}局", "━" * 18]
     if not standings:
         lines.append("暂无数据")
     for i, (u, val) in enumerate(standings[:50], 1):
         g = season_games[cid].get(u, 0)
-        tag = "" if g >= SEASON_MIN_GAMES else f"（{g}局·未达标）"
+        tag = "" if g >= sget("SEASON_MIN_GAMES") else f"（{g}局·未达标）"
         marker = "👑" if (i == 1 and u in user_titles and TITLE_GAMBLING_GOD in user_titles[u]) else rank_marker(i)
         bonus = season_exchange_bonus.get(cid, {}).get(u, 0)
         btag = f"｜底分{bonus}" if bonus else ""
@@ -4841,7 +5095,7 @@ async def season_standings_lines(app, cid, uid=None):
         full_rank = next((i for i, (u, _) in enumerate(standings, 1) if u == uid), None)
         if full_rank is not None and full_rank > 50:
             g = season_games[cid].get(uid, 0)
-            tag = "" if g >= SEASON_MIN_GAMES else f"（{g}局·未达标）"
+            tag = "" if g >= sget("SEASON_MIN_GAMES") else f"（{g}局·未达标）"
             lines.append(f"…（仅显示前 50，你当前第 {full_rank} 名：总{season_total_profit(cid, uid):+d}分{tag}）")
     return lines
 
@@ -4859,7 +5113,7 @@ async def season_signup(app, cid, uid):
     season_joined.setdefault(cid, set()).add(uid)
     save_data()
     n = len(season_joined[cid])
-    if n >= SEASON_MIN_PLAYERS:
+    if n >= sget("SEASON_MIN_PLAYERS"):
         ok, msg = await start_season(cid)
         # 只有真正“首次开赛”的那次才回 started；并发点按钮导致的二次进入回 joined_active
         return True, "started" if (ok and msg != "already_active") else "joined_active"
@@ -4875,13 +5129,13 @@ async def season_lobby_content(app, cid):
         names = [await get_name(app, u) for u in joined[:15]]
         names_text = ("、".join(names) + (f" 等 {n} 人" if n > 15 else "")) if n else "（暂无）"
         text = (f"🏆 <b>排位赛报名大厅</b>\n\n"
-                f"当前报名：<b>{n}/{SEASON_MIN_PLAYERS}</b> 人\n"
-                f"满 {SEASON_MIN_PLAYERS} 人自动开赛，每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。\n"
+                f"当前报名：<b>{n}/{sget('SEASON_MIN_PLAYERS')}</b> 人\n"
+                f"满 {sget('SEASON_MIN_PLAYERS')} 人自动开赛，每人 {sget('SEASON_START_CHIPS')} 分，周期 {sget('SEASON_DAYS')} 天。\n"
                 f"已报名：{names_text}\n"
                 f"点下面按钮报名，或用 /排位报名 也能一键报名。")
-        _ex_row = [[InlineKeyboardButton("💱 积分兑换排位分", callback_data="season_exchange_info")]] if RANKED_EXCHANGE_ENABLED else []
+        _ex_row = [[InlineKeyboardButton("💱 积分兑换排位分", callback_data="season_exchange_info")]] if sget("RANKED_EXCHANGE_ENABLED") else []
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"📝 报名参赛（{n}/{SEASON_MIN_PLAYERS}）", callback_data="season_signup")],
+            [InlineKeyboardButton(f"📝 报名参赛（{n}/{sget('SEASON_MIN_PLAYERS')}）", callback_data="season_signup")],
             *_ex_row,
             [InlineKeyboardButton("❌ 关闭看板", callback_data="season_lobby_close")],
         ])
@@ -4889,9 +5143,9 @@ async def season_lobby_content(app, cid):
         remain = max(0, int((season_end_ts - now_bj().timestamp()) / 86400))
         sn = html.escape(season_name or '排位赛')  # 防止管理员自定义赛季名含 < 或 & 触发 BadRequest
         text = (f"🏆 <b>第{season_id}赛季「{sn}」进行中</b>\n\n"
-                f"⏳ 剩余约 {remain} 天｜上榜需≥{SEASON_MIN_GAMES}局\n"
+                f"⏳ 剩余约 {remain} 天｜上榜需≥{sget('SEASON_MIN_GAMES')}局\n"
                 f"用 /排位 开局入座；中途想加入点下面按钮。")
-        _ex_row = [[InlineKeyboardButton("💱 积分兑换排位分", callback_data="season_exchange_info")]] if RANKED_EXCHANGE_ENABLED else []
+        _ex_row = [[InlineKeyboardButton("💱 积分兑换排位分", callback_data="season_exchange_info")]] if sget("RANKED_EXCHANGE_ENABLED") else []
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("📝 中途报名加入", callback_data="season_signup")],
             [InlineKeyboardButton("📊 看排位榜", callback_data="season_rank_btn")],
@@ -4923,12 +5177,12 @@ async def cmd_season_join(update, context):
     ok, key = await season_signup(context.application, cid, uid)
     await render_season_lobby(context.application, cid)
     if key == "started":
-        await send_reply(update, context, f"🏆 报名满 {SEASON_MIN_PLAYERS} 人，第{season_id}赛季「{season_name or '排位赛'}」开始！每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。用 /排位 开局。")
+        await send_reply(update, context, f"🏆 报名满 {sget('SEASON_MIN_PLAYERS')} 人，第{season_id}赛季「{season_name or '排位赛'}」开始！每人 {sget('SEASON_START_CHIPS')} 分，周期 {sget('SEASON_DAYS')} 天。用 /排位 开局。")
     elif key == "joined_active":
-        await send_reply(update, context, f"✅ 已加入进行中的赛季（需满 {SEASON_MIN_GAMES} 局才上榜）。当前分 {season_points[cid][uid]}。用 /排位 开局。")
+        await send_reply(update, context, f"✅ 已加入进行中的赛季（需满 {sget('SEASON_MIN_GAMES')} 局才上榜）。当前分 {season_points[cid][uid]}。用 /排位 开局。")
     else:
         n = len(season_joined[cid])
-        await send_reply(update, context, f"✅ 已报名本赛季排位赛（{n}/{SEASON_MIN_PLAYERS}）。满 {SEASON_MIN_PLAYERS} 人自动开赛；也可点群里的大厅看板报名。")
+        await send_reply(update, context, f"✅ 已报名本赛季排位赛（{n}/{sget('SEASON_MIN_PLAYERS')}）。满 {sget('SEASON_MIN_PLAYERS')} 人自动开赛；也可点群里的大厅看板报名。")
 
 
 async def cmd_season_start(update, context):
@@ -4941,7 +5195,7 @@ async def cmd_season_start(update, context):
     name = " ".join(context.args) if context.args else ""
     ok, msg = await start_season(cid, name, forced=True)
     if ok:
-        await send_reply(update, context, f"🏆 第{season_id}赛季「{season_name or '排位赛'}」由管理员强制开启！每人 {SEASON_START_CHIPS} 分，周期 {SEASON_DAYS} 天。用 /排位 开局。")
+        await send_reply(update, context, f"🏆 第{season_id}赛季「{season_name or '排位赛'}」由管理员强制开启！每人 {sget('SEASON_START_CHIPS')} 分，周期 {sget('SEASON_DAYS')} 天。用 /排位 开局。")
     else:
         await send_reply(update, context, msg)
 
@@ -5161,37 +5415,37 @@ async def cmd_season_points(update, context):
 
 def _exchange_rate_text():
     """兑换比例文案：1:1 时显示「1 积分 = 1 排位分」。"""
-    return f"{RANKED_EXCHANGE_COST} 积分 = {RANKED_EXCHANGE_GAIN} 排位分"
+    return f"{sget('RANKED_EXCHANGE_COST')} 积分 = {sget('RANKED_EXCHANGE_GAIN')} 排位分"
 
 
 async def cmd_season_exchange(update, context):
     """聊天积分兑换排位分（比例、开关、每日上限均可在后台「排位赛」分组调整）。"""
     if not await need_auth(update, context): return
     if not await require_group_chat(update, "积分兑换排位分", "兑换排位", context): return
-    if not RANKED_EXCHANGE_ENABLED:
+    if not sget("RANKED_EXCHANGE_ENABLED"):
         await send_reply(update, context, "❌ 积分兑换排位分功能未开启（管理员可在后台「排位赛」分组开启）。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     args = context.args or []
     if not args or not args[0].isdigit() or int(args[0]) <= 0:
         await send_reply(update, context,
                          f"用法：/兑换排位 数量（兑换的是聊天积分，按 {_exchange_rate_text()} 折算成排位分）\n"
-                         f"例：/兑换排位 {RANKED_EXCHANGE_COST * 10} → 得到 {RANKED_EXCHANGE_GAIN * 10} 排位分")
+                         f"例：/兑换排位 {sget('RANKED_EXCHANGE_COST') * 10} → 得到 {sget('RANKED_EXCHANGE_GAIN') * 10} 排位分")
         return
     cost = int(args[0])
     if player_is_busy(cid, uid):
         await send_reply(update, context, "⚠️ 你正在游戏中，请先结束再兑换排位分。"); return
-    if cost < RANKED_EXCHANGE_COST:
-        await send_reply(update, context, f"❌ 最少兑换 {RANKED_EXCHANGE_COST} 积分（当前比例 {_exchange_rate_text()}）。"); return
-    gain = cost * RANKED_EXCHANGE_GAIN // RANKED_EXCHANGE_COST
+    if cost < sget("RANKED_EXCHANGE_COST"):
+        await send_reply(update, context, f"❌ 最少兑换 {sget('RANKED_EXCHANGE_COST')} 积分（当前比例 {_exchange_rate_text()}）。"); return
+    gain = cost * sget("RANKED_EXCHANGE_GAIN") // sget("RANKED_EXCHANGE_COST")
     if gain <= 0:
         await send_reply(update, context, f"❌ 兑换数量太小，至少能得到 1 排位分（比例 {_exchange_rate_text()}）。"); return
     # 每日上限：按「消耗的聊天积分」累计，跨天自动重置（键为业务日）
     today = business_date()
-    if RANKED_EXCHANGE_DAILY_LIMIT > 0:
+    if sget("RANKED_EXCHANGE_DAILY_LIMIT") > 0:
         used = season_exchange_daily[today][cid].get(uid, 0)
-        if used + cost > RANKED_EXCHANGE_DAILY_LIMIT:
+        if used + cost > sget("RANKED_EXCHANGE_DAILY_LIMIT"):
             await send_reply(update, context,
-                             f"❌ 超出每日兑换上限：今日已兑换 {used} 积分，上限 {RANKED_EXCHANGE_DAILY_LIMIT}（管理员可在后台调整）。")
+                             f"❌ 超出每日兑换上限：今日已兑换 {used} 积分，上限 {sget('RANKED_EXCHANGE_DAILY_LIMIT')}（管理员可在后台调整）。")
             return
     async with user_wallet_locks([uid]):
         if game_chips[cid][uid] < cost:
@@ -5205,7 +5459,7 @@ async def cmd_season_exchange(update, context):
         if uid not in season_games.get(cid, {}):
             season_games[cid][uid] = 0
             season_rebuy[cid][uid] = 0
-        if RANKED_EXCHANGE_DAILY_LIMIT > 0:
+        if sget("RANKED_EXCHANGE_DAILY_LIMIT") > 0:
             season_exchange_daily[today][cid][uid] += cost
         ledger_add(cid, uid, 0, cost, "兑换排位分")  # 资金流台账：聊天积分回收
         save_data()
@@ -5231,8 +5485,8 @@ async def cmd_season_help(update, context):
         "• 大厅看板按钮：📊 看排位榜\n\n"
         "<b>积分兑换排位分</b>\n"
         f"• /兑换排位 数量 — 把聊天积分换成排位分（当前比例 {_exchange_rate_text()}）\n"
-        f"• 开关：{'已开启' if RANKED_EXCHANGE_ENABLED else '已关闭'}"
-        + (f"｜每人每日上限 {RANKED_EXCHANGE_DAILY_LIMIT} 积分" if RANKED_EXCHANGE_DAILY_LIMIT else "｜每日不限")
+        f"• 开关：{'已开启' if sget('RANKED_EXCHANGE_ENABLED') else '已关闭'}"
+        + (f"｜每人每日上限 {sget('RANKED_EXCHANGE_DAILY_LIMIT')} 积分" if sget("RANKED_EXCHANGE_DAILY_LIMIT") else "｜每日不限")
         + "（管理员可在后台「排位赛」分组调整）\n"
         "• 兑换来的分算「额外底分」：每日 0 点重置后保留，但不计入盈亏榜（不影响名次）\n\n"
         "<b>管理员专属</b>\n"
@@ -5261,7 +5515,7 @@ async def cmd_season_play(update, context):
         else:
             # UX2：/排位 静默报名不弹看板（看板仅在 /排位报名 或按钮点击时出现，减少刷屏）
             n = len(season_joined[cid])
-            await send_reply(update, context, f"✅ 已报名本赛季排位赛（{n}/{SEASON_MIN_PLAYERS}）。满 {SEASON_MIN_PLAYERS} 人自动开赛；发 /排位报名 可看报名大厅。")
+            await send_reply(update, context, f"✅ 已报名本赛季排位赛（{n}/{sget('SEASON_MIN_PLAYERS')}）。满 {sget('SEASON_MIN_PLAYERS')} 人自动开赛；发 /排位报名 可看报名大厅。")
             return
     # 赛季进行中：开 / 入房间（赛中未报名者自动补报名）
     if uid not in season_joined.get(cid, set()):
@@ -5273,9 +5527,9 @@ async def cmd_season_play(update, context):
         save_data()
     if season_points[cid][uid] <= 0:
         await send_reply(update, context, "❌ 你的排位分已用完，等待应急补分或下局。"); return
-    if SEASON_MIN_ENTRY_CHIPS and season_points[cid][uid] < SEASON_MIN_ENTRY_CHIPS:
+    if sget("SEASON_MIN_ENTRY_CHIPS") and season_points[cid][uid] < sget("SEASON_MIN_ENTRY_CHIPS"):
         await send_reply(update, context,
-                         f"❌ 进入排位赛至少需要 {SEASON_MIN_ENTRY_CHIPS} 排位分，你当前 {season_points[cid][uid]}。\n"
+                         f"❌ 进入排位赛至少需要 {sget('SEASON_MIN_ENTRY_CHIPS')} 排位分，你当前 {season_points[cid][uid]}。\n"
                          f"可用 /兑换排位 数量 把聊天积分换成排位分。"); return
     game = active_poker_games.get(cid)
     if game:
@@ -5337,7 +5591,7 @@ async def refund_poker(game, app, notice):
     await safe_delete(app.bot, game.chat_id, game.action_msg_id)
     await safe_edit(app.bot, game.chat_id, game.game_msg_id, notice, reply_markup=None)
     # 解散提示牌桌也延迟清理，避免一堆「已解散」卡片堆在群里
-    schedule_delete_ids(app, game.chat_id, game.game_msg_id, PANEL_DELETE_SECONDS)
+    schedule_delete_ids(app, game.chat_id, game.game_msg_id, sget("PANEL_DELETE_SECONDS"))
     save_data()
 
 
@@ -5385,14 +5639,14 @@ def _invite_progress_text(uid, cid, my_name, cname):
     rejected = sum(1 for r in recs if _rec_rejected(r))
     awarded = sum(1 for r in recs if _rec_awarded(r))
     req = []
-    if INVITE_QUALIFY_ENABLED:
-        if INVITE_QUALIFY_MSGS > 0:
-            req.append(f"本群发言 ≥ {INVITE_QUALIFY_MSGS} 条")
-        if INVITE_QUALIFY_POINTS > 0:
-            req.append(f"本群净赚积分 ≥ {INVITE_QUALIFY_POINTS}")
-        if INVITE_QUALIFY_AVATAR:
+    if sget("INVITE_QUALIFY_ENABLED"):
+        if sget("INVITE_QUALIFY_MSGS") > 0:
+            req.append(f"本群发言 ≥ {sget('INVITE_QUALIFY_MSGS')} 条")
+        if sget("INVITE_QUALIFY_POINTS") > 0:
+            req.append(f"本群净赚积分 ≥ {sget('INVITE_QUALIFY_POINTS')}")
+        if sget("INVITE_QUALIFY_AVATAR"):
             req.append("进群须有头像")
-        if INVITE_QUALIFY_USERNAME:
+        if sget("INVITE_QUALIFY_USERNAME"):
             req.append("进群须有用户名")
         req_txt = "、".join(req) if req else "无（进群即合格）"
     else:
@@ -5404,7 +5658,7 @@ def _invite_progress_text(uid, cid, my_name, cname):
         f"📥 已计入　<b>{counted}</b> 人",
         f"✅ 合格　　<b>{qualified}</b> 人",
         f"💰 已发放　<b>{awarded}</b> 次",
-        f"🎁 奖励：每合格 1 人 +{int(INVITE_REWARD)} 积分（每人最多发 {INVITE_REWARD_TIMES} 次）",
+        f"🎁 奖励：每合格 1 人 +{int(sget('INVITE_REWARD'))} 积分（每人最多发 {sget('INVITE_REWARD_TIMES')} 次）",
         f"🎯 质量要求：{html.escape(req_txt)}",
         "━━━━━━━━━━━━━━",
     ]
@@ -5475,7 +5729,7 @@ async def _deep_invite_start(update, context, payload):
     except (ValueError, AttributeError):
         await send_reply(update, context, "⚠️ 邀请链接无效，请让邀请人重新发送「邀请」获取。")
         return
-    if not INVITE_ENABLED or cid not in AUTHORIZED_GROUPS:
+    if not sget("INVITE_ENABLED") or cid not in AUTHORIZED_GROUPS:
         await send_reply(update, context, "⚠️ 该邀请链接对应的群暂未开放邀请。")
         return
     if uid == inviter:
@@ -5517,7 +5771,7 @@ async def _deep_invite_start(update, context, payload):
 async def cmd_my_invite(update, context):
     """我的邀请合格结算进度：已计入/合格/已发放 + 刷新。群聊=本群；私聊=全部群合计。"""
     if not await need_auth(update, context): return
-    if not INVITE_ENABLED:
+    if not sget("INVITE_ENABLED"):
         await send_reply(update, context, "❌ 邀请系统未开启。"); return
     if is_group_chat(update):
         cid = update.effective_chat.id
@@ -5543,7 +5797,7 @@ async def cmd_invite_debug(update, context):
         await send_reply(update, context, "❌ 邀请调试仅管理员可用。"); return
     cid = update.effective_chat.id
     L = ["🔧 邀请系统体检（本群）", "━━━━━━━━━━━━━━━━━"]
-    L.append(f"开关：{'开' if INVITE_ENABLED else '关'}｜归因=deep-link确认制（点专属链接→START→自动通过）；无确认申请：{'自动批(带链接+开关开)' if INVITE_AUTO_APPROVE else '管理员手动批(网页成员页)'}")
+    L.append(f"开关：{'开' if sget('INVITE_ENABLED') else '关'}｜归因=deep-link确认制（点专属链接→START→自动通过）；无确认申请：{'自动批(带链接+开关开)' if sget('INVITE_AUTO_APPROVE') else '管理员手动批(网页成员页)'}")
     L.append(f"本群已授权：{'是' if cid in AUTHORIZED_GROUPS else '否'}")
 
     # ① bot 在群里的权限 —— 邀请系统能工作的硬前提
@@ -5724,7 +5978,7 @@ async def _parse_target_amount(update, context):
 async def cmd_add(update, context):
     if not is_bot_admin(update.effective_user.id):
         await send_reply(update, context, "❌ 仅 Bot 管理员可操作"); return
-    if not ADMIN_ADJUST_ENABLED:
+    if not sget("ADMIN_ADJUST_ENABLED"):
         await send_reply(update, context, "❌ 管理员加减分功能已关闭（网页「积分系统 → 积分设置」可开启）。"); return
     if not await need_auth(update, context): return
     try:
@@ -5762,8 +6016,8 @@ async def cmd_cx(update, context):
             combined[uid] = combined.get(uid, 0) + v
     if not texas and not combined:
         reply = await send_reply(update, context, "当前业务日暂无盈亏记录。")
-        if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
-            schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
+        if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
+            schedule_delete(context.application, cid, reply, sget("REPLY_DELETE_SECONDS"))
         return
     lines = ["🃏 德州当日盈亏", "━"*14]
     if texas:
@@ -5778,8 +6032,8 @@ async def cmd_cx(update, context):
     else:
         lines.append("暂无记录")
     msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
-    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, msgs, REPLY_DELETE_SECONDS)
+    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, msgs, sget("REPLY_DELETE_SECONDS"))
 
 async def cmd_ph(update, context):
     if not await need_auth(update, context): return
@@ -5797,8 +6051,8 @@ async def cmd_ph(update, context):
         for i, (u, v) in enumerate(sorted(combined.items(), key=lambda x:x[1], reverse=True)[:50], 1):
             lines.append(f"{rank_marker(i)} {await get_name(context.application, u, cid=cid)}：{v:+d}")
     msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
-    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, msgs, REPLY_DELETE_SECONDS)
+    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, msgs, sget("REPLY_DELETE_SECONDS"))
 
 async def cmd_sq(update, context):
     if not is_bot_admin(update.effective_user.id):
@@ -5997,6 +6251,7 @@ async def cmd_autosm(update, context):
     await send_reply(update, context, f"本群整点自动赛车：{'✅ 已开启' if not cur else '❌ 已关闭（总开关和时段仍需在后台配置）'}")
 
 async def on_button(update, context):
+    _bind_update_cid(update)
     try:
         q = update.callback_query
         if not q or not q.message:
@@ -6062,7 +6317,7 @@ async def on_button(update, context):
             if choice_s == "none":
                 await q.answer("好的，等管理员批准进群。", show_alert=False)
                 return
-            if inviter == uid or rcid not in AUTHORIZED_GROUPS or not INVITE_ENABLED:
+            if inviter == uid or rcid not in AUTHORIZED_GROUPS or not sget("INVITE_ENABLED"):
                 await q.answer("该邀请不可用", show_alert=True); return
             invite_confirmed[f"{rcid}:{uid}"] = inviter   # 归因锁定
             save_data()
@@ -6222,10 +6477,10 @@ async def on_button(update, context):
                 return
             if data == "season_exchange_info":
                 # 大厅按钮：只回提示，不直接扣分（避免误触扣款，兑换走 /兑换排位 数量）
-                if not RANKED_EXCHANGE_ENABLED:
+                if not sget("RANKED_EXCHANGE_ENABLED"):
                     await q.answer("积分兑换排位分功能未开启", show_alert=True); return
                 await q.answer(f"发「/兑换排位 数量」即可兑换\n当前比例 {_exchange_rate_text()}"
-                               + (f"\n每人每日上限 {RANKED_EXCHANGE_DAILY_LIMIT} 积分" if RANKED_EXCHANGE_DAILY_LIMIT else ""),
+                               + (f"\n每人每日上限 {sget('RANKED_EXCHANGE_DAILY_LIMIT')} 积分" if sget("RANKED_EXCHANGE_DAILY_LIMIT") else ""),
                                show_alert=True)
                 return
             if data == "season_lobby_close":
@@ -6267,13 +6522,13 @@ async def on_button(update, context):
                             save_data()
                         if season_points[cid][uid] <= 0:
                             await q.answer("排位分不足，无法加入", show_alert=True); return
-                        if SEASON_MIN_ENTRY_CHIPS and season_points[cid][uid] < SEASON_MIN_ENTRY_CHIPS:
-                            await q.answer(f"进入排位赛至少需要 {SEASON_MIN_ENTRY_CHIPS} 排位分，你当前 {season_points[cid][uid]}",
+                        if sget("SEASON_MIN_ENTRY_CHIPS") and season_points[cid][uid] < sget("SEASON_MIN_ENTRY_CHIPS"):
+                            await q.answer(f"进入排位赛至少需要 {sget('SEASON_MIN_ENTRY_CHIPS')} 排位分，你当前 {season_points[cid][uid]}",
                                            show_alert=True); return
                     else:
                         wallet = game_chips
-                        if wallet[cid][uid] < MIN_ENTRY_CHIPS:
-                            await q.answer(f"进入德州至少需要 {MIN_ENTRY_CHIPS} 积分", show_alert=True); return
+                        if wallet[cid][uid] < sget("MIN_ENTRY_CHIPS"):
+                            await q.answer(f"进入德州至少需要 {sget('MIN_ENTRY_CHIPS')} 积分", show_alert=True); return
                     if game.add(uid):
                         await q.answer("已加入"); await update_poker_waiting(game, context.application)
                     else: await q.answer("你已在等待房间中。", show_alert=True)
@@ -6381,8 +6636,8 @@ async def on_button(update, context):
                     room_name, _ = poker_room_of(cid, uid, exclude_game=game)
                     if room_name:
                         await q.answer(f"你已在 {room_name} 房间，请先结束再加入", show_alert=True); return
-                    if game_chips[cid][uid] < MIN_ENTRY_CHIPS:
-                        await q.answer(f"进入炸金花至少需要 {MIN_ENTRY_CHIPS} 积分", show_alert=True); return
+                    if game_chips[cid][uid] < sget("MIN_ENTRY_CHIPS"):
+                        await q.answer(f"进入炸金花至少需要 {sget('MIN_ENTRY_CHIPS')} 积分", show_alert=True); return
                     if game.add(uid):
                         await q.answer("已加入"); await update_jinhua_waiting(game, context.application)
                     else: await q.answer("你已在等待房间中。", show_alert=True)
@@ -6441,7 +6696,7 @@ async def on_button(update, context):
                 # 商品详情：弹出商品信息，1 秒后回到原列表
                 try: idx = int(data[len("mall_show_"):])
                 except ValueError: await q.answer(); return
-                items = [x for x in MALL_ITEMS if x.get("on", True)]
+                items = [x for x in sget("MALL_ITEMS") if x.get("on", True)]
                 if not (1 <= idx <= len(items)): await q.answer("商品已下架", show_alert=True); return
                 it = items[idx - 1]
                 stk = it.get("stock")
@@ -6451,8 +6706,8 @@ async def on_button(update, context):
             if data.startswith("mall_buy_"):
                 try: idx = int(data[len("mall_buy_"):])
                 except ValueError: await q.answer(); return
-                if not MALL_ENABLED: await q.answer("商城未开启", show_alert=True); return
-                items = [x for x in MALL_ITEMS if x.get("on", True)]
+                if not sget("MALL_ENABLED"): await q.answer("商城未开启", show_alert=True); return
+                items = [x for x in sget("MALL_ITEMS") if x.get("on", True)]
                 if not (1 <= idx <= len(items)): await q.answer("商品已下架", show_alert=True); return
                 it = items[idx - 1]
                 stk = it.get("stock")
@@ -6465,7 +6720,7 @@ async def on_button(update, context):
                 try: page = int(data[len("mall_page_"):])
                 except ValueError: await q.answer(); return
                 # 在原按钮消息就地刷新为新页：正文小卡 + 按钮一起重建（_mall_panel 保证与首屏一致）
-                items = [x for x in MALL_ITEMS if x.get("on", True)]
+                items = [x for x in sget("MALL_ITEMS") if x.get("on", True)]
                 if not items:
                     await q.answer("商城已空"); return
                 text, rows = _mall_panel(page, items, q.message.chat.id)
@@ -6474,7 +6729,7 @@ async def on_button(update, context):
                                                reply_markup=InlineKeyboardMarkup(rows) if rows else None)
                 except Exception:
                     pass
-                pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
+                pages = max(1, (len(items) + sget("MALL_PAGE_SIZE") - 1) // sget("MALL_PAGE_SIZE"))
                 await q.answer(f"已切到 {page}/{pages} 页")
                 return
         # --- 积分兑换：点蓝色商品按钮直接兑换 ---
@@ -6532,7 +6787,7 @@ async def on_button(update, context):
             if not race: await q.answer("赛车已结束", show_alert=True); return
             ok, desc = await race.bet(uid, horse, amount)
             if not ok: await q.answer(desc, show_alert=True); return
-            race.name_cache[uid] = await get_name(context.application, uid); await q.answer(desc); await action_notice(cid, context.application, uid, f"下注 {amount} 于 {HORSE_EMOJI[horse]}")
+            race.name_cache[uid] = await get_name(context.application, uid); await q.answer(desc); await action_notice(cid, context.application, uid, f"下注 {amount} 于 {sget('HORSE_EMOJI')[horse]}")
             await safe_edit(context.bot, cid, race.game_msg_id, await race.view(context.application), reply_markup=race.buttons())
             return
 
@@ -6560,13 +6815,13 @@ def _antispam_check(cid, uid, text):
     hist = antispam_hist.setdefault(key, [])
     hist.append(now)
     if len(hist) > 12: del hist[:-12]
-    recent = [t for t in hist if now - t <= ANTISPAM_WINDOW]
-    if len(recent) >= ANTISPAM_REPEAT_N:
+    recent = [t for t in hist if now - t <= sget("ANTISPAM_WINDOW")]
+    if len(recent) >= sget("ANTISPAM_REPEAT_N"):
         return "repeat"
-    if len(hist) >= ANTISPAM_TIMER_N:
-        ivs = [b - a for a, b in zip(hist, hist[1:])][-(ANTISPAM_TIMER_N - 1):]
+    if len(hist) >= sget("ANTISPAM_TIMER_N"):
+        ivs = [b - a for a, b in zip(hist, hist[1:])][-(sget("ANTISPAM_TIMER_N") - 1):]
         mean = sum(ivs) / len(ivs)
-        if mean >= 30 and all(abs(iv - mean) <= mean * ANTISPAM_TIMER_TOL / 100 for iv in ivs):
+        if mean >= 30 and all(abs(iv - mean) <= mean * sget("ANTISPAM_TIMER_TOL") / 100 for iv in ivs):
             return "timer"
     return None
 
@@ -6595,7 +6850,7 @@ async def _antispam_hit(update, context, cid, uid, reason):
     offs.append(time.time())
     _antispam_prune(offs)   # 只保留时间窗内的命中，否则累犯计数只增不减 → 2^(n-1) 变事实永久禁言
     n = len(offs)
-    mute = ANTISPAM_MUTE_SECONDS * (2 ** (n - 1)) if ANTISPAM_MUTE_ESCALATE else ANTISPAM_MUTE_SECONDS
+    mute = sget("ANTISPAM_MUTE_SECONDS") * (2 ** (n - 1)) if sget("ANTISPAM_MUTE_ESCALATE") else sget("ANTISPAM_MUTE_SECONDS")
     muted = False
     if mute > 0:
         try:
@@ -6609,27 +6864,27 @@ async def _antispam_hit(update, context, cid, uid, reason):
     tip = f"🔨 检测到{why}：{name} 的消息已自动撤删"
     if muted:
         mins = max(1, mute // 60)
-        tip += f"，禁言 {mins} 分钟" + ("（累犯加倍）" if n > 1 and ANTISPAM_MUTE_ESCALATE else "")
-    elif ANTISPAM_MUTE_SECONDS > 0:
+        tip += f"，禁言 {mins} 分钟" + ("（累犯加倍）" if n > 1 and sget("ANTISPAM_MUTE_ESCALATE") else "")
+    elif sget("ANTISPAM_MUTE_SECONDS") > 0:
         tip += "（我需要管理员禁言权限才能禁言）"
     try:
         m = await context.bot.send_message(cid, tip)
-        if ANTISPAM_NOTICE_SECONDS > 0:
-            schedule_delete(context.application, cid, m, ANTISPAM_NOTICE_SECONDS)
+        if sget("ANTISPAM_NOTICE_SECONDS") > 0:
+            schedule_delete(context.application, cid, m, sget("ANTISPAM_NOTICE_SECONDS"))
     except TelegramError: pass
 
 def _autodel_text_hit(message, text):
     """自动删除规则（文本类）：返回规则名或 None。开关即法律，网页「自动删除」页可改。"""
-    if _multi_has(AUTODEL_TEXT_RULES, "link") and text and ("http://" in text or "https://" in text or "t.me/" in text
+    if _multi_has(sget("AUTODEL_TEXT_RULES"), "link") and text and ("http://" in text or "https://" in text or "t.me/" in text
             or any(getattr(e, "type", None) in ("url", "text_link") for e in (message.entities or []))):
         # 域名白名单：名单内（含子域名）的链接放行，不再一律删
-        if LINK_WHITELIST_ENABLED and _link_whitelisted(text):
+        if sget("LINK_WHITELIST_ENABLED") and _link_whitelisted(text):
             pass
         else:
             return "link"
-    if _multi_has(AUTODEL_TEXT_RULES, "long") and text and len(text) > max(50, int(AUTODEL_LONG_LEN)):
+    if _multi_has(sget("AUTODEL_TEXT_RULES"), "long") and text and len(text) > max(50, int(sget("AUTODEL_LONG_LEN"))):
         return "long"
-    if _multi_has(AUTODEL_TEXT_RULES, "premium_emoji") and any(
+    if _multi_has(sget("AUTODEL_TEXT_RULES"), "premium_emoji") and any(
             getattr(e, "type", None) == "custom_emoji" for e in (message.entities or [])):
         return "premium_emoji"
     return None
@@ -6673,31 +6928,31 @@ def _autodel_media_hit(message):
     if message is None:
         return None
     if _is_service_message(message):
-        return "service" if _multi_has(AUTODEL_MEDIA_TYPES, "service") else None
+        return "service" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "service") else None
     if message.sticker is not None:
-        return "sticker" if _multi_has(AUTODEL_MEDIA_TYPES, "sticker") else None
+        return "sticker" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "sticker") else None
     if message.animation is not None:
-        return "gif" if _multi_has(AUTODEL_MEDIA_TYPES, "gif") else None
+        return "gif" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "gif") else None
     if message.voice is not None or message.video_note is not None:
-        return "voice" if _multi_has(AUTODEL_MEDIA_TYPES, "voice") else None
+        return "voice" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "voice") else None
     if message.contact is not None:
-        return "contact" if _multi_has(AUTODEL_MEDIA_TYPES, "contact") else None
+        return "contact" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "contact") else None
     if message.document is not None:
         name = (message.document.file_name or "").lower()
         mt = message.document.mime_type or ""
-        if _multi_has(AUTODEL_MEDIA_TYPES, "archive") and (mt in ("application/zip", "application/x-rar-compressed",
+        if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "archive") and (mt in ("application/zip", "application/x-rar-compressed",
                                        "application/x-7z-compressed", "application/gzip", "application/x-tar")
                 or name.endswith((".zip", ".rar", ".7z", ".tar", ".gz"))):
             return "archive"
-        if _multi_has(AUTODEL_MEDIA_TYPES, "executable") and (mt in ("application/x-msdownload", "application/vnd.android.package-archive",
+        if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "executable") and (mt in ("application/x-msdownload", "application/vnd.android.package-archive",
                                           "application/x-dosexec")
                 or name.endswith((".exe", ".msi", ".bat", ".cmd", ".scr", ".apk", ".com"))):
             return "executable"
-        return "document" if _multi_has(AUTODEL_MEDIA_TYPES, "document") else None
+        return "document" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "document") else None
     if message.photo:
-        return "photo" if _multi_has(AUTODEL_MEDIA_TYPES, "photo") else None
+        return "photo" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "photo") else None
     if message.video is not None:
-        return "video" if _multi_has(AUTODEL_MEDIA_TYPES, "video") else None
+        return "video" if _multi_has(sget("AUTODEL_MEDIA_TYPES"), "video") else None
     return None
 
 async def _autodel_enforce(update, context):
@@ -6716,9 +6971,9 @@ async def _autodel_enforce(update, context):
     if hit:
         if hit == "link" and not is_svc and user:
             _invite_flag_ad(update.effective_chat.id, user.id, "发链接/广告")  # 风控连坐
-        delay = int(AUTODEL_MEDIA_SECONDS if is_svc or hit in (
+        delay = int(sget("AUTODEL_MEDIA_SECONDS") if is_svc or hit in (
             "photo", "video", "sticker", "gif", "voice", "contact", "document", "archive", "executable", "service"
-        ) else AUTODEL_TEXT_SECONDS)
+        ) else sget("AUTODEL_TEXT_SECONDS"))
         if delay > 0:
             # 延迟删除：命中后 N 秒再撤（0=立即删），给管理员留查看时间
             schedule_delete(context.application, update.effective_chat.id, message, delay)
@@ -6736,7 +6991,7 @@ _URL_HOST_RE = re.compile(r"(?:https?://)?([a-z0-9][a-z0-9\-]*(?:\.[a-z0-9\-]+)+
 def _link_domains():
     """白名单域名（归一：去协议、去路径、去点前缀、小写）。"""
     out = []
-    for d in (LINK_WHITELIST or []):
+    for d in (sget("LINK_WHITELIST") or []):
         d = str(d).strip().lower()
         if not d:
             continue
@@ -6761,9 +7016,9 @@ def _link_whitelisted(text):
 def _sensitive_hit(text):
     """敏感词判定：明文按子串（忽略大小写），/xxx/ 形式按正则。返回命中的词条或 None。"""
     t = str(text or "")
-    if not t or not SENSITIVE_WORDS:
+    if not t or not sget("SENSITIVE_WORDS"):
         return None
-    for w in SENSITIVE_WORDS:
+    for w in sget("SENSITIVE_WORDS"):
         w = str(w).strip()
         if not w:
             continue
@@ -6784,7 +7039,7 @@ async def _observe_enforce(update, context):
 
     文本与媒体消息共用（此前只在 on_text 拦截 → 观察期内发个表情包就能照常发言）。
     """
-    if not (OBSERVE_ENABLED and OBSERVE_SECONDS > 0):
+    if not (sget("OBSERVE_ENABLED") and sget("OBSERVE_SECONDS") > 0):
         return False
     user, message = update.effective_user, update.effective_message
     if not message or not user or user.is_bot:
@@ -6794,13 +7049,13 @@ async def _observe_enforce(update, context):
     cid = update.effective_chat.id
     _jt = member_joined_at.get(cid, {}).get(user.id, 0)
     _elapsed = time.time() - _jt if _jt else 1e9
-    if _elapsed >= OBSERVE_SECONDS:
+    if _elapsed >= sget("OBSERVE_SECONDS"):
         return False
     try:
         await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
         await context.bot.restrict_chat_member(
             cid, user.id, permissions=ChatPermissions(can_send_messages=False),
-            until_date=datetime.now(timezone.utc) + timedelta(seconds=OBSERVE_SECONDS - _elapsed + 1))
+            until_date=datetime.now(timezone.utc) + timedelta(seconds=sget("OBSERVE_SECONDS") - _elapsed + 1))
     except TelegramError:
         pass
     return True
@@ -6813,7 +7068,7 @@ async def _sensitive_enforce(update, context):
     永远不会被查（用户报障「敏感词设了不删」的一半根因）。
     删除失败（bot 无删除权限）不再静默：私聊管理员告警，否则管理员只看到「设了没反应」。
     """
-    if not SENSITIVE_ENABLED:
+    if not sget("SENSITIVE_ENABLED"):
         return False
     user, message = update.effective_user, update.effective_message
     if not message or not user or user.is_bot:
@@ -6836,8 +7091,8 @@ async def _sensitive_enforce(update, context):
                 parse_mode="HTML")
         except Exception:
             pass
-    if SENSITIVE_ACTION:
-        await _mod_punish(context, cid, user.id, SENSITIVE_ACTION, SENSITIVE_MUTE_SECONDS,
+    if sget("SENSITIVE_ACTION"):
+        await _mod_punish(context, cid, user.id, sget("SENSITIVE_ACTION"), sget("SENSITIVE_MUTE_SECONDS"),
                           user.first_name or f"用户{user.id}", "敏感词")
     _invite_flag_ad(cid, user.id, "敏感词")   # 风控连坐：被邀请人发广告 → 邀请人不再计合格
     return True
@@ -6861,7 +7116,7 @@ async def _mod_punish(context, cid, uid, action, mute_seconds, name, reason):
 async def _fsub_links(context):
     """把 FORCE_SUB_CHANNELS 转成 [(显示名, 链接)]：@用户名→公开 t.me 链接；数字 id→get_chat 邀请链接（缓存）。"""
     out = []
-    for ch in FORCE_SUB_CHANNELS:
+    for ch in sget("FORCE_SUB_CHANNELS"):
         ch = str(ch).strip()
         if not ch:
             continue
@@ -6890,7 +7145,7 @@ async def _forcesub_enforce(update, context):
     返回 True=已拦截（消息已处理，调用方直接 return）。管理员/群管/Bot 管理员豁免；
     已订阅判定缓存 30 分钟、未订阅缓存 60 秒（订阅后一分钟内自动放行），避免每条消息打 API。
     """
-    if not FORCE_SUB_ENABLED or not FORCE_SUB_CHANNELS:
+    if not sget("FORCE_SUB_ENABLED") or not sget("FORCE_SUB_CHANNELS"):
         return False
     message, user = update.effective_message, update.effective_user
     if not message or not user or user.is_bot or not is_group_chat(update) or is_bot_admin(user.id):
@@ -6901,7 +7156,7 @@ async def _forcesub_enforce(update, context):
             return False
     except Exception:
         pass
-    if FORCE_SUB_ONLY_NEW:
+    if sget("FORCE_SUB_ONLY_NEW"):
         _jt = member_joined_at.get(cid, {}).get(user.id, 0)
         if not _jt or time.time() - _jt > 600:
             return False
@@ -6910,7 +7165,7 @@ async def _forcesub_enforce(update, context):
     if _hit and (_hit[1] and now - _hit[0] < 1800):
         return False          # 已订阅，缓存期内直接放行
     ok = False
-    for ch in FORCE_SUB_CHANNELS:
+    for ch in sget("FORCE_SUB_CHANNELS"):
         ch = str(ch).strip()
         if not ch:
             continue
@@ -6935,14 +7190,14 @@ async def _forcesub_enforce(update, context):
             links = await _fsub_links(context)
             txt = _fmt_tpl("force_sub_warn_tpl",
                            name=user_names.get(user.id) or user.first_name or f"用户{user.id}",
-                           channels="、".join(l for l, _u in links) or "、".join(str(c) for c in FORCE_SUB_CHANNELS),
-                           seconds=FORCE_SUB_WARN_SECONDS)
+                           channels="、".join(l for l, _u in links) or "、".join(str(c) for c in sget("FORCE_SUB_CHANNELS")),
+                           seconds=sget("FORCE_SUB_WARN_SECONDS"))
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"📢 订阅 {l}", url=u)] for l, u in links]) or None
             sent = await context.bot.send_message(cid, txt, reply_markup=kb)
             _fsub_ok_cache[cid][f"warned:{user.id}"] = now
-            if FORCE_SUB_WARN_SECONDS > 0:
+            if sget("FORCE_SUB_WARN_SECONDS") > 0:
                 async def _del_warn():
-                    await asyncio.sleep(FORCE_SUB_WARN_SECONDS)
+                    await asyncio.sleep(sget("FORCE_SUB_WARN_SECONDS"))
                     try:
                         await context.bot.delete_message(chat_id=cid, message_id=sent.message_id)
                     except Exception:
@@ -7021,15 +7276,15 @@ async def _join_verify_start(context, cid, uid, name):
         if int(old.get("msg_id", 0) or 0):
             return                       # 已登记且验证消息已发出 → 第二个事件源直接跳过
         join_verify_pending.pop(key, None)   # 上一条验证消息没发出去（异常）→ 允许补发
-    mode = int(JOIN_VERIFY_MODE)
+    mode = int(sget("JOIN_VERIFY_MODE"))
     if mode != 1:
         try:
             await context.bot.restrict_chat_member(
                 cid, uid, permissions=ChatPermissions(can_send_messages=False))
         except Exception:
             logger.exception("入群验证：限制发言失败 cid=%s uid=%s（继续发验证消息）", cid, uid)
-    txt = (str(JOIN_VERIFY_MSG).replace("{name}", html.escape(str(name)))
-           .replace("{seconds}", str(int(JOIN_VERIFY_SECONDS))))
+    txt = (str(sget("JOIN_VERIFY_MSG")).replace("{name}", html.escape(str(name)))
+           .replace("{seconds}", str(int(sget("JOIN_VERIFY_SECONDS")))))
     mid, png, a, b, opts = 0, None, 0, 0, []
     if mode == 0:
         a, b = random.randint(1, 9), random.randint(1, 9)
@@ -7093,15 +7348,15 @@ async def _jv_wrong_hit(context, cid, uid, name, rec):
     重复答错不重复刷群消息（用 over_notified 标记），避免刷屏。
     """
     rec["wrong"] = int(rec.get("wrong", 0) or 0) + 1
-    if int(JOIN_VERIFY_MAX_WRONG) > 0 and rec["wrong"] >= int(JOIN_VERIFY_MAX_WRONG):
-        if JOIN_VERIFY_ACTION >= 2:
+    if int(sget("JOIN_VERIFY_MAX_WRONG")) > 0 and rec["wrong"] >= int(sget("JOIN_VERIFY_MAX_WRONG")):
+        if sget("JOIN_VERIFY_ACTION") >= 2:
             join_verify_pending.pop(f"{cid}:{uid}", None)   # 踢出/封禁：人已离群，清记录
         else:
             rec["over"] = True          # 保留 pending，允许继续点按钮自救
         if rec.get("over_notified"):
             return rec["wrong"], True   # 已提醒过，不重复刷屏
         rec["over_notified"] = True
-        if JOIN_VERIFY_ACTION == 0:
+        if sget("JOIN_VERIFY_ACTION") == 0:
             try:
                 await context.bot.send_message(
                     cid, f"❌ {html.escape(str(name))} 答错 {rec['wrong']} 次未通过验证，"
@@ -7109,12 +7364,12 @@ async def _jv_wrong_hit(context, cid, uid, name, rec):
             except Exception:
                 pass
         else:
-            await _mod_punish(context, cid, uid, JOIN_VERIFY_ACTION, SENSITIVE_MUTE_SECONDS, name, "验证答错超限")
+            await _mod_punish(context, cid, uid, sget("JOIN_VERIFY_ACTION"), sget("SENSITIVE_MUTE_SECONDS"), name, "验证答错超限")
             try:
                 await context.bot.send_message(
                     cid, f"❌ {html.escape(str(name))} 验证答错超限，已"
-                         f"{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群' if JOIN_VERIFY_ACTION == 2 else '封禁'}。"
-                         + ("（仍可点下方正确答案通过验证）" if JOIN_VERIFY_ACTION == 1 else ""))
+                         f"{'禁言' if sget('JOIN_VERIFY_ACTION') == 1 else '移出群' if sget('JOIN_VERIFY_ACTION') == 2 else '封禁'}。"
+                         + ("（仍可点下方正确答案通过验证）" if sget("JOIN_VERIFY_ACTION") == 1 else ""))
             except Exception:
                 pass
         return rec["wrong"], True
@@ -7140,14 +7395,14 @@ async def _join_verify_handle_text(context, cid, uid, text):
 
 async def _join_gate_check(context, cid, member, name):
     """进群硬门槛：用户名 / Premium / 简介，任一不满足 → 直接移出（不进验证流程）。全关或放行返回 True。"""
-    if not (JOIN_GATE_USERNAME or JOIN_GATE_PREMIUM or JOIN_GATE_BIO):
+    if not (sget("JOIN_GATE_USERNAME") or sget("JOIN_GATE_PREMIUM") or sget("JOIN_GATE_BIO")):
         return True
     reasons = []
-    if JOIN_GATE_USERNAME and not getattr(member, "username", None):
+    if sget("JOIN_GATE_USERNAME") and not getattr(member, "username", None):
         reasons.append("无用户名")
-    if JOIN_GATE_PREMIUM and not getattr(member, "is_premium", False):
+    if sget("JOIN_GATE_PREMIUM") and not getattr(member, "is_premium", False):
         reasons.append("非Premium")
-    if JOIN_GATE_BIO:
+    if sget("JOIN_GATE_BIO"):
         bio_ok = None   # None=查询失败（不拦，宁放过不误杀） True=有简介 False=无简介
         try:
             ch = await context.bot.get_chat(member.id)
@@ -7188,7 +7443,7 @@ async def _join_verify_pass(context, cid, uid, name, msg_id=0):
         except Exception:
             pass
     try:
-        await context.bot.send_message(cid, str(JOIN_VERIFY_OK_MSG).replace("{name}", html.escape(str(name))))
+        await context.bot.send_message(cid, str(sget("JOIN_VERIFY_OK_MSG")).replace("{name}", html.escape(str(name))))
     except Exception:
         pass
 
@@ -7198,25 +7453,27 @@ async def join_verify_sweep(context):
     不因 JOIN_VERIFY_ENABLED=0 早退：突袭人墙期间强制登记的待验证（以及关开关瞬间的存量）
     也要正常结算，否则人被永久禁言。新登记入口才受开关控制。
     """
-    if RAID_ENABLED:   # 防突袭：人墙到期自动解除
-        for _cid in list(raid_until):
-            try:
-                await _raid_recover(context, _cid)
-            except Exception:
-                logger.exception("防突袭恢复检查异常（已吞并）")
+    # 不按全局开关早退：人墙可能只在个别群生效（群级覆盖），到期都必须解除
+    for _cid in list(raid_until):
+        try:
+            _CUR_CID.set(_safe_cid(_cid))
+            await _raid_recover(context, _cid)
+        except Exception:
+            logger.exception("防突袭恢复检查异常（已吞并）")
     now = time.time()
     for key in list(join_verify_pending):
         rec = join_verify_pending.get(key) or {}
-        if now - float(rec.get("ts", now)) < int(JOIN_VERIFY_SECONDS):
-            continue
         try:
             cid_s, _, uid_s = str(key).partition(":")
             cid, uid = int(cid_s), int(uid_s)
         except ValueError:
             join_verify_pending.pop(key, None); continue
+        _CUR_CID.set(_safe_cid(cid))   # 这条待验证记录属于该群 → 阈值/动作按该群配置解析
+        if now - float(rec.get("ts", now)) < int(sget("JOIN_VERIFY_SECONDS")):
+            continue
         join_verify_pending.pop(key, None)
         name = rec.get("name") or f"用户{uid}"
-        if JOIN_VERIFY_ACTION == 0:
+        if sget("JOIN_VERIFY_ACTION") == 0:
             # 修复（2026-09-09）：action=0「只提醒」时，_join_verify_start 给的禁言没人解
             # → 新人被永久禁言（用户报障「发不了言」）。只提醒档必须解除禁言。
             try:
@@ -7228,15 +7485,15 @@ async def join_verify_sweep(context):
                 logger.exception("入群验证：超时(action=0)解除限制失败 cid=%s uid=%s", cid, uid)
             try:
                 await context.bot.send_message(
-                    cid, f"⏰ {html.escape(str(name))} 入群后未在 {int(JOIN_VERIFY_SECONDS)} 秒内完成验证，"
+                    cid, f"⏰ {html.escape(str(name))} 入群后未在 {int(sget('JOIN_VERIFY_SECONDS'))} 秒内完成验证，"
                          f"已自动放行，请管理员留意。")
             except Exception:
                 pass
         else:
-            await _mod_punish(context, cid, uid, JOIN_VERIFY_ACTION, SENSITIVE_MUTE_SECONDS, name, "入群验证超时")
+            await _mod_punish(context, cid, uid, sget("JOIN_VERIFY_ACTION"), sget("SENSITIVE_MUTE_SECONDS"), name, "入群验证超时")
             try:
                 await context.bot.send_message(
-                    cid, f"⏰ {html.escape(str(name))} 入群验证超时，已{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群'}。")
+                    cid, f"⏰ {html.escape(str(name))} 入群验证超时，已{'禁言' if sget('JOIN_VERIFY_ACTION') == 1 else '移出群'}。")
             except Exception:
                 pass
         if rec.get("msg_id"):
@@ -7247,7 +7504,7 @@ async def join_verify_sweep(context):
 
 def _raid_active(cid):
     """突袭人墙是否生效中（人墙期间新人一律强制走验证禁言流程）。"""
-    return bool(RAID_ENABLED) and float(raid_until.get(cid, 0) or 0) > time.time()
+    return bool(sget("RAID_ENABLED")) and float(raid_until.get(cid, 0) or 0) > time.time()
 
 async def _raid_recover(context, cid):
     """人墙到期自动解除（有人进群/巡检触发时惰性检查）。"""
@@ -7265,7 +7522,7 @@ async def _raid_on_join(context, cid, uid=0):
     去重：同一次进群会同时到 chat_member 与服务消息两个事件源，若按事件计数，阈值实际被腰斩。
     uid 相同且在窗口内的重复上报只计一次。
     """
-    if not RAID_ENABLED:
+    if not sget("RAID_ENABLED"):
         return
     try:
         await _raid_recover(context, cid)
@@ -7275,26 +7532,26 @@ async def _raid_on_join(context, cid, uid=0):
     if uid:
         ckey = f"{cid}:{uid}"
         last = float(raid_counted.get(ckey, 0) or 0)
-        if last and now - last < max(30, int(RAID_WINDOW)):
+        if last and now - last < max(30, int(sget("RAID_WINDOW"))):
             return          # 同一个人同一次进群的第二个事件源，不重复计数
         raid_counted[ckey] = now
         if len(raid_counted) > 2000:
             for k in [k for k, t in raid_counted.items() if now - float(t) > 3600]:
                 raid_counted.pop(k, None)
-    arr = [t for t in raid_joins.get(cid, []) if now - float(t) < int(RAID_WINDOW)]
+    arr = [t for t in raid_joins.get(cid, []) if now - float(t) < int(sget("RAID_WINDOW"))]
     arr.append(now)
     raid_joins[cid] = arr[-300:]
-    if len(arr) >= max(2, int(RAID_THRESHOLD)) and not raid_until.get(cid):
-        raid_until[cid] = now + max(60, int(RAID_COOLDOWN))
+    if len(arr) >= max(2, int(sget("RAID_THRESHOLD"))) and not raid_until.get(cid):
+        raid_until[cid] = now + max(60, int(sget("RAID_COOLDOWN")))
         try:
             await context.bot.send_message(
-                cid, f"🚨 检测到疑似突袭（{int(RAID_WINDOW)} 秒内 {len(arr)} 人进群），"
-                     f"已临时开启人墙：新人进群需先完成验证，{int(RAID_COOLDOWN)} 秒后自动恢复。")
+                cid, f"🚨 检测到疑似突袭（{int(sget('RAID_WINDOW'))} 秒内 {len(arr)} 人进群），"
+                     f"已临时开启人墙：新人进群需先完成验证，{int(sget('RAID_COOLDOWN'))} 秒后自动恢复。")
         except Exception:
             pass
         try:
             await context.bot.send_message(
-                ADMIN_USER_ID, f"🚨 防突袭：群 <code>{cid}</code> {int(RAID_WINDOW)} 秒内 {len(arr)} 人进群，已临时人墙。")
+                ADMIN_USER_ID, f"🚨 防突袭：群 <code>{cid}</code> {int(sget('RAID_WINDOW'))} 秒内 {len(arr)} 人进群，已临时人墙。")
         except Exception:
             pass
 
@@ -7303,53 +7560,54 @@ async def lurker_sweep(context):
 
     处理过/已豁免的人记 lurker_checked 不反复骚扰；管理员豁免。
     """
-    if not LURKER_ENABLED:
-        return
     for cid, joined in list(member_joined_at.items()):
+        if not group_get(cid, "lurker_enabled"):
+            continue          # 该群没开潜水清理（群级可覆盖全局开关）
+        _CUR_CID.set(_safe_cid(cid))   # 天数/条数等阈值按该群配置解析
         hits = []
         for uid, jt in list(joined.items()):
             key = f"{cid}:{uid}"
             if key in lurker_checked:
                 continue
-            if not jt or time.time() - float(jt) < max(1, int(LURKER_DAYS)) * 86400:
+            if not jt or time.time() - float(jt) < max(1, int(sget("LURKER_DAYS"))) * 86400:
                 continue
             lurker_checked.add(key)   # 不论结果只处理一次（活跃者以后也不会变潜水：发言数只增不减）
             if is_bot_admin(uid):
                 continue
             prof = member_profiles.get(cid, {}).get(uid, {}) or {}
-            if int(prof.get("msgs", 0) or 0) >= int(LURKER_MSGS):
+            if int(prof.get("msgs", 0) or 0) >= int(sget("LURKER_MSGS")):
                 continue
             hits.append((uid, str(prof.get("name") or f"用户{uid}")))
         if not hits:
             continue
-        if LURKER_ACTION == 0:
+        if sget("LURKER_ACTION") == 0:
             try:
                 await context.bot.send_message(
                     ADMIN_USER_ID,
                     f"💤 潜水巡查：群 <code>{cid}</code> 发现 {len(hits)} 个潜水号"
-                    f"（入群超 {int(LURKER_DAYS)} 天、发言少于 {int(LURKER_MSGS)} 条）：\n"
+                    f"（入群超 {int(sget('LURKER_DAYS'))} 天、发言少于 {int(sget('LURKER_MSGS'))} 条）：\n"
                     + "\n".join(f"· {html.escape(nm)}（{u_}）" for u_, nm in hits[:20])
                     + "\n可在「群管中心」改为自动禁言/踢出。")
             except Exception:
                 pass
         else:
             for u_, nm in hits:
-                await _mod_punish(context, cid, u_, LURKER_ACTION, SENSITIVE_MUTE_SECONDS, nm, "潜水清理")
+                await _mod_punish(context, cid, u_, sget("LURKER_ACTION"), sget("SENSITIVE_MUTE_SECONDS"), nm, "潜水清理")
             try:
                 await context.bot.send_message(
                     ADMIN_USER_ID,
                     f"💤 潜水巡查：群 <code>{cid}</code> 已按配置"
-                    f"{'禁言' if LURKER_ACTION == 1 else '踢出'} {len(hits)} 个潜水号。")
+                    f"{'禁言' if sget('LURKER_ACTION') == 1 else '踢出'} {len(hits)} 个潜水号。")
             except Exception:
                 pass
 
 async def announce_sweep(context):
     """定时群公告（每 60 秒）：北京时间到 ANNOUNCE_TIME 后向全部授权群推一条，一天只发一次。"""
-    if not ANNOUNCE_ENABLED:
+    if not sget("ANNOUNCE_ENABLED"):
         return
     global announce_last_date
     try:
-        hh, mm = (int(x) for x in str(ANNOUNCE_TIME).strip().split(":")[:2])
+        hh, mm = (int(x) for x in str(sget("ANNOUNCE_TIME")).strip().split(":")[:2])
         if not (0 <= hh <= 23 and 0 <= mm <= 59):
             return
     except Exception:
@@ -7358,7 +7616,7 @@ async def announce_sweep(context):
     target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
     if now < target or announce_last_date == now.strftime("%Y-%m-%d"):
         return
-    txt = str(ANNOUNCE_TEXT or "").strip()
+    txt = str(sget("ANNOUNCE_TEXT") or "").strip()
     if not txt:
         return
     announce_last_date = now.strftime("%Y-%m-%d")   # 先记再发：丢一条公告好过刷屏重发
@@ -7381,15 +7639,16 @@ async def observe_check_sweep(context):
 
     只在 OBSERVE_CHECK_ENABLED 打开时干活；处理过的人记进 observe_checked，不会反复骚扰。
     """
-    if not OBSERVE_CHECK_ENABLED or OBSERVE_SECONDS <= 0:
-        return
     now = time.time()
     for cid, joined in list(member_joined_at.items()):
+        if not group_get(cid, "observe_check_enabled") or group_get(cid, "observe_seconds") <= 0:
+            continue          # 该群没开观察期复核（群级可覆盖全局开关）
+        _CUR_CID.set(_safe_cid(cid))   # 观察时长/达标条数/动作按该群配置解析
         for uid, jt in list(joined.items()):
             key = f"{cid}:{uid}"
             if key in observe_checked:
                 continue
-            if not jt or now - float(jt) < OBSERVE_SECONDS:
+            if not jt or now - float(jt) < sget("OBSERVE_SECONDS"):
                 continue
             observe_checked.add(key)          # 先标记，避免异常导致反复处理
             if is_bot_admin(uid):
@@ -7397,16 +7656,16 @@ async def observe_check_sweep(context):
             prof = member_profiles.get(cid, {}).get(uid, {}) or {}
             name = prof.get("name") or f"用户{uid}"
             msgs = int(prof.get("msgs", 0) or 0)
-            if msgs >= OBSERVE_CHECK_MSGS:
+            if msgs >= sget("OBSERVE_CHECK_MSGS"):
                 continue
-            if OBSERVE_CHECK_AVATAR and msgs == 0:
+            if sget("OBSERVE_CHECK_AVATAR") and msgs == 0:
                 try:
                     ch = await context.bot.get_chat(uid)
                     if getattr(ch, "photo", None):
                         continue            # 有头像就不算小号
                 except Exception:
                     pass
-            if OBSERVE_CHECK_ACTION == 0:
+            if sget("OBSERVE_CHECK_ACTION") == 0:
                 try:
                     await context.bot.send_message(
                         ADMIN_USER_ID,
@@ -7415,17 +7674,18 @@ async def observe_check_sweep(context):
                 except Exception:
                     pass
             else:
-                await _mod_punish(context, cid, uid, OBSERVE_CHECK_ACTION, SENSITIVE_MUTE_SECONDS, name, "观察期巡检")
+                await _mod_punish(context, cid, uid, sget("OBSERVE_CHECK_ACTION"), sget("SENSITIVE_MUTE_SECONDS"), name, "观察期巡检")
                 try:
                     await context.bot.send_message(
                         ADMIN_USER_ID,
                         f"🔎 观察期巡检：{html.escape(str(name))}（{uid}）已"
-                        f"{'禁言' if OBSERVE_CHECK_ACTION == 1 else '移出群'}。")
+                        f"{'禁言' if sget('OBSERVE_CHECK_ACTION') == 1 else '移出群'}。")
                 except Exception:
                     pass
 
 async def on_media(update, context):
     """自动删除规则中心：非文本消息（图/视频/贴纸/文件/联系人/系统消息等）按开关静默撤删。"""
+    _bind_update_cid(update)
     try:
         # 黑名单拦截：命令/文本/回调入口都拦了，媒体消息此前漏了 → 拉黑形同虚设
         u = update.effective_user
@@ -7453,12 +7713,13 @@ async def on_media(update, context):
 
 async def on_text(update, context):
     # 外层 try 包命令分发；开头校验单独内层 try（消息结构异常属噪音，静默忽略）
+    _bind_update_cid(update)
     try:
         # 开头校验：无效消息静默跳过，不打扰用户
         try:
             message, user = update.effective_message, update.effective_user
             if not message or not message.text or not user or user.is_bot: return
-            if message.date and (datetime.now(timezone.utc) - message.date).total_seconds() > STALE_TEXT_COMMAND_SECONDS:
+            if message.date and (datetime.now(timezone.utc) - message.date).total_seconds() > sget("STALE_TEXT_COMMAND_SECONDS"):
                 return
             cid, text = update.effective_chat.id, message.text.strip()
             _remember_name(update)
@@ -7497,7 +7758,7 @@ async def on_text(update, context):
             logger.exception("入群验证答题处理异常（已吞并）")
 
         # 定时刷屏识别：复读机 + 定时器特征（管理员豁免；内容太短不参与统计防误伤闲聊）
-        if (ANTISPAM_ENABLED and is_group_chat(update) and not is_bot_admin(user.id)
+        if (sget("ANTISPAM_ENABLED") and is_group_chat(update) and not is_bot_admin(user.id)
                 and len(re.sub(r"\s+", "", text)) >= ANTISPAM_MIN_LEN):
             try:
                 _reason = _antispam_check(cid, user.id, text)
@@ -7510,7 +7771,7 @@ async def on_text(update, context):
         # 抽奖触发词：公告宣传的关键词直接参与（支持每个活动自带关键词；修复此前自定义词没反应）
         if is_group_chat(update) and text.strip():
             _alo = _lottery_active(cid)
-            if _alo and text.strip() in {LOTTERY_KEYWORD, (_alo.get("keyword") or "").strip()}:
+            if _alo and text.strip() in {sget("LOTTERY_KEYWORD"), (_alo.get("keyword") or "").strip()}:
                 await _dispatch_alias("抽奖", [], update, context)
                 return
 
@@ -7550,7 +7811,7 @@ async def on_text(update, context):
             logger.exception("成员档案记录异常（已吞并）")
         # 合格邀请结算（事件驱动）：被邀请人在本群发言后即时判定是否达标（发奖/待达标）
         try:
-            if INVITE_ENABLED and is_group_chat(update):
+            if sget("INVITE_ENABLED") and is_group_chat(update):
                 await _invite_ping_qualify(context.application, cid, user.id)
         except Exception:
             logger.exception("邀请达标判定异常（已吞并）")
@@ -7597,8 +7858,8 @@ async def on_text(update, context):
             if blackjack.phase != "waiting":
                 await send_reply(update, context, "❌ 21点已经开始，请等待下一局。"); return
             amount = int(bj_match.group(1))
-            if amount < BJ_MIN_BET:
-                await send_reply(update, context, f"❌ 21点最低下注 {BJ_MIN_BET} 积分。"); return
+            if amount < sget("BJ_MIN_BET"):
+                await send_reply(update, context, f"❌ 21点最低下注 {sget('BJ_MIN_BET')} 积分。"); return
             wallet = game_chips
             async with wallet_locks[user.id]:
                 if wallet[cid][user.id] < amount:
@@ -7618,7 +7879,7 @@ async def on_text(update, context):
             ok, desc = await race.bet(user.id, horse, amount)
             if not ok: await send_reply(update, context, f"❌ {desc}"); return
             race.name_cache[user.id] = await get_name(context.application, user.id)
-            await action_notice(cid, context.application, user.id, f"下注 {amount} 于 {HORSE_EMOJI[horse]}")
+            await action_notice(cid, context.application, user.id, f"下注 {amount} 于 {sget('HORSE_EMOJI')[horse]}")
             await safe_edit(context.bot, cid, race.game_msg_id, await race.view(context.application), reply_markup=race.buttons())
             return
 
@@ -7701,7 +7962,7 @@ def _normalize_levels():
     否则升级后老用户会突然被拦（历史无权限概念，不能追溯处罚）。
     幂等：可重复调用。
     """
-    for it in POINT_LEVELS:
+    for it in sget("POINT_LEVELS"):
         if not isinstance(it, dict):
             continue
         if "perms" not in it or not isinstance(it.get("perms"), str):
@@ -7726,7 +7987,7 @@ def _set_level_enabled(v):
 
 def _level_perms(cid, uid):
     """取该用户当前等级允许的消息类型集合。未达最低等级/表为空 → 返回全部（放行）。"""
-    if not POINT_LEVELS:
+    if not sget("POINT_LEVELS"):
         return set(k for k, _v in LEVEL_PERM_OPTIONS)
     cur = _level_item(cid, uid)
     if cur is None:
@@ -7737,9 +7998,9 @@ def _level_perms(cid, uid):
 
 def _level_allows(cid, uid, kind):
     """该用户当前等级是否允许发送某类消息。总开关关/表空/未达最低等级 → 一律放行。"""
-    if not LEVEL_ENABLED or not LEVEL_MSG_GUARD_ENABLED:
+    if not sget("LEVEL_ENABLED") or not sget("LEVEL_MSG_GUARD_ENABLED"):
         return True
-    if not POINT_LEVELS:
+    if not sget("POINT_LEVELS"):
         return True
     return str(kind) in _level_perms(cid, uid)
 
@@ -7774,9 +8035,9 @@ def _msg_kind(message, text=""):
 
 def _level_msg_hit(cid, uid, message, text=""):
     """等级消息管控判定。返回被拦截的消息类型键，放行返回 None。"""
-    if not LEVEL_ENABLED or not LEVEL_MSG_GUARD_ENABLED:
+    if not sget("LEVEL_ENABLED") or not sget("LEVEL_MSG_GUARD_ENABLED"):
         return None
-    if not POINT_LEVELS:
+    if not sget("POINT_LEVELS"):
         return None
     if is_bot_admin(uid):
         return None
@@ -7793,12 +8054,12 @@ def _level_violation_hit(cid, uid):
     达阈值后清空窗口，避免「到阈值后每发一条都触发一次惩罚」。
     """
     now = time.time()
-    win = max(1, int(LEVEL_MSG_WINDOW))
+    win = max(1, int(sget("LEVEL_MSG_WINDOW")))
     lst = [t for t in (level_msg_violations.get((cid, uid)) or []) if now - t <= win]
     lst.append(now)
     level_msg_violations[(cid, uid)] = lst[-50:]
     n = len(lst)
-    if n >= max(1, int(LEVEL_MSG_MAX_HITS)):
+    if n >= max(1, int(sget("LEVEL_MSG_MAX_HITS"))):
         level_msg_violations.pop((cid, uid), None)
         return n, True
     return n, False
@@ -7811,7 +8072,7 @@ async def _level_msg_enforce(update, context):
     双路径接入：on_text 与 on_media 都要调（媒体消息走 on_media）。
     """
     try:
-        if not LEVEL_ENABLED or not LEVEL_MSG_GUARD_ENABLED:
+        if not sget("LEVEL_ENABLED") or not sget("LEVEL_MSG_GUARD_ENABLED"):
             return False
         user, message = update.effective_user, update.effective_message
         if not message or not user or user.is_bot or not is_group_chat(update):
@@ -7836,9 +8097,9 @@ async def _level_msg_enforce(update, context):
         name = user.first_name or user_names.get(user.id) or f"用户{user.id}"
         lv = _level_of(cid, user.id)[0] or "无"
         n, over = _level_violation_hit(cid, user.id)
-        if over and int(LEVEL_MSG_PUNISH):
-            secs = int(LEVEL_MSG_MUTE_SECONDS)
-            if int(LEVEL_MSG_PUNISH) == 1:
+        if over and int(sget("LEVEL_MSG_PUNISH")):
+            secs = int(sget("LEVEL_MSG_MUTE_SECONDS"))
+            if int(sget("LEVEL_MSG_PUNISH")) == 1:
                 if secs <= 0:
                     return True          # 0=不禁言（只删消息 + 已发提示）
                 if secs < 30:
@@ -7866,9 +8127,9 @@ async def _level_msg_enforce(update, context):
                 cid, _fmt_tpl("level_msg_warn_tpl", name=html.escape(str(name)),
                               level=html.escape(str(lv)),
                               kind=html.escape(str(LEVEL_PERM_NAMES.get(kind, kind))),
-                              count=str(n), limit=str(int(LEVEL_MSG_MAX_HITS))))
-            if REPLY_DELETE_SECONDS > 0:
-                schedule_delete(context.application, cid, tip, REPLY_DELETE_SECONDS)
+                              count=str(n), limit=str(int(sget("LEVEL_MSG_MAX_HITS")))))
+            if sget("REPLY_DELETE_SECONDS") > 0:
+                schedule_delete(context.application, cid, tip, sget("REPLY_DELETE_SECONDS"))
         except Exception:
             pass
         return True
@@ -7879,7 +8140,7 @@ async def _level_msg_enforce(update, context):
 
 def _level_base(cid, uid):
     """等级判定基数。降级开关开 → 当前余额；否则 → 累计获得（消费不掉级）。"""
-    if LEVEL_ALLOW_DEMOTE:
+    if sget("LEVEL_ALLOW_DEMOTE"):
         try:
             return max(0, int(game_chips[cid][uid] or 0))
         except Exception:
@@ -7891,7 +8152,7 @@ def _level_item(cid, uid):
     """返回该用户当前命中的等级 dict（跳过停用等级）；未达最低等级返回 None。"""
     base = _level_base(cid, uid)
     cur = None
-    for it in POINT_LEVELS:
+    for it in sget("POINT_LEVELS"):
         if not int(it.get("on", 1) or 0):
             continue   # 停用等级不参与判定（与 _get_level 口径一致）
         if base >= int(it.get("value", 0) or 0):
@@ -7907,7 +8168,7 @@ def _level_of(cid, uid):
 def _get_level(balance):
     """按积分等级表返回当前等级名，表为空返回空串。停用的等级不参与判定。"""
     lv = ""
-    for item in POINT_LEVELS:
+    for item in sget("POINT_LEVELS"):
         if not int(item.get("on", 1) or 0):
             continue
         if balance >= int(item.get("value", 0) or 0):
@@ -7916,7 +8177,7 @@ def _get_level(balance):
 
 def _level_rank(lv_name):
     """等级名 -> 在等级表中的序号（升序），未找到返回 -1。"""
-    for i, item in enumerate(POINT_LEVELS):
+    for i, item in enumerate(sget("POINT_LEVELS")):
         if item["name"] == lv_name:
             return i
     return -1
@@ -7928,7 +8189,7 @@ async def _level_sync_member_tag(app, cid, uid, level_name=None):
     失败静默：非管理员/权限不足/群不支持 都不影响主流程（等级系统照常工作）。
     """
     try:
-        if not LEVEL_SYNC_TAG:
+        if not sget("LEVEL_SYNC_TAG"):
             return False
         lv = level_name if level_name is not None else _level_of(cid, uid)[0]
         if not lv:
@@ -7951,7 +8212,7 @@ async def _check_level_change(app, cid, uid, old_earned, new_earned, balance=Non
     聊天积分小额高频，刻意不接（避免刷屏）。
     """
     try:
-        if not POINT_LEVELS:
+        if not sget("POINT_LEVELS"):
             return
         old_v, new_v = int(old_earned or 0), int(new_earned or 0)
         if new_v <= old_v:
@@ -7960,7 +8221,7 @@ async def _check_level_change(app, cid, uid, old_earned, new_earned, balance=Non
         if old_lv == new_lv:
             return
         await _level_sync_member_tag(app, cid, uid, new_lv)   # 称号同步标签（开关控制）
-        if not LEVEL_NOTIFY_ENABLED:
+        if not sget("LEVEL_NOTIFY_ENABLED"):
             return
         name = await get_name(app, uid, cid=cid)
         show_bal = game_chips[cid][uid] if balance is None else balance
@@ -7977,7 +8238,7 @@ async def _check_level_drop_on_spend(app, cid, uid, before_balance):
     在扣分点调用，传扣分前的余额。
     """
     try:
-        if not LEVEL_ALLOW_DEMOTE or not POINT_LEVELS:
+        if not sget("LEVEL_ALLOW_DEMOTE") or not sget("POINT_LEVELS"):
             return
         old_v = max(0, int(before_balance or 0))
         new_v = max(0, int(game_chips[cid][uid] or 0))
@@ -7987,7 +8248,7 @@ async def _check_level_drop_on_spend(app, cid, uid, before_balance):
         if old_lv == new_lv:
             return
         await _level_sync_member_tag(app, cid, uid, new_lv)
-        if not LEVEL_DOWN_NOTIFY_ENABLED:
+        if not sget("LEVEL_DOWN_NOTIFY_ENABLED"):
             return
         name = await get_name(app, uid, cid=cid)
         await send_settle(app, cid, _fmt_tpl("level_down_msg_tpl", name=name,
@@ -8006,19 +8267,19 @@ async def cmd_my_level(update, context):
     """查询我的积分等级与距下一级的差距。"""
     if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
-    if not POINT_LEVELS:
+    if not sget("POINT_LEVELS"):
         await send_reply(update, context, _fmt_tpl("level_query_none_tpl")); return
     bal = game_chips[cid][uid]
     lv, base = _level_of(cid, uid)
     next_lv, next_val = "", None
-    for item in POINT_LEVELS:
+    for item in sget("POINT_LEVELS"):
         if not int(item.get("on", 1) or 0):
             continue
         if int(item.get("value", 0) or 0) > base and (next_val is None or item["value"] < next_val):
             next_lv, next_val = item["name"], int(item["value"])
     nxt = f"\n⬆️ 下一等级：{next_lv}（还差 {next_val - base} 积分）" if next_lv else "\n🏆 你已是最高等级！"
     base_line = ("📈 累计获得：{v}（等级按此计算，消费不降级）".format(v=base)
-                 if not LEVEL_ALLOW_DEMOTE else "📈 等级按当前积分计算（积分不足会降级）")
+                 if not sget("LEVEL_ALLOW_DEMOTE") else "📈 等级按当前积分计算（积分不足会降级）")
     await send_reply(update, context,
                      _fmt_tpl("level_query_msg_tpl", name=await get_name(context.application, uid),
                               level=lv or "无", balance=bal, earned=base,
@@ -8046,9 +8307,9 @@ def _chat_is_effective(cid, uid, text, min_len=None):
     if not re.sub(r"[\s\W_]+", "", t, flags=re.UNICODE):
         return False
     # ③ 无意义词：把黑名单词与常见标点/空白全部剔除后，若什么都不剩 → 纯无意义
-    if CHAT_JUNK_WORDS:
+    if sget("CHAT_JUNK_WORDS"):
         _r = t
-        for w in CHAT_JUNK_WORDS:
+        for w in sget("CHAT_JUNK_WORDS"):
             w = str(w).strip()
             if w:
                 _r = _r.replace(w, "")
@@ -8057,11 +8318,11 @@ def _chat_is_effective(cid, uid, text, min_len=None):
             return False
     # ④ 重复灌水：本函数独立记录（不复用 antispam_hist——那个受 ANTISPAM_ENABLED 开关
     #    与 ANTISPAM_MIN_LEN 长度门槛控制，关掉刷屏识别后重复检测会静默失效）
-    _n = int(CHAT_DUP_N)
+    _n = int(sget("CHAT_DUP_N"))
     if _n > 0:
         _key = (cid, uid, _antispam_norm(t))
         _now = time.time()
-        _win = max(10, int(CHAT_DUP_WINDOW))
+        _win = max(10, int(sget("CHAT_DUP_WINDOW")))
         _hist = [x for x in (chat_dup_hist.get(_key) or []) if _now - x <= _win]
         _dup = len(_hist) >= _n          # 先判定：本条之前的条数已达阈值 → 本条不计分
         _hist.append(_now)
@@ -8078,11 +8339,11 @@ def _award_chat_points(cid, uid, text):
     2026-09-09：加「有效发言」前置判定——无意义词/重复灌水一律不计分；
     长度门槛只在旧规则模式生效（规则表模式由用户配置的条件决定，不额外卡长度）。
     """
-    if not CHAT_ENABLED:
+    if not sget("CHAT_ENABLED"):
         return
     t = text.strip()
     enabled = [r for r in chat_rules if r.get("on")]
-    if not _chat_is_effective(cid, uid, t, min_len=None if enabled else CHAT_MIN_LEN):
+    if not _chat_is_effective(cid, uid, t, min_len=None if enabled else sget("CHAT_MIN_LEN")):
         return
     if enabled:
         gain = 0
@@ -8101,19 +8362,19 @@ def _award_chat_points(cid, uid, text):
         else:
             return                                   # 有启用规则但一条都没命中 → 不加分
     else:
-        if CHAT_REWARD <= 0 or CHAT_CHARS_PER <= 0:
+        if sget("CHAT_REWARD") <= 0 or sget("CHAT_CHARS_PER") <= 0:
             return
         n = len(t)
-        if n < CHAT_CHARS_PER:
+        if n < sget("CHAT_CHARS_PER"):
             return
-        gain = (n // CHAT_CHARS_PER) * CHAT_REWARD
+        gain = (n // sget("CHAT_CHARS_PER")) * sget("CHAT_REWARD")
     if gain <= 0:
         return
     date = now_bj().strftime("%Y-%m-%d")
     today = chat_today[date][cid]
     earned = today.get(uid, 0)
-    if CHAT_DAILY_CAP > 0:
-        gain = min(gain, CHAT_DAILY_CAP - earned)
+    if sget("CHAT_DAILY_CAP") > 0:
+        gain = min(gain, sget("CHAT_DAILY_CAP") - earned)
         if gain <= 0:
             return
     today[uid] = earned + gain
@@ -8122,7 +8383,7 @@ def _award_chat_points(cid, uid, text):
 
 async def cmd_sign(update, context):
     if not await need_auth(update, context): return
-    if not SIGN_ENABLED:
+    if not sget("SIGN_ENABLED"):
         await send_reply(update, context, "ℹ️ 签到功能未开启。"); return
     if not is_group_chat(update):
         await send_reply(update, context, "⚠️ 签到请在群聊中进行。"); return
@@ -8133,7 +8394,7 @@ async def cmd_sign(update, context):
     if info.get("last") == today:
         await send_reply(update, context, f"✅ 今天已经签过啦（连续 {info.get('streak', 0)} 天）。"); return
     streak = info.get("streak", 0) + 1 if info.get("last") == yesterday else 1
-    reward = SIGN_BASE_REWARD + (SIGN_STREAK_BONUS if streak % 7 == 0 else 0)
+    reward = sget("SIGN_BASE_REWARD") + (sget("SIGN_STREAK_BONUS") if streak % 7 == 0 else 0)
     async with wallet_locks[uid]:
         old_earned = _earn_get(cid, uid)
         game_chips[cid][uid] += reward
@@ -8147,7 +8408,7 @@ async def cmd_sign(update, context):
     await _check_level_change(context.application, cid, uid, old_earned, _earn_get(cid, uid))
     # 合格邀请结算（事件驱动）：被邀请人签到加分后也即时判定是否达标
     try:
-        if INVITE_ENABLED:
+        if sget("INVITE_ENABLED"):
             await _invite_ping_qualify(context.application, cid, uid)
     except Exception:
         logger.exception("邀请达标判定异常（已吞并）")
@@ -8176,13 +8437,13 @@ async def cmd_my_points(update, context):
     msg = _fmt_tpl("query_msg_tpl", name=await get_name(context.application, uid),
                    balance=balance, level_line=lv_line, signed=signed, streak=streak, today_chat=today_chat)
     reply = await send_reply(update, context, msg)
-    if POINTS_DELETE_SECONDS > 0 and is_group_chat(update):
+    if sget("POINTS_DELETE_SECONDS") > 0 and is_group_chat(update):
         async def _del():
-            await asyncio.sleep(POINTS_DELETE_SECONDS)
+            await asyncio.sleep(sget("POINTS_DELETE_SECONDS"))
             await safe_delete(context.bot, cid, update.message.message_id)
         asyncio.create_task(_del())
-    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
+    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, reply, sget("REPLY_DELETE_SECONDS"))
 
 async def cmd_points_rank(update, context):
     if not await need_auth(update, context): return
@@ -8193,8 +8454,8 @@ async def cmd_points_rank(update, context):
         tag = f"｜{lv}" if lv else ""
         lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value}{tag}")
     msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
-    if REPLY_DELETE_SECONDS > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, msgs, REPLY_DELETE_SECONDS)
+    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
+        schedule_delete(context.application, cid, msgs, sget("REPLY_DELETE_SECONDS"))
 
 def _parse_dt_bj(spec):
     """'YYYY-MM-DD HH:MM' 或 'YYYY-MM-DD'（北京时间）→ aware datetime；空/非法返回 None。"""
@@ -8208,9 +8469,9 @@ def _parse_dt_bj(spec):
 def _redeem_gate():
     """兑换时间窗检查：返回拒绝文案或 None（可兑换）。"""
     now = now_bj()
-    start, end = _parse_dt_bj(REDEEM_START), _parse_dt_bj(REDEEM_END)
+    start, end = _parse_dt_bj(sget("REDEEM_START")), _parse_dt_bj(sget("REDEEM_END"))
     if start and now < start:
-        return f"⏳ 兑换活动尚未开始（{REDEEM_START} 起）。"
+        return f"⏳ 兑换活动尚未开始（{sget('REDEEM_START')} 起）。"
     if end and now > end:
         return "🔚 兑换活动已结束。"
     return None
@@ -8218,8 +8479,8 @@ def _redeem_gate():
 async def _redeem_execute(context, cid, uid, item):
     """执行兑换（命令与按钮回调共用）：限购→扣费→自动下架→台账→群通知+私聊通知。
     返回 None=成功；字符串=拒绝原因。"""
-    if REDEEM_MAX_PER_USER > 0 and redeem_counts.get(uid, 0) >= REDEEM_MAX_PER_USER:
-        return f"❌ 每人限兑 {REDEEM_MAX_PER_USER} 次，你已用完额度。"
+    if sget("REDEEM_MAX_PER_USER") > 0 and redeem_counts.get(uid, 0) >= sget("REDEEM_MAX_PER_USER"):
+        return f"❌ 每人限兑 {sget('REDEEM_MAX_PER_USER')} 次，你已用完额度。"
     price = int(item.get("price", 0) or 0)
     left = int(item.get("left", 0) or 0)
     async with wallet_locks[uid]:
@@ -8281,7 +8542,7 @@ def _redeem_items_for(cid):
 
 
 def _mall_items_on():
-    return [x for x in MALL_ITEMS if x.get("on", True)]
+    return [x for x in sget("MALL_ITEMS") if x.get("on", True)]
 
 
 def _deep_buy_url(kind, cid, idx):
@@ -8313,7 +8574,7 @@ async def _mall_dm_ok(context, cid, uid, idx):
     """私聊「是否兑换 → 确认」：商城商品二次校验后执行购买（与群内购买同口径：库存/门槛/扣款/台账/管理员）。"""
     if not is_auth(cid):
         return False, "❌ 该群未授权使用本机器人。"
-    if not MALL_ENABLED:
+    if not sget("MALL_ENABLED"):
         return False, "ℹ️ 积分商城未开启。"
     items = _mall_items_on()
     if not (1 <= idx <= len(items)):
@@ -8323,18 +8584,18 @@ async def _mall_dm_ok(context, cid, uid, idx):
     if isinstance(stk, int) and stk <= 0:
         return False, "❌ 该商品已售罄。"
     price = _mall_price(item)
-    if MALL_MIN_AGE_DAYS > 0:  # 兑换门槛1：与 bot 首次互动满 N 天
+    if sget("MALL_MIN_AGE_DAYS") > 0:  # 兑换门槛1：与 bot 首次互动满 N 天
         seen = user_first_seen.get(uid)
         days = (now_bj().timestamp() - seen) / 86400 if seen else 0.0
-        if days < MALL_MIN_AGE_DAYS:
-            return False, f"❌ 兑换门槛：使用满 {MALL_MIN_AGE_DAYS} 天才能兑换（当前 {days:.0f} 天）。"
-    if MALL_MIN_ACTIVE_DAYS > 0:  # 兑换门槛2：有游戏盈亏记录的天数 ≥N
+        if days < sget("MALL_MIN_AGE_DAYS"):
+            return False, f"❌ 兑换门槛：使用满 {sget('MALL_MIN_AGE_DAYS')} 天才能兑换（当前 {days:.0f} 天）。"
+    if sget("MALL_MIN_ACTIVE_DAYS") > 0:  # 兑换门槛2：有游戏盈亏记录的天数 ≥N
         active_days = set()
         for prof in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date):
             for d, chats in prof.items():
                 if uid in (chats.get(cid) or {}): active_days.add(d)
-        if len(active_days) < MALL_MIN_ACTIVE_DAYS:
-            return False, f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"
+        if len(active_days) < sget("MALL_MIN_ACTIVE_DAYS"):
+            return False, f"❌ 兑换门槛：累计 {sget('MALL_MIN_ACTIVE_DAYS')} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
             return False, f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"
@@ -8438,7 +8699,7 @@ async def _deep_mall_start(update, context, payload):
     uid = update.effective_user.id
     if not is_auth(cid):
         await send_reply(update, context, "❌ 该群未授权使用本机器人。"); return
-    if not MALL_ENABLED:
+    if not sget("MALL_ENABLED"):
         await send_reply(update, context, "ℹ️ 积分商城未开启。"); return
     items = _mall_items_on()
     if not (1 <= idx <= len(items)):
@@ -8522,13 +8783,13 @@ async def cmd_points_redeem(update, context):
 def _mall_panel(page, items, cid):
     """商城货架卡（B2）：正文逐商品小卡 + 底部「编号 · 立即兑换」深链按钮（售罄置灰）。
     返回 (text, rows)；cmd_mall 首屏与 mall_page_ 翻页共用，保证样式一致。"""
-    pages = max(1, (len(items) + MALL_PAGE_SIZE - 1) // MALL_PAGE_SIZE)
+    pages = max(1, (len(items) + sget("MALL_PAGE_SIZE") - 1) // sget("MALL_PAGE_SIZE"))
     page = max(1, min(page, pages))
-    chunk = items[(page - 1) * MALL_PAGE_SIZE: page * MALL_PAGE_SIZE]
+    chunk = items[(page - 1) * sget("MALL_PAGE_SIZE"): page * sget("MALL_PAGE_SIZE")]
     lines = [f"🛒 积分商城（{page}/{pages} 页）",
              f"💡 点下方「编号 · 立即兑换」跳转机器人私聊确认（{max(1, MALL_LIST_DELETE_SECONDS // 60)} 分钟后自动删除）", ""]
     rows = []
-    for i, item in enumerate(chunk, (page - 1) * MALL_PAGE_SIZE + 1):
+    for i, item in enumerate(chunk, (page - 1) * sget("MALL_PAGE_SIZE") + 1):
         stk = item.get("stock")
         sold_out = isinstance(stk, int) and stk <= 0
         lines.append(f"<b>{i}.</b> {html.escape(item['name'])}")
@@ -8556,9 +8817,9 @@ def _mall_panel(page, items, cid):
 
 async def cmd_mall(update, context):
     if not await need_auth(update, context): return
-    if not MALL_ENABLED:
+    if not sget("MALL_ENABLED"):
         await send_reply(update, context, "ℹ️ 积分商城未开启。"); return
-    items = [x for x in MALL_ITEMS if x.get("on", True)]
+    items = [x for x in sget("MALL_ITEMS") if x.get("on", True)]
     if not items:
         await send_reply(update, context, _fmt_tpl("mall_msg_empty")); return
     cid = update.effective_chat.id
@@ -8573,9 +8834,9 @@ async def cmd_mall_buy(update, context):
     if not await need_auth(update, context): return
     if not is_group_chat(update):
         await send_reply(update, context, "⚠️ 购买请在群聊中进行。"); return
-    if not MALL_ENABLED:
+    if not sget("MALL_ENABLED"):
         await send_reply(update, context, "ℹ️ 积分商城未开启。"); return
-    items = [x for x in MALL_ITEMS if x.get("on", True)]
+    items = [x for x in sget("MALL_ITEMS") if x.get("on", True)]
     if not items:
         await send_reply(update, context, _fmt_tpl("mall_msg_empty")); return
     if not context.args:
@@ -8594,18 +8855,18 @@ async def cmd_mall_buy(update, context):
         await send_reply(update, context, "❌ 该商品已售罄。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     price = _mall_price(item)
-    if MALL_MIN_AGE_DAYS > 0:  # 兑换门槛1：与 bot 首次互动满 N 天（小号没有历史）
+    if sget("MALL_MIN_AGE_DAYS") > 0:  # 兑换门槛1：与 bot 首次互动满 N 天（小号没有历史）
         seen = user_first_seen.get(uid)
         days = (now_bj().timestamp() - seen) / 86400 if seen else 0.0
-        if days < MALL_MIN_AGE_DAYS:
-            await send_reply(update, context, f"❌ 兑换门槛：使用满 {MALL_MIN_AGE_DAYS} 天才能兑换（当前 {days:.0f} 天）。"); return
-    if MALL_MIN_ACTIVE_DAYS > 0:  # 兑换门槛2：有游戏盈亏记录的天数 ≥N
+        if days < sget("MALL_MIN_AGE_DAYS"):
+            await send_reply(update, context, f"❌ 兑换门槛：使用满 {sget('MALL_MIN_AGE_DAYS')} 天才能兑换（当前 {days:.0f} 天）。"); return
+    if sget("MALL_MIN_ACTIVE_DAYS") > 0:  # 兑换门槛2：有游戏盈亏记录的天数 ≥N
         active_days = set()
         for prof in (poker_profit_by_date, race_profit_by_date, blackjack_profit_by_date, jinhua_profit_by_date):
             for d, chats in prof.items():
                 if uid in (chats.get(cid) or {}): active_days.add(d)
-        if len(active_days) < MALL_MIN_ACTIVE_DAYS:
-            await send_reply(update, context, f"❌ 兑换门槛：累计 {MALL_MIN_ACTIVE_DAYS} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"); return
+        if len(active_days) < sget("MALL_MIN_ACTIVE_DAYS"):
+            await send_reply(update, context, f"❌ 兑换门槛：累计 {sget('MALL_MIN_ACTIVE_DAYS')} 天参与游戏才能兑换（当前 {len(active_days)} 天）。"); return
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < price:
             await send_reply(update, context, f"❌ 积分不足：需要 {price}，当前 {game_chips[cid][uid]}。"); return
@@ -8656,7 +8917,7 @@ async def cmd_record(update, context):
     lines.append(f"💰 累计：{sum(per.values()):+d}")
     lines.append(f"📅 活跃 {len(days)} 天｜💳 当前余额 {balance}")
     reply_msg = await send_reply(update, context, "\n".join(lines))
-    schedule_delete(context.application, cid, reply_msg, REPLY_DELETE_SECONDS)
+    schedule_delete(context.application, cid, reply_msg, sget("REPLY_DELETE_SECONDS"))
 
 
 async def cmd_webcode(update, context):
@@ -8728,7 +8989,7 @@ def _lottery_form_parse(form):
     if not title or len(title) > 50:
         return None, "标题不能为空或超过 50 字"
     desc = (form.get("desc", [""])[0] or "").strip()[:300]
-    keyword = (form.get("keyword", [""])[0] or "").strip() or LOTTERY_KEYWORD
+    keyword = (form.get("keyword", [""])[0] or "").strip() or sget("LOTTERY_KEYWORD")
     mode = form.get("mode", ["duration"])[0]
     min_bal_raw = (form.get("min_bal", [""])[0] or "").strip()
     if min_bal_raw:
@@ -8812,7 +9073,7 @@ def _lottery_join(lo, uid, name):
 
 async def _lottery_publish(app, cid, lo):
     """编辑/发送活动公告消息；记录 msg_id 用于开奖后编辑。"""
-    if not LOTTERY_ENABLED: return
+    if not sget("LOTTERY_ENABLED"): return
     msg = await safe_send(app.bot, cid, _lottery_announce_text(lo), parse_mode="HTML")
     if msg:
         lo["msg_id"] = msg.message_id
@@ -8828,7 +9089,7 @@ def _lottery_announce_text(lo):
     min_line = f"门槛：<b>{min_bal}</b> 积分以上可参与\n" if min_bal else ""
     desc = (lo.get("desc") or "").strip()
     desc_line = f"📖 {html.escape(desc)}\n" if desc else ""
-    return LOTTERY_MSG_START.format(
+    return sget("LOTTERY_MSG_START").format(
         title=html.escape(lo["title"]),
         desc_line=desc_line,
         end_line=end_line,
@@ -8879,7 +9140,7 @@ async def _lottery_draw(app, cid, lo):
     # 群内通知：结果单独发一条醒目消息（绝不自动删除，永久保留在群里）
     if winners:
         win_lines = [f"  🏆 <b>{html.escape(w['name'])}</b> → {html.escape(w['prize'])}" for w in winners]
-        text = LOTTERY_MSG_RESULT.format(
+        text = sget("LOTTERY_MSG_RESULT").format(
             title=html.escape(lo["title"]),
             winners="\n".join(win_lines),
             n=len(lo["participants"]),
@@ -8936,14 +9197,14 @@ async def cmd_lottery(update, context):
       /开奖结束                           → 管理员强制结束并退款（按需）
     """
     if not await need_auth(update, context): return
-    if not LOTTERY_ENABLED:
+    if not sget("LOTTERY_ENABLED"):
         await send_reply(update, context, "❌ 群组抽奖已关闭（后台「积分系统→群组抽奖」可开启）"); return
     cid = update.effective_chat.id
     uid = update.effective_user.id
     text = (update.message.text or "").strip()
     # 参与形态：/开奖、/抽奖、全局触发词、或本活动自定义关键词；其余原样交给开局参数
     _alo = _lottery_active(cid)
-    _join_words = {LOTTERY_KEYWORD, "抽奖", (_alo.get("keyword") or "").strip() if _alo else ""}
+    _join_words = {sget("LOTTERY_KEYWORD"), "抽奖", (_alo.get("keyword") or "").strip() if _alo else ""}
     if text.startswith("/开奖"):
         args_part = text[len("/开奖"):].strip()
     elif text in _join_words:
@@ -8988,16 +9249,16 @@ async def cmd_lottery(update, context):
             name = await get_name(context.application, uid)
             bal = game_chips.get(cid, {}).get(uid, 0)
             await send_reply(update, context, 
-                LOTTERY_MSG_JOINED.format(nick=html.escape(name), n=info, balance=bal),
+                sget("LOTTERY_MSG_JOINED").format(nick=html.escape(name), n=info, balance=bal),
                 parse_mode="HTML")
             # 公告上的已参与人数实时刷新
             await _lottery_refresh_announce(context.application, cid, lo)
         elif info == "dup":
             name = await get_name(context.application, uid)
-            await send_reply(update, context, LOTTERY_MSG_DUP.format(nick=html.escape(name)))
+            await send_reply(update, context, sget("LOTTERY_MSG_DUP").format(nick=html.escape(name)))
         else:
             name = await get_name(context.application, uid)
-            await send_reply(update, context, LOTTERY_MSG_FAIL.format(nick=html.escape(name), reason=info))
+            await send_reply(update, context, sget("LOTTERY_MSG_FAIL").format(nick=html.escape(name), reason=info))
         return
     # 管理员开新活动
     if not is_bot_admin(uid):
@@ -9030,10 +9291,10 @@ async def cmd_lottery(update, context):
                 "❌ 开奖时间格式不对\n\n支持：<code>90</code>（90秒后）、<code>20:00</code>、"
                 "<code>09-08 20:00</code>、<code>2026-09-08 20:00</code>",
                 parse_mode="HTML"); return
-    duration = max(10, int(end_ts - time.time())) if end_ts else LOTTERY_DEFAULT_DURATION
+    duration = max(10, int(end_ts - time.time())) if end_ts else sget("LOTTERY_DEFAULT_DURATION")
     lotteries[cid] = {
-        "title": title, "prizes": prizes, "fee": int(LOTTERY_FEE),
-        "keyword": LOTTERY_KEYWORD, "start_ts": time.time(),
+        "title": title, "prizes": prizes, "fee": int(sget("LOTTERY_FEE")),
+        "keyword": sget("LOTTERY_KEYWORD"), "start_ts": time.time(),
         "end_ts": end_ts or (time.time() + duration), "msg_id": None,
         "participants": [], "status": "open", "winners": [],
         "creator": uid, "chat_id": cid,
@@ -9088,7 +9349,7 @@ async def cmd_weblogin(update, context):
     if not is_bot_admin(uid):
         await send_reply(update, context, "⛔ 仅机器人管理员可用")
         return
-    base = (WEB_BASE_URL or "").strip().rstrip("/")
+    base = (sget("WEB_BASE_URL") or "").strip().rstrip("/")
     if not base:
         await send_reply(update, context, 
             "⚠️ 还没配置后台地址，一键登录不可用。\n\n"
@@ -9141,7 +9402,7 @@ async def cmd_status(update, context):
 
 async def cmd_redpacket(update, context):
     if not await need_auth(update, context): return
-    if not REDPACKET_ENABLED:
+    if not sget("REDPACKET_ENABLED"):
         await send_reply(update, context, "ℹ️ 红包功能未开启。"); return
     if not is_group_chat(update):
         await send_reply(update, context, "⚠️ 红包请在群聊中发。"); return
@@ -9149,7 +9410,7 @@ async def cmd_redpacket(update, context):
 
     async def _reply(text):  # 机器人提示语也按后台设置自动删除
         reply = await send_reply(update, context, text)
-        schedule_delete(context.application, cid, reply, REPLY_DELETE_SECONDS)
+        schedule_delete(context.application, cid, reply, sget("REPLY_DELETE_SECONDS"))
 
     args = context.args
     reply_to = update.message.reply_to_message
@@ -9166,7 +9427,7 @@ async def cmd_redpacket(update, context):
     uid = update.effective_user.id
     if target == uid:
         await _reply("❌ 专属红包不能指定自己。"); return
-    if target and not RP_EXCLUSIVE_ENABLED:
+    if target and not sget("RP_EXCLUSIVE_ENABLED"):
         await _reply("❌ 专属红包未开启（后台「积分系统 → 积分红包」可开启）。"); return
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < total:
@@ -9211,7 +9472,7 @@ async def _rp_grab(p, pid, uid, context, q):
             await q.answer(_fmt_tpl("rp_msg_none"), show_alert=True); return
         if p["left_n"] == 1:
             amt = p["left_amt"]
-        elif RP_LUCK_ENABLED:  # 拼手气：随机拆分；关闭则平均分
+        elif sget("RP_LUCK_ENABLED"):  # 拼手气：随机拆分；关闭则平均分
             amt = random.randint(1, max(1, p["left_amt"] - p["left_n"] + 1))
         else:
             amt = max(1, p["left_amt"] // p["left_n"])
@@ -9226,7 +9487,7 @@ async def _rp_grab(p, pid, uid, context, q):
     # 等级只看真实产出，转移类不动 → 无需检查
     total, count = sum(p["grabbed"].values()), len(p["grabbed"])
     if p["left_n"] <= 0:
-        if RP_LOG_ENABLED:  # 手气排行：按金额降序，前三名带奖牌表情
+        if sget("RP_LOG_ENABLED"):  # 手气排行：按金额降序，前三名带奖牌表情
             lines = []
             for i, (u, a) in enumerate(sorted(p["grabbed"].items(), key=lambda x: -x[1]), 1):
                 lines.append(_fmt_tpl("rp_msg_log", rank=rank_marker(i),
@@ -9249,7 +9510,7 @@ async def cmd_inherit(update, context):
     if not await need_auth(update, context): return
     if not is_group_chat(update):
         await send_reply(update, context, "⚠️ 转赠请在群聊中使用。"); return
-    if not INHERIT_ENABLED:
+    if not sget("INHERIT_ENABLED"):
         await send_reply(update, context, "❌ 转赠功能未开启（网页「积分系统 → 积分继承」可开启）。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     args = context.args or []
@@ -9266,20 +9527,20 @@ async def cmd_inherit(update, context):
         await send_reply(update, context, "❌ 不能转给自己。"); return
     if player_is_busy(cid, uid) or player_is_busy(cid, target):
         await send_reply(update, context, "⚠️ 转赠双方有正在进行的游戏，请先结束。"); return
-    fee = amount * INHERIT_FEE_PERCENT // 100
+    fee = amount * sget("INHERIT_FEE_PERCENT") // 100
     recv = amount - fee
-    if INHERIT_DAILY_LIMIT > 0:  # 每日转赠总额上限（防小号互刷）
+    if sget("INHERIT_DAILY_LIMIT") > 0:  # 每日转赠总额上限（防小号互刷）
         today = now_bj().strftime("%Y-%m-%d")
         used = inherit_daily[today][cid].get(uid, 0)
-        if used + amount > INHERIT_DAILY_LIMIT:
-            await send_reply(update, context, f"❌ 超出每日转赠上限：今日已转出 {used}，上限 {INHERIT_DAILY_LIMIT}（网页「积分继承」可调）。"); return
+        if used + amount > sget("INHERIT_DAILY_LIMIT"):
+            await send_reply(update, context, f"❌ 超出每日转赠上限：今日已转出 {used}，上限 {sget('INHERIT_DAILY_LIMIT')}（网页「积分继承」可调）。"); return
     # 必须同时锁住收款方：只锁付款方的话，收款方此刻若有 /add、结算等持锁写操作，转入会被覆盖丢失
     async with user_wallet_locks([uid, target]):
         if game_chips[cid][uid] < amount:
             await send_reply(update, context, f"❌ 你的积分不足：需要 {amount}，当前 {game_chips[cid][uid]}。"); return
         game_chips[cid][uid] -= amount
         game_chips[cid][target] += recv
-        if INHERIT_DAILY_LIMIT > 0:
+        if sget("INHERIT_DAILY_LIMIT") > 0:
             inherit_daily[now_bj().strftime("%Y-%m-%d")][cid][uid] += amount
         ledger_add(cid, uid, target, amount, "转赠")  # 资金流台账
         save_data()
@@ -9296,7 +9557,7 @@ def _guess_buttons(cid):
     g = guesses[cid]
     return InlineKeyboardMarkup([[InlineKeyboardButton(f"🔵 {g['a']} {amt}", callback_data=f"guessbet_A_{amt}"),
                                   InlineKeyboardButton(f"🔴 {g['b']} {amt}", callback_data=f"guessbet_B_{amt}")]
-                                 for amt in FIXED_BET_AMOUNTS])
+                                 for amt in sget("FIXED_BET_AMOUNTS")])
 
 
 def _guess_text(cid):
@@ -9323,10 +9584,10 @@ async def _guess_bet(cid, uid, context, side, amount, q):
         await q.answer("已封盘，等待结算", show_alert=True); return
     if side not in ("A", "B") or amount <= 0:
         await q.answer("无效下注", show_alert=True); return
-    if amount < GUESS_MIN_BET:
-        await q.answer(f"单注至少 {GUESS_MIN_BET} 积分", show_alert=True); return
-    if GUESS_MAX_BET and amount > GUESS_MAX_BET:
-        await q.answer(f"单注最多 {GUESS_MAX_BET} 积分", show_alert=True); return
+    if amount < sget("GUESS_MIN_BET"):
+        await q.answer(f"单注至少 {sget('GUESS_MIN_BET')} 积分", show_alert=True); return
+    if sget("GUESS_MAX_BET") and amount > sget("GUESS_MAX_BET"):
+        await q.answer(f"单注最多 {sget('GUESS_MAX_BET')} 积分", show_alert=True); return
     async with wallet_locks[uid]:
         if game_chips[cid][uid] < amount:
             await q.answer(f"积分不足：需 {amount}，你当前 {game_chips[cid][uid]}", show_alert=True); return
@@ -9455,7 +9716,7 @@ async def _guess_do_cancel(app, cid, auto=False):
 
 async def _guess_do_create(app, cid, q, a, b, duration):
     """创建竞猜并发布到群（命令与网页共用）。返回错误文案或 None。"""
-    if not GUESS_ENABLED:
+    if not sget("GUESS_ENABLED"):
         return "竞猜功能未开启（网页「积分系统 → 积分竞猜」可开启）"
     if cid in guesses:
         return "本群已有竞猜进行中，结算或撤销后再开"
@@ -9465,7 +9726,7 @@ async def _guess_do_create(app, cid, q, a, b, duration):
     try:
         duration = max(1, min(1440, int(duration)))
     except (TypeError, ValueError):
-        duration = GUESS_DURATION
+        duration = sget("GUESS_DURATION")
     guesses[cid] = {"q": q, "a": a, "b": b,
                     "end_ts": now_bj().timestamp() + duration * 60, "locked": False,
                     "bets": {}, "side_pots": {"A": 0, "B": 0}, "msg_id": None, "task": None}
@@ -9489,7 +9750,7 @@ async def cmd_guess_open(update, context):
     if len(parts) < 3 or len(parts) > 4:
         await send_reply(update, context, "用法：/开竞猜 题目/选项A/选项B [时长分钟]"); return
     err = await _guess_do_create(context.application, cid, parts[0], parts[1], parts[2],
-                                 parts[3] if len(parts) == 4 else GUESS_DURATION)
+                                 parts[3] if len(parts) == 4 else sget("GUESS_DURATION"))
     if err:
         await send_reply(update, context, f"❌ {err}")
 
@@ -9524,7 +9785,7 @@ async def cmd_buy_points(update, context):
     if not await need_auth(update, context): return
     if not is_group_chat(update):
         await send_reply(update, context, "⚠️ 请在群聊中申请购买积分。"); return
-    if not BUY_ENABLED:
+    if not sget("BUY_ENABLED"):
         await send_reply(update, context, "❌ 购买积分功能未开启（网页「积分系统 → 购买积分」可开启）。"); return
     args = context.args or []
     if not args:
@@ -9536,7 +9797,7 @@ async def cmd_buy_points(update, context):
             lines.append("")
             lines.append("💡 发「充值 套餐名」或「充值 数量」提交申请，管理员确认后到账。")
             await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines)); return
-        await send_reply(update, context, f"用法：充值 数量（{BUY_MIN} ~ {BUY_MAX}）\n提交申请后联系管理员转账，管理员确认后积分自动到账。"); return
+        await send_reply(update, context, f"用法：充值 数量（{sget('BUY_MIN')} ~ {sget('BUY_MAX')}）\n提交申请后联系管理员转账，管理员确认后积分自动到账。"); return
     pkg_arg = args[0].strip()
     amount = int(pkg_arg) if pkg_arg.isdigit() else None
     if amount is None:
@@ -9546,8 +9807,8 @@ async def cmd_buy_points(update, context):
     if not amount:
         await send_reply(update, context, "❌ 没有这个套餐；按数量充值用法：充值 数量。"); return
     from_pkg = amount is not None and not pkg_arg.isdigit()
-    if not from_pkg and not (BUY_MIN <= amount <= BUY_MAX):
-        await send_reply(update, context, f"❌ 单次购买需在 {BUY_MIN} ~ {BUY_MAX} 之间。"); return
+    if not from_pkg and not (sget("BUY_MIN") <= amount <= sget("BUY_MAX")):
+        await send_reply(update, context, f"❌ 单次购买需在 {sget('BUY_MIN')} ~ {sget('BUY_MAX')} 之间。"); return
     cid, uid = update.effective_chat.id, update.effective_user.id
     oid = secrets.token_hex(4)
     buy_orders[oid] = {"cid": cid, "uid": uid, "amount": amount, "ts": now_bj().strftime("%Y-%m-%d %H:%M")}
@@ -9865,13 +10126,13 @@ async def _invite_qualify_ready(cid, uid):
     """被邀请人在本群是否达到质量要求（发言阈值 / 净赚积分阈值）。
     注意：game_chips 是 defaultdict(初始分)——必须用「净赚=余额-初始分」判定积分，
     否则人人进群即自动 5W 初始分 → 积分门槛永远满足，防白嫖失效。"""
-    if INVITE_QUALIFY_MSGS > 0:
+    if sget("INVITE_QUALIFY_MSGS") > 0:
         msgs = int((member_profiles.get(cid, {}).get(uid, {}) or {}).get("msgs", 0) or 0)
-        if msgs < INVITE_QUALIFY_MSGS:
+        if msgs < sget("INVITE_QUALIFY_MSGS"):
             return False
-    if INVITE_QUALIFY_POINTS > 0:
-        bal = int(game_chips.get(cid, {}).get(uid, GAME_STARTING_CHIPS) or 0)
-        if abs(bal - GAME_STARTING_CHIPS) < INVITE_QUALIFY_POINTS:
+    if sget("INVITE_QUALIFY_POINTS") > 0:
+        bal = int(game_chips.get(cid, {}).get(uid, sget("GAME_STARTING_CHIPS")) or 0)
+        if abs(bal - sget("GAME_STARTING_CHIPS")) < sget("INVITE_QUALIFY_POINTS"):
             return False
     return True
 
@@ -9882,9 +10143,9 @@ def _invite_daily_get(cid, inviter):
 def _invite_daily_capped(cid, inviter):
     """是否已达当日拉新上限（人数 / 积分任一超限即停发）。0=不限。"""
     d = _invite_daily_get(cid, inviter)
-    if INVITE_DAILY_CAP_TIMES > 0 and int(d.get("times", 0)) >= int(INVITE_DAILY_CAP_TIMES):
+    if sget("INVITE_DAILY_CAP_TIMES") > 0 and int(d.get("times", 0)) >= int(sget("INVITE_DAILY_CAP_TIMES")):
         return True
-    if INVITE_DAILY_CAP_POINTS > 0 and int(d.get("points", 0)) >= int(INVITE_DAILY_CAP_POINTS):
+    if sget("INVITE_DAILY_CAP_POINTS") > 0 and int(d.get("points", 0)) >= int(sget("INVITE_DAILY_CAP_POINTS")):
         return True
     return False
 
@@ -9899,7 +10160,7 @@ async def _invite_try_award(app, rec):
     if _rec_awarded(rec):
         return
     cid, inviter = rec["cid"], rec["inviter"]
-    if _inviter_awarded_count(cid, inviter) >= max(1, int(INVITE_REWARD_TIMES)):
+    if _inviter_awarded_count(cid, inviter) >= max(1, int(sget("INVITE_REWARD_TIMES"))):
         return  # 超上限：仍合格（计入合格数），但不再发奖
     if _invite_daily_capped(cid, inviter):
         return  # 当日拉新上限：仍合格，但当日不再发奖（次日恢复）
@@ -9911,7 +10172,7 @@ async def _invite_ping_qualify(app, cid, uid):
         rec = invite_records.get(f"{cid}:{uid}")
         if not rec or rec.get("left") or _rec_rejected(rec) or _rec_qualified(rec):
             return
-        if not INVITE_QUALIFY_ENABLED:
+        if not sget("INVITE_QUALIFY_ENABLED"):
             return  # 开关关 = 进群已即时结算，不重复判
         if not await _invite_qualify_ready(cid, uid):
             return
@@ -9940,7 +10201,7 @@ async def _invite_refresh_all(app, cid, inviter):
 async def _invite_award(app, rec):
     """给邀请人发合格奖励并通知（群内 + 私聊）。rec 需含 cid/inviter/invitee_name；qualified 由调用方先置位。"""
     inviter, cid = rec["inviter"], rec["cid"]
-    reward = max(0, int(INVITE_REWARD))
+    reward = max(0, int(sget("INVITE_REWARD")))
     if reward:
         # 必须持锁：两名被邀请人同时达标时，两次"读 old + 写 old+reward"会互相覆盖，只到账一份
         async with wallet_locks[inviter]:
@@ -9953,19 +10214,19 @@ async def _invite_award(app, rec):
         ledger_add(cid, 0, inviter, reward, "邀请奖励")
         await _check_level_change(app, cid, inviter, old_earned, _earn_get(cid, inviter))
     inviter_name = await get_name(app, inviter, cid=cid)
-    if INVITE_NOTIFY:
+    if sget("INVITE_NOTIFY"):
         try:
             await app.bot.send_message(chat_id=inviter,
                 text=f"🎟️ 你邀请的 {rec.get('invitee_name', '')} 已达标合格，奖励 {reward} 积分已到账。发「{INVITE_LINK_CMD}」看进度。")
         except Exception:
             pass
-    if str(INVITE_OK_GROUP).strip():
+    if str(sget("INVITE_OK_GROUP")).strip():
         try:
             ok_msg = await app.bot.send_message(chat_id=cid, text=_fmt_tpl(
                 "invite_ok_group", inviter=inviter_name, inviter_id=inviter,
                 invitee=rec.get("invitee_name", ""), invitee_id=rec.get("invitee", ""), reward=reward))
-            if ok_msg and REPLY_DELETE_SECONDS > 0:
-                schedule_delete(app, cid, ok_msg, REPLY_DELETE_SECONDS)
+            if ok_msg and sget("REPLY_DELETE_SECONDS") > 0:
+                schedule_delete(app, cid, ok_msg, sget("REPLY_DELETE_SECONDS"))
         except Exception:
             pass
     save_data()
@@ -9978,7 +10239,7 @@ def _grant_newbie_reward(cid, uid, name=""):
     只对「入群记录里能查到的新人」发（避免老成员补发）。
     返回 (发放积分, 升级前的累计获得)；未发放返回 (0, None)。
     """
-    if not NEWBIE_REWARD_ENABLED or int(NEWBIE_REWARD) <= 0:
+    if not sget("NEWBIE_REWARD_ENABLED") or int(sget("NEWBIE_REWARD")) <= 0:
         return 0, None
     key = f"{cid}:{uid}"
     if newbie_rewarded.get(key):
@@ -9986,7 +10247,7 @@ def _grant_newbie_reward(cid, uid, name=""):
     if uid not in member_joined_at.get(cid, {}):
         return 0, None                # 非本群记录过的新成员（老成员/重启后清空）不发
     newbie_rewarded[key] = True
-    pts = int(NEWBIE_REWARD)
+    pts = int(sget("NEWBIE_REWARD"))
     old_earned = _earn_get(cid, uid)
     game_chips[cid][uid] += pts
     _earn_add(cid, uid, pts)
@@ -10019,8 +10280,8 @@ async def _invite_track_join(cmu, cid, uid, name, context):
     → ② 事件/申请携带的链接精确匹配 → ③ 都没有则不归因（宁缺毋滥）。
     归因后记记录/发奖励/通知（所有异常吞并）。"""
     try:
-        if not INVITE_ENABLED or uid <= 0 or cid not in AUTHORIZED_GROUPS:
-            _inv_dbg(cid, f"进群 uid={uid} 跳过：开关{INVITE_ENABLED}/授权{cid in AUTHORIZED_GROUPS}")
+        if not sget("INVITE_ENABLED") or uid <= 0 or cid not in AUTHORIZED_GROUPS:
+            _inv_dbg(cid, f"进群 uid={uid} 跳过：开关{sget('INVITE_ENABLED')}/授权{cid in AUTHORIZED_GROUPS}")
             return
         key = f"{cid}:{uid}"
         if key in invite_records:   # 重复进群不重复计，仅视为回归
@@ -10043,7 +10304,7 @@ async def _invite_track_join(cmu, cid, uid, name, context):
         if not inviter:
             if link:
                 _inv_dbg(cid, f"⚠️ 归因失败：链接不在已存表（已存：{[i.get('link','')[-12:] for i in invite_links.get(cid, {}).values()]}）")
-                if str(INVITE_INVALID_MSG).strip():
+                if str(sget("INVITE_INVALID_MSG")).strip():
                     try:
                         await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_invalid_msg", name=name))
                     except Exception:
@@ -10056,7 +10317,7 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                 # 手动拉人计入（可选开关）：chat_member 的 from_user = 造成本次进群的人（手动添加时即添加人）
                 adder = getattr(cmu, "from_user", None)
                 a_id = getattr(adder, "id", 0) if adder else 0
-                if INVITE_MANUAL_COUNT and a_id > 0 and a_id != uid and not getattr(adder, "is_bot", False):
+                if sget("INVITE_MANUAL_COUNT") and a_id > 0 and a_id != uid and not getattr(adder, "is_bot", False):
                     inviter = a_id
                     _inv_dbg(cid, f"✅ 手动拉人计入邀请：uid={uid} 由 {a_id} 添加（开关已开）")
                 else:
@@ -10074,7 +10335,7 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                 return
         if inviter == uid:
             _inv_dbg(cid, f"uid={uid} 自己邀自己，跳过")
-            if str(INVITE_SELF_MSG).strip():
+            if str(sget("INVITE_SELF_MSG")).strip():
                 try:
                     await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_self_msg", name=name))
                 except Exception:
@@ -10088,14 +10349,14 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                "source": "confirm" if confirmed else "link"}
         # 进群硬门槛（头像/用户名，进群瞬间检查一次；不满足直接拒绝，永不发奖）
         ju = _join_user_obj(cmu)
-        if INVITE_QUALIFY_USERNAME and not getattr(ju, "username", None):
+        if sget("INVITE_QUALIFY_USERNAME") and not getattr(ju, "username", None):
             rec["rejected"] = True; rec["note"] = "无用户名"
             _inv_dbg(cid, f"进群 uid={uid} 无用户名 → 拒绝（永不发奖）")
-        elif INVITE_QUALIFY_AVATAR and not await _user_has_avatar(context, uid):
+        elif sget("INVITE_QUALIFY_AVATAR") and not await _user_has_avatar(context, uid):
             rec["rejected"] = True; rec["note"] = "无头像"
             _inv_dbg(cid, f"进群 uid={uid} 无头像 → 拒绝（永不发奖）")
         invite_records[key] = rec
-        if not INVITE_QUALIFY_ENABLED and not rec["rejected"]:
+        if not sget("INVITE_QUALIFY_ENABLED") and not rec["rejected"]:
             # 合格结算关 → 兼容老行为：进群即合格发奖
             rec["qualified"] = True
             await _invite_try_award(context.application, rec)
@@ -10127,9 +10388,9 @@ def _invite_rank_rows(scope):
 
 async def _invite_send_rank(update, context, scope):
     if not await need_auth(update, context): return
-    if not INVITE_ENABLED:
+    if not sget("INVITE_ENABLED"):
         await send_reply(update, context, "❌ 邀请系统未开启（网页「群组设置 → 邀请系统」可开启）。"); return
-    if INVITE_RANK_ADMIN_ONLY and not is_bot_admin(update.effective_user.id):
+    if sget("INVITE_RANK_ADMIN_ONLY") and not is_bot_admin(update.effective_user.id):
         await send_reply(update, context, "❌ 邀请排行仅管理员可查。"); return
     cid = update.effective_chat.id
     titles = {"today": "invite_rank_today_msg", "month": "invite_rank_month_msg", "all": "invite_rank_all_msg"}
@@ -10164,7 +10425,7 @@ async def cmd_invite_link(update, context):
     if not await need_auth(update, context): return
     if not is_group_chat(update):
         await send_reply(update, context, "⚠️ 请在群聊中使用。"); return
-    if not INVITE_ENABLED:
+    if not sget("INVITE_ENABLED"):
         await send_reply(update, context, "❌ 邀请系统未开启（网页「群组设置 → 邀请系统」可开启）。"); return
     cid = update.effective_chat.id
     uid = update.effective_user.id
@@ -10234,6 +10495,7 @@ async def cmd_invite_test(update, context):
 async def on_new_members_msg(update, context):
     """message 版入群事件（普通群收不到 chat_member 更新，只能靠服务消息兜底）。
     普通群的服务消息不带邀请链接，能归因到就走 pending 映射，归因不到就静默跳过。"""
+    _bind_update_cid(update)
     try:
         message = update.effective_message
         if not message or not message.new_chat_members:
@@ -10252,7 +10514,7 @@ async def on_new_members_msg(update, context):
                 # 入群时间无条件记录：观察期起点与「强制订阅只拦新人」都依赖它，
                 # 只在验证开启时才记 → 验证关着时这两项全部静默失效。
                 member_joined_at[cid][uid] = time.time()
-                if _gate_ok and (JOIN_VERIFY_ENABLED or _raid_active(cid)):
+                if _gate_ok and (sget("JOIN_VERIFY_ENABLED") or _raid_active(cid)):
                     await _join_verify_start(context, cid, uid, name)
     except Exception:
         logger.exception("message 入群事件处理异常（已吞并）")
@@ -10294,6 +10556,7 @@ async def _cleanup_left_member_games(app, cid, uid):
 
 async def on_member_event(update, context):
     """成员进出事件：退群/入群记录（bot 需为群管理员才能收到）。"""
+    _bind_update_cid(update)
     try:
         cmu = update.chat_member
         if not cmu:
@@ -10321,14 +10584,14 @@ async def on_member_event(update, context):
             if not new.user.is_bot and not is_bot_admin(uid):
                 _gate_ok = await _join_gate_check(context, cid, new.user, name)  # 硬门槛：不满足直接移出
                 await _raid_on_join(context, cid, uid)                           # 防突袭计数（按人去重）
-                if _gate_ok and (JOIN_VERIFY_ENABLED or _raid_active(cid)):
+                if _gate_ok and (sget("JOIN_VERIFY_ENABLED") or _raid_active(cid)):
                     await _join_verify_start(context, cid, uid, name)            # 入群验证（默认关/突袭期强制）
-            if WELCOME_ENABLED:
+            if sget("WELCOME_ENABLED"):
                 try:
-                    text = WELCOME_TPL.replace("{name}", name).replace("{group}", getattr(cmu.chat, "title", "") or "").replace("{id}", str(uid))
+                    text = sget("WELCOME_TPL").replace("{name}", name).replace("{group}", getattr(cmu.chat, "title", "") or "").replace("{id}", str(uid))
                     wmsg = await context.bot.send_message(chat_id=cid, text=text)
-                    if wmsg and REPLY_DELETE_SECONDS > 0:
-                        schedule_delete(context.application, cid, wmsg, REPLY_DELETE_SECONDS)
+                    if wmsg and sget("REPLY_DELETE_SECONDS") > 0:
+                        schedule_delete(context.application, cid, wmsg, sget("REPLY_DELETE_SECONDS"))
                 except TelegramError: pass
         _remember_name(update)
         save_data()
@@ -10341,6 +10604,7 @@ async def on_join_request(update, context):
     ② 申请自带链接且命中专属链接 → 存 invite_pending，按 INVITE_AUTO_APPROVE 开关决定是否自动批；
     ③ 都没有（搜群/旧链接进的）→ bot 用 user_chat_id 主动私聊弹邀请人按钮（Bot API 5.5
        文档保证 bot 管理员可主动联系发申请者），点按钮补归因后自动批。"""
+    _bind_update_cid(update)
     try:
         req = getattr(update, "chat_join_request", None)
         if req is None and hasattr(update, "from_user") and hasattr(update, "chat"):
@@ -10367,7 +10631,7 @@ async def on_join_request(update, context):
                 _inv_dbg(cid, f"自动批准失败 uid={uid}：{e!r}（转人工）")
         elif not has_link:
             await _invite_ask_inviter(req, cid, uid, name, context)   # 主动问兜底（内部吞异常）
-        elif INVITE_AUTO_APPROVE:
+        elif sget("INVITE_AUTO_APPROVE"):
             try:
                 await context.bot.approve_chat_join_request(chat_id=cid, user_id=uid)
                 _inv_dbg(cid, f"申请带链接 + 开关开 → 自动批准 uid={uid}")
@@ -10444,11 +10708,11 @@ async def daily_reset_scheduler(app):
         last_business_date = today; save_data()
     while True:
         now = now_bj()
-        rh, rm = parse_hm(DAILY_RESET_TIME, 0, 0)  # 每轮重读，网页改时间即时生效
+        rh, rm = parse_hm(sget("DAILY_RESET_TIME"), 0, 0)  # 每轮重读，网页改时间即时生效
         target = now.replace(hour=rh, minute=rm, second=1, microsecond=0)
         if target <= now: target += timedelta(days=1)
         await asyncio.sleep((target-now).total_seconds())
-        if not DAILY_RESET_ENABLED:  # 后台「定时任务」开关：关闭期间到点不执行
+        if not sget("DAILY_RESET_ENABLED"):  # 后台「定时任务」开关：关闭期间到点不执行
             continue
         # 懒填默认：空作用群 = 全授权群
         if not daily_reset_groups: daily_reset_groups.update(AUTHORIZED_GROUPS)
@@ -10471,7 +10735,8 @@ async def daily_reset_scheduler(app):
                 season_daily_refresh(day_key, target_groups, season_protected)
                 save_data()
             for cid in target_groups:
-                if cid in race_daily_stats: race_daily_stats[cid] = [0] * HORSE_COUNT
+                _CUR_CID.set(_safe_cid(cid))   # 马匹数量可按群覆盖 → 该群日统计长度按该群解析
+                if cid in race_daily_stats: race_daily_stats[cid] = [0] * sget("HORSE_COUNT")
             archive_old_profit_data()
             # 积分系统：清掉前天的聊天积分（保留当天用于跨午夜），过期红包退余款
             chat_today.pop((now_bj() - timedelta(days=2)).strftime("%Y-%m-%d"), None)
@@ -10505,11 +10770,11 @@ async def daily_reset_scheduler(app):
 async def leaderboard_scheduler(app):
     while True:
         now = now_bj()
-        lh, lm = parse_hm(LEADERBOARD_TIME, 23, 50)  # 每轮重读，网页改时间即时生效
+        lh, lm = parse_hm(sget("LEADERBOARD_TIME"), 23, 50)  # 每轮重读，网页改时间即时生效
         target = now.replace(hour=lh, minute=lm, second=0, microsecond=0)
         if target <= now: target += timedelta(days=1)
         await asyncio.sleep((target-now).total_seconds())
-        if not LEADERBOARD_ENABLED:  # 后台「定时任务」开关：关闭期间到点不推送
+        if not sget("LEADERBOARD_ENABLED"):  # 后台「定时任务」开关：关闭期间到点不推送
             continue
         if not leaderboard_groups: leaderboard_groups.update(AUTHORIZED_GROUPS)
         target_groups = leaderboard_groups & AUTHORIZED_GROUPS
@@ -10527,6 +10792,7 @@ async def leaderboard_scheduler(app):
             for cid, data in texas_snapshot.items():
                 if not data: continue
                 if cid not in target_groups: continue  # 只推目标群
+                _CUR_CID.set(_safe_cid(cid))
                 lines = [f"🏆 德州当日排行榜（{date}）", "━"*14]
                 for i, (uid, amount) in enumerate(sorted(data.items(), key=lambda x:x[1], reverse=True)[:50], 1): lines.append(f"{rank_marker(i)} {await get_name(app, uid)}：{amount:+d}")
                 await safe_send_long(app.bot, cid, "\n".join(lines))
@@ -10534,15 +10800,16 @@ async def leaderboard_scheduler(app):
             if season_active:
                 for cid in list(season_points.keys()):
                     if cid not in target_groups: continue  # 只推目标群
+                    _CUR_CID.set(_safe_cid(cid))   # 起始分/最低局数按该群配置解析
                     users = season_points.get(cid, {})
                     if not users: continue
                     # 当日盈亏 = 当前分 - (起始分+兑换底分)，与排位榜口径一致（兑换分不计入）
                     day_rows = [(u, val - _season_base(cid, u)) for u, val in users.items()]
                     day_standings = sorted(day_rows, key=lambda x: (-x[1], x[0]))
-                    lines = [f"🏆 第{season_id}赛季 当日盈亏榜（基准分 {SEASON_START_CHIPS}+兑换底分）", "━" * 18]
+                    lines = [f"🏆 第{season_id}赛季 当日盈亏榜（基准分 {sget('SEASON_START_CHIPS')}+兑换底分）", "━" * 18]
                     for i, (u, val) in enumerate(day_standings[:50], 1):
                         g = season_games[cid].get(u, 0)
-                        tag = "" if g >= SEASON_MIN_GAMES else f"（{g}局·未达标）"
+                        tag = "" if g >= sget("SEASON_MIN_GAMES") else f"（{g}局·未达标）"
                         lines.append(f"{rank_marker(i)} {await get_name(app, u, cid=cid, with_title=False)}：{val:+d}｜{g}局{tag}")
                     await safe_send_long(app.bot, cid, "\n".join(lines))
             save_data()
@@ -10597,11 +10864,11 @@ async def admin_report_scheduler(app):
     sent_date = None
     while True:
         now = now_bj()
-        rh, rm = parse_hm(ADMIN_REPORT_TIME, 9, 0)
+        rh, rm = parse_hm(sget("ADMIN_REPORT_TIME"), 9, 0)
         target = now.replace(hour=rh, minute=rm, second=0, microsecond=0)
         if target <= now: target += timedelta(days=1)
         await asyncio.sleep(max(1, (target - now).total_seconds()))
-        if not ADMIN_REPORT_ENABLED:  # 后台「定时任务」开关：关闭期间到点不推送
+        if not sget("ADMIN_REPORT_ENABLED"):  # 后台「定时任务」开关：关闭期间到点不推送
             continue
         if not admin_report_admins: admin_report_admins.add(ADMIN_USER_ID)
         try:
@@ -10619,9 +10886,9 @@ async def _auto_race_tick(app, now):
     """自动开赛单轮扫描：总开关开着且到点时，对每个授权群发车。
     每群默认开启；群里发「整点自动赛车」可单独关/开本群。（此前默认关闭+只遍历手动开过的群，
     网页总开关打开也不会发车——bug 已修）"""
-    if not (RACE_AUTO_ENABLED and RACE_ENABLED
-            and now.minute == max(0, min(59, RACE_HOURLY_MINUTE))
-            and max(0, min(23, RACE_HOURLY_START)) <= now.hour <= max(0, min(23, RACE_HOURLY_END))):
+    if not (sget("RACE_AUTO_ENABLED") and sget("RACE_ENABLED")
+            and now.minute == max(0, min(59, sget("RACE_HOURLY_MINUTE")))
+            and max(0, min(23, sget("RACE_HOURLY_START"))) <= now.hour <= max(0, min(23, sget("RACE_HOURLY_END")))):
         return
     for cid in list(AUTHORIZED_GROUPS):
         if not hourly_race_enabled.get(cid, True):
@@ -10653,7 +10920,7 @@ async def hourly_race_scheduler(app):
             now = now_bj(); key = now.strftime("%Y%m%d%H")
             if key != last_key:  # 每分钟轮询，同一小时只发一轮；开赛分钟/时段均网页可配
                 await _auto_race_tick(app, now)
-                if RACE_AUTO_ENABLED and now.minute == max(0, min(59, RACE_HOURLY_MINUTE)):
+                if sget("RACE_AUTO_ENABLED") and now.minute == max(0, min(59, sget("RACE_HOURLY_MINUTE"))):
                     last_key = key
             next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
             await asyncio.sleep(max(1, (next_minute-now).total_seconds()))
@@ -10672,7 +10939,7 @@ async def cmd_schedule_status(update, context):
     lines = ["<b>🕐 定时任务状态</b>", ""]
 
     # 1) 整点赛车
-    lines.append(f"<b>1️⃣ 整点自动赛车</b>　总开关：{'✅ 开' if RACE_AUTO_ENABLED and RACE_ENABLED else '❌ 关'}　时段：{RACE_HOURLY_START:02d}:00–{RACE_HOURLY_END:02d}:59　开赛分钟：{RACE_HOURLY_MINUTE:02d} 分")
+    lines.append(f"<b>1️⃣ 整点自动赛车</b>　总开关：{'✅ 开' if sget('RACE_AUTO_ENABLED') and sget('RACE_ENABLED') else '❌ 关'}　时段：{sget('RACE_HOURLY_START'):02d}:00–{sget('RACE_HOURLY_END'):02d}:59　开赛分钟：{sget('RACE_HOURLY_MINUTE'):02d} 分")
     if AUTHORIZED_GROUPS:
         for cid in sorted(AUTHORIZED_GROUPS):
             on = "✅" if hourly_race_enabled.get(cid, True) else "⏸"
@@ -10688,15 +10955,15 @@ async def cmd_schedule_status(update, context):
     lines.append("")
 
     # 2) 每日重置
-    lines.append(f"<b>2️⃣ 每日重置</b>　时刻：{DAILY_RESET_TIME}　上次业务日：{last_business_date or '（未记录）'}")
+    lines.append(f"<b>2️⃣ 每日重置</b>　时刻：{sget('DAILY_RESET_TIME')}　上次业务日：{last_business_date or '（未记录）'}")
     lines.append("")
 
     # 3) 自动备份
     jq = getattr(context.application, "job_queue", None)
     if jq is not None:
-        lines.append(f"<b>3️⃣ 自动备份</b>　间隔：{BACKUP_INTERVAL_HOURS} 小时　job_queue：✅ 运行中")
+        lines.append(f"<b>3️⃣ 自动备份</b>　间隔：{sget('BACKUP_INTERVAL_HOURS')} 小时　job_queue：✅ 运行中")
     else:
-        lines.append(f"<b>3️⃣ 自动备份</b>　间隔：{BACKUP_INTERVAL_HOURS} 小时　job_queue：❌ 未启用（需 python-telegram-bot[job-queue]）")
+        lines.append(f"<b>3️⃣ 自动备份</b>　间隔：{sget('BACKUP_INTERVAL_HOURS')} 小时　job_queue：❌ 未启用（需 python-telegram-bot[job-queue]）")
     lines.append("")
 
     # 4) 赛季结算
@@ -11120,13 +11387,14 @@ async def _dispatch_alias(cmd, args, update, context):
         return
     context.args = args
     # 抽奖相关消息（参与关键词/开奖命令）不删：参与痕迹与开奖信息都要保留在群里
-    if POINTS_DELETE_SECONDS > 0 and handler is not cmd_lottery and is_group_chat(update):
-        schedule_delete(context.application, update.effective_chat.id, update.message, POINTS_DELETE_SECONDS)
+    if sget("POINTS_DELETE_SECONDS") > 0 and handler is not cmd_lottery and is_group_chat(update):
+        schedule_delete(context.application, update.effective_chat.id, update.message, sget("POINTS_DELETE_SECONDS"))
     await handler(update, context)
 
 
 async def route_command(update, context):
     """把 /中文 或 /英文 命令路由到对应处理函数。"""
+    _bind_update_cid(update)
     if not update.message or not update.message.text:
         return
     _remember_name(update)
@@ -11250,6 +11518,23 @@ def start_health_server():
         def _page(title, sidebar_active, body):
             """阿福风格布局：左侧深色菜单栏（分组可折叠子页面）+ 右侧内容区，窄屏折叠为顶部横排。"""
             sidebar_active = sidebar_active or ""
+            _gcid = cur_cid()                                        # 当前正在配置的群（0=全局默认）
+            _gact = ("/page/" + sidebar_active) if sidebar_active else "/page/dashboard"
+            _gq = (f"?cid={_gcid}" if _gcid else "")                 # 左侧菜单链接带上群，切页不串台
+            _gbanner = ("" if not _gcid else
+                        "<div style='margin:0 0 14px;padding:10px 14px;border-radius:10px;"
+                        "background:rgba(var(--acr),.12);border:1px solid rgba(var(--acr),.3);font-size:13px;"
+                        "color:#d9d3f0'>🏷 正在为 <b>" + html.escape(chat_name_cache.get(_gcid) or "该群")
+                        + "</b>（<b>" + str(_gcid) + "</b>）配置 · 只保存与该群不同的项，"
+                        "未单独设置的项自动继承全局默认；标有「⚑ 群专属」的项才是该群已覆盖的</div>")
+            # 群级页面：给所有 /save 表单自动补一个 cid 隐藏字段，保存才知道往哪个群写
+            # （表单有十几处手写，逐个加容易漏；这里用一次 JS 统一注入，零遗漏）
+            _gjs = ("<script>var _GCID=" + str(_gcid) + ";"
+                    "document.addEventListener('DOMContentLoaded',function(){if(!_GCID)return;"
+                    "document.querySelectorAll(\"form[action='/save']\").forEach(function(f){"
+                    "if(f.querySelector(\"input[name='cid']\"))return;"
+                    "var i=document.createElement('input');i.type='hidden';i.name='cid';i.value=_GCID;"
+                    "f.appendChild(i);});});</script>")
             _thm_key = SETTINGS_SNAPSHOT.get("ui_theme") if SETTINGS_SNAPSHOT.get("ui_theme") in _UI_THEMES else "purple"
             _ac, _ac2, _actx, _bg, _side, _card, _input, _border, _thead, _hover = _UI_THEMES[_thm_key]
             _acr = ",".join(str(int(_ac[i:i + 2], 16)) for i in (1, 3, 5))   # 主色的 R,G,B（供 rgba(var(--acr),x)）
@@ -11269,20 +11554,20 @@ def start_health_server():
                     # 原设置页会失去入口 → 子菜单第一位固定补"XX设置"链接
                     if not subpage_subs and child_groups:
                         pcls = "active" if sidebar_active == gkey else ""
-                        subs.append(f"<a class='{pcls}' href='/page/{gkey}'>⚙️ {name}设置</a>")
+                        subs.append(f"<a class='{pcls}' href='/page/{gkey}{_gq}'>⚙️ {name}设置</a>")
                     for skey, sname in subpage_subs:
                         cls = "active" if sidebar_active == f"{gkey}/{skey}" else ""
-                        subs.append(f"<a class='{cls}' href='/page/{gkey}/{skey}'>{sname}</a>")
+                        subs.append(f"<a class='{cls}' href='/page/{gkey}/{skey}{_gq}'>{sname}</a>")
                     for ck, (cname, cicon) in child_groups:
                         ccls = "active" if sidebar_active == ck or sidebar_active.startswith(ck + "/") else ""
-                        subs.append(f"<a class='{ccls}' href='/page/{ck}'>{cname}</a>")
+                        subs.append(f"<a class='{ccls}' href='/page/{ck}{_gq}'>{cname}</a>")
                     items.append(
                         f"<details{' open' if active_now else ''}>"
                         f"<summary class='{'active' if active_now else ''}'>{icon}<span>{name}</span></summary>"
                         f"<div class='sub'>{''.join(subs)}</div></details>")
                 else:
                     cls = "item active" if active_now else "item"
-                    items.append(f"<a class='{cls}' href='/page/{gkey}'>{icon}<span>{name}</span></a>")
+                    items.append(f"<a class='{cls}' href='/page/{gkey}{_gq}'>{icon}<span>{name}</span></a>")
 
             def _sec_sort(keys):
                 ks = [k for k in keys if k in meta and k not in child_of]
@@ -11323,6 +11608,13 @@ def start_health_server():
                     "display:flex;align-items:center;padding:0 20px;gap:14px}"
                     ".hd .logo{font-size:16px;font-weight:500;color:#fff;display:flex;align-items:center;gap:8px}"
                     ".hd .crumb{color:#8a89a0;font-size:14px}"
+                    # 顶栏「群切换」下拉：切到某群后，下面所有设置页显示/保存的都是该群的专属值
+                    ".hd .gsel{margin-left:16px;display:flex;align-items:center;gap:7px}"
+                    ".hd .gsel .gl{color:#8a89a0;font-size:13px;white-space:nowrap}"
+                    ".hd .gsel select{background:var(--input);border:1px solid var(--border);color:#e6e5f0;"
+                    "border-radius:8px;padding:5px 9px;font-size:13px;max-width:240px;cursor:pointer}"
+                    ".hd .gsel select:focus{outline:none;border-color:var(--ac)}"
+                    ".hd .gsel select option{background:var(--card);color:#e6e5f0}"
                     ".hd .right{margin-left:auto;display:flex;align-items:center;gap:14px;color:#8a89a0;font-size:13px}"
                     ".hd .burger{display:none;background:transparent;border:1px solid var(--thead);color:#e6e5f0;"
                     "border-radius:8px;padding:6px 10px;cursor:pointer}"
@@ -11528,10 +11820,19 @@ def start_health_server():
                     "<button class='burger' onclick=\"document.querySelector('.side').classList.toggle('open');"
                     "document.querySelector('.backdrop').classList.toggle('show')\" aria-label='菜单'>☰</button>"
                     f"<div class='logo'>🤖 机器人后台</div>"
-                    f"<div class='crumb'>· {html.escape(title)}</div>"
-                    "<div class='right'>机器人后台"
+                    f"<div class='crumb'>· {html.escape(title)}"
+                    + (f" · 群 {html.escape(chat_name_cache.get(_gcid) or str(_gcid))}" if _gcid else "")
+                    + "</div>"
+                    # 群切换器：切到某群后，所有设置页读写的都是该群的专属值（未单独设置的项继承全局）
+                    + ("<form method='get' class='gsel' action='" + _gact + "'>"
+                       "<span class='gl'>🌐 正在配置</span>"
+                       "<select name='cid' onchange='this.form.submit()' "
+                       "title='选择要配置的群；选「全局默认」则改动作用于所有群'>"
+                       + "<option value='0'" + (" selected" if not _gcid else "") + ">全局默认（所有群）</option>"
+                       + _group_options(_gcid) + "</select></form>")
+                    + "<div class='right'>机器人后台"
                     + "".join(f"<a class='dot{' cur' if k == _thm_key else ''}' title='主题：{k}' "
-                              f"href='/theme/{k}?back={quote('/page/' + sidebar_active if sidebar_active else '/')}' "
+                              f"href='/theme/{k}?back={quote(('/page/' + sidebar_active if sidebar_active else '/') + _gq)}' "
                               f"style='background:{v[0]}'></a>" for k, v in _UI_THEMES.items())
                     + "</div>"
                     "</header>"
@@ -11539,7 +11840,7 @@ def start_health_server():
                     "this.classList.remove('show')\"></div>"
                     "<div class='wrap'>"
                     f"<nav class='side'>{''.join(items)}</nav>"
-                    f"<main class='main'>{body}</main>{_id_picker_js()}{_sort_js()}{_GUARD_JS}</div>"
+                    f"<main class='main'>{_gbanner}{body}</main>{_id_picker_js()}{_sort_js()}{_GUARD_JS}{_gjs}</div>"
                     "<footer class='ft'>© 机器人后台</footer>"
                     "</body></html>").encode("utf-8")
 
@@ -11763,6 +12064,30 @@ def start_health_server():
         def _field_rows(gkey, keys=None):
             # keys=None 渲染组内全部字段；传键集合则只渲染这些字段（防护弹窗用）
             rows = []
+            # 群级页面右上角取值来源小标（仅群页面出现）
+            _OV_CSS = ("position:absolute;top:6px;right:0;font-size:11px;padding:1px 7px;"
+                       "border-radius:7px;background:rgba(var(--acr),.18);color:#c4b5fd;"
+                       "border:1px solid rgba(var(--acr),.35);text-decoration:none;white-space:nowrap")
+
+            def _ov_wrap(key, body):
+                """群页面上的取值来源标记：
+                   ⚑ 群专属 ↺ = 该群已覆盖（点它清除覆盖、改回继承全局）
+                   🌐 全局项   = 全站唯一设置（密码/调度/备份等），按群覆盖无意义，保存只作用于全局
+                   无标记     = 继承全局默认
+                """
+                cid = cur_cid()
+                if not cid:
+                    return body
+                if key in GROUP_SCOPED_KEYS:
+                    if key not in (GROUP_SETTINGS.get(cid) or {}):
+                        return body
+                    badge = ("<a href='/gclear/" + str(cid) + "/" + key + "' style='" + _OV_CSS +
+                             "' title='清除该群专属值，改回继承全局默认'>⚑ 群专属 ↺</a>")
+                else:
+                    badge = ("<span style='" + _OV_CSS + ";opacity:.75' title='全站唯一设置，"
+                             "保存会作用于所有群'>🌐 全局项</span>")
+                return "<div style='position:relative'>" + body + badge + "</div>"
+
             if gkey == "tpls":
                 # 跨组聚合：全部话术模板按所属模块分区，一次改完
                 last = None
@@ -11772,16 +12097,16 @@ def start_health_server():
                     if grp != last:
                         rows.append(f"<div class='sec'>{html.escape(_grp_title(grp))}</div>")
                         last = grp
-                    cur = globals().get(_g)
-                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid var(--border)'>"
+                    cur = sget(_g)
+                    rows.append(_ov_wrap(key, f"<div style='padding:13px 2px;border-bottom:1px solid var(--border)'>"
                                 f"<div class='lbl' style='display:flex;align-items:center;justify-content:space-between'>"
                                 f"<span>{html.escape(label)}<small>可用占位符见默认值；支持换行</small></span>"
                                 f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
-                                f"<textarea name='{key}' rows='4' style='margin-top:8px'>{html.escape(cur or '')}</textarea></div>")
+                                f"<textarea name='{key}' rows='4' style='margin-top:8px'>{html.escape(cur or '')}</textarea></div>"))
                 return "".join(rows)
 
-            def _one(key, _g, label, ftype, lo, hi):
-                cur = globals().get(_g)
+            def _one_raw(key, _g, label, ftype, lo, hi):
+                cur = sget(_g)
                 if ftype == "multi":
                     picked = {p.strip() for p in str(cur or "").split(",") if p.strip()}
                     boxes = []
@@ -11855,6 +12180,10 @@ def start_health_server():
                         f"<small>范围 {lo} ~ {hi}</small></div>"
                         f"<input type='number' name='{key}' value='{cur}' step='{'0.1' if ftype == 'float' else '1'}'></div>")
 
+            def _one(key, _g, label, ftype, lo, hi):
+                """渲染单个设置项：取值走 sget（群级覆盖 → 全局），并标记群专属项。"""
+                return _ov_wrap(key, _one_raw(key, _g, label, ftype, lo, hi))
+
             grp_fields = [f for f in SETTINGS_FIELDS if f[6] == gkey and (keys is None or f[0] in keys)]
             if not grp_fields:
                 return ""
@@ -11862,10 +12191,12 @@ def start_health_server():
                 # ①②③ 结构化页（mod/autodel/schedule）：分节标题就是布局，保持定义顺序原样渲染
                 return "".join(f"<div class='sec'>{html.escape(f[2])}</div>" if f[3] == "sep" else _one(*f[:6])
                                for f in grp_fields)
-            # 普通页（照阿福）：开关置顶 → 数字/短文本参数双列 → 宽内容（模板/多选）殿后
+            # 普通页（照阿福）：开关置顶 → 数字/短文本参数双列 → 宽内容（模板/多选/词表）殿后
+            # bets 走宽内容区独占整行：它是 tagbox（可换行的标签盒），塞进 grid2 双列必被裁切
+            # （用户 2026-09-10 截图：4 个金额标签只显示到「200」右侧就被切掉）
             bools = [f for f in grp_fields if f[3] == "bool"]
-            simple = [f for f in grp_fields if f[3] in ("int", "float", "short", "cmd", "names", "emoji", "bets")]
-            wide = [f for f in grp_fields if f[3] in ("text", "multi", "levels", "items")]
+            simple = [f for f in grp_fields if f[3] in ("int", "float", "short", "cmd")]
+            wide = [f for f in grp_fields if f[3] in ("text", "multi", "levels", "items", "names", "emoji", "bets")]
             parts = []
             if bools and (simple or wide):
                 parts.append("<div class='sec'>🎛 开关</div>")
@@ -12368,9 +12699,9 @@ def start_health_server():
                 if not rows_html:
                     rows_html = "<tr><td colspan='8' style='text-align:center;color:#6a6982'>暂无活动，用上方表单创建第一个</td></tr>"
                 status_html = ("<div class='err'>⚠️ 群组抽奖当前已关闭，先打开下方「群组抽奖总开关」</div>"
-                               if not LOTTERY_ENABLED else "")
+                               if not sget("LOTTERY_ENABLED") else "")
                 body = (f"<h1>{gicon} {sname}</h1>"
-                        f"<div class='sub'>在这里创建抽奖 → 机器人自动发到群里 → 群成员发「{html.escape(LOTTERY_KEYWORD)}」参与 → 到点自动开奖</div>"
+                        f"<div class='sub'>在这里创建抽奖 → 机器人自动发到群里 → 群成员发「{html.escape(sget('LOTTERY_KEYWORD'))}」参与 → 到点自动开奖</div>"
                         f"{msg}{err}{status_html}" +
                         # 新增抽奖表单（照阿福格式：描述/关键词/开奖方式下拉/结构化奖品行）
                         "<div class='card'><h3>➕ 新增抽奖</h3>"
@@ -12383,7 +12714,7 @@ def start_health_server():
                         "<div class='lbl'>抽奖描述<small>（可选）显示在公告标题下方</small></div>"
                         "<textarea name='desc' rows='2' placeholder='活动说明、注意事项等（可留空）'></textarea></div>"
                         "<div class='row'><div class='lbl'>参与关键词 *</div>"
-                        f"<input type='text' name='keyword' maxlength='20' value='{html.escape(LOTTERY_KEYWORD)}' placeholder='群友发这个词参与抽奖'></div>"
+                        f"<input type='text' name='keyword' maxlength='20' value='{html.escape(sget('LOTTERY_KEYWORD'))}' placeholder='群友发这个词参与抽奖'></div>"
                         "<div class='row'><div class='lbl'>开奖方式 *</div>"
                         "<select name='mode' id='mode_sel'>"
                         "<option value='time'>定时开奖</option>"
@@ -12391,7 +12722,7 @@ def start_health_server():
                         "<div class='row' id='row_time'><div class='lbl'>开奖时间 *<small>输入的时间将按北京时间解析执行：20:00 / 09-08 20:00 / 2026-09-08 20:00</small></div>"
                         "<input type='text' name='endtime' id='endtime' placeholder='例：21:30 或 09-08 20:00'></div>"
                         "<div class='row' id='row_duration' style='display:none'><div class='lbl'>持续秒数 *<small>到点自动开奖（10 ~ 604800）</small></div>"
-                        f"<input type='number' name='duration' id='duration' value='{max(10, int(LOTTERY_DEFAULT_DURATION))}' min='10'></div>"
+                        f"<input type='number' name='duration' id='duration' value='{max(10, int(sget('LOTTERY_DEFAULT_DURATION')))}' min='10'></div>"
                         "<div style='padding:12px 0;border-bottom:1px solid var(--border)'>"
                         "<div class='lbl'>奖品设置 *</div>"
                         "<div id='prize_rows'>"
@@ -12447,7 +12778,7 @@ def start_health_server():
                             "<option value='0'>全部群</option>" + _group_options(selected=sel_icid)
                             + "</select><noscript><button style='margin:0'>查看</button></noscript></form>")
                 if sub == "config":
-                    warn_html = ("<div class='err'>⚠️ 邀请系统当前已关闭</div>" if not INVITE_ENABLED else "")
+                    warn_html = ("<div class='err'>⚠️ 邀请系统当前已关闭</div>" if not sget("INVITE_ENABLED") else "")
                     body = (f"<h1>{gicon} {gname}</h1>"
                             f"<div class='sub'>群里发「<code>{html.escape(str(INVITE_LINK_CMD))}</code>」领专属邀请链接 → 新朋友经链接进群 → 本群达标后邀请人得奖励"
                             f"（群内发「{html.escape(str(INVITE_RANK_ALL_CMD))}」看排行）</div>{msg}{warn_html}"
@@ -12537,7 +12868,7 @@ def start_health_server():
                 elif sub == "qualify":
                     body = (f"<h1>{gicon} 合格结算</h1>"
                             f"<div class='sub'>被邀请人进群先记账，<b>在本群</b>达到下列质量要求才算「合格」并发放邀请奖励"
-                            f"（{INVITE_REWARD} 积分/人，每人上限 {INVITE_REWARD_TIMES} 次）；发言/积分达标事件驱动自动结算，超额只计合格不再发；"
+                            f"（{sget('INVITE_REWARD')} 积分/人，每人上限 {sget('INVITE_REWARD_TIMES')} 次）；发言/积分达标事件驱动自动结算，超额只计合格不再发；"
                             f"头像/用户名要求进群时检查，不满足直接拒绝永不发（防小号白嫖）。</div>{msg}"
                             "<div class='card'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='invite/qualify'>"
@@ -12695,17 +13026,17 @@ def start_health_server():
                             "<input type='hidden' name='group' value='points/mall'>"
                             + _field_rows("points/mall") + _savebar("保存商城设置") + "</form></div>")
                 elif gkey == "points" and sub == "rule":
-                    cap = f"每日上限 {CHAT_DAILY_CAP} 分" if CHAT_DAILY_CAP else "不设上限"
-                    fee = f"（手续费 {INHERIT_FEE_PERCENT}%）" if INHERIT_FEE_PERCENT else "（免手续费）"
+                    cap = f"每日上限 {sget('CHAT_DAILY_CAP')} 分" if sget("CHAT_DAILY_CAP") else "不设上限"
+                    fee = f"（手续费 {sget('INHERIT_FEE_PERCENT')}%）" if sget("INHERIT_FEE_PERCENT") else "（免手续费）"
                     body = (f"<h1>💰 {sname}</h1><div class='sub'>当前生效规则（改设置自动更新）</div>{msg}"
                             "<div class='card'><table class='tbl'>"
-                            f"<tr><th>获取</th><td>聊天：每满 {CHAT_CHARS_PER} 字符记 {CHAT_REWARD} 分，{cap}；"
-                            f"签到：基础 {SIGN_BASE_REWARD} 分，连续满 7 天额外 +{SIGN_STREAK_BONUS} 分；抢积分红包"
-                            + (f"；充值：{BUY_MIN}~{BUY_MAX}/次（管理员确认到账）" if BUY_ENABLED else "") + "</td></tr>"
+                            f"<tr><th>获取</th><td>聊天：每满 {sget('CHAT_CHARS_PER')} 字符记 {sget('CHAT_REWARD')} 分，{cap}；"
+                            f"签到：基础 {sget('SIGN_BASE_REWARD')} 分，连续满 7 天额外 +{sget('SIGN_STREAK_BONUS')} 分；抢积分红包"
+                            + (f"；充值：{sget('BUY_MIN')}~{sget('BUY_MAX')}/次（管理员确认到账）" if sget("BUY_ENABLED") else "") + "</td></tr>"
                             "<tr><th>消耗</th><td>发积分红包；积分商城下单（"
                             + ("、".join(f"{x.get('name', '?')} {_mall_price(x)}分" for x in MALL_ITEMS) or "暂无商品")
                             + "）</td></tr>"
-                            f"<tr><th>转赠</th><td>{'开启' if INHERIT_ENABLED else '关闭'}，把积分转给群内成员{fee}</td></tr>"
+                            f"<tr><th>转赠</th><td>{'开启' if sget('INHERIT_ENABLED') else '关闭'}，把积分转给群内成员{fee}</td></tr>"
                             "<tr><th>等级</th><td>"
                             + " ≥ ".join(f"{x['name']} {x['value']}分" for x in POINT_LEVELS)
                             + "<br><span class='sub'>按「累计获得」计算：消费/兑换不掉级，只有真实产出（签到/游戏赢分/邀请/红包等）才涨</span></td></tr>"
@@ -12854,7 +13185,7 @@ def start_health_server():
                             "<input type='text' name='q' placeholder='题目' required maxlength='50' style='flex:2;min-width:180px'>"
                             "<input type='text' name='a' placeholder='选项A' required maxlength='20' style='flex:1;min-width:100px'>"
                             "<input type='text' name='b' placeholder='选项B' required maxlength='20' style='flex:1;min-width:100px'>"
-                            "<input type='number' name='duration' placeholder='时长(分钟,默认" + str(GUESS_DURATION) + ")' min='1' max='1440' style='flex:1;min-width:120px'>"
+                            "<input type='number' name='duration' placeholder='时长(分钟,默认" + str(sget("GUESS_DURATION")) + ")' min='1' max='1440' style='flex:1;min-width:120px'>"
                             "<button style='margin:0'>🎯 发起竞猜</button></form></div>"
                             "<div class='card' style='margin-top:18px'><form method='post' action='/save'>"
                             "<input type='hidden' name='group' value='points/guess'>"
@@ -12932,15 +13263,15 @@ def start_health_server():
                                                            ("回复", "REPLY_DELETE_SECONDS"), ("结算", "SETTLE_DELETE_SECONDS"),
                                                            ("赛车提示", "RACE_NOTICE_DELETE_SECONDS")) if globals().get(g)
                                 ) + " 后删除") if _on_rec else "全部为 0（不自动删除）"
-                    _sum_anti = (f"复读 {ANTISPAM_REPEAT_N} 条/{ANTISPAM_WINDOW}s 内 · 定时器特征 {ANTISPAM_TIMER_N} 条"
-                                 + (f" · 禁言 {ANTISPAM_MUTE_SECONDS}s" if ANTISPAM_MUTE_SECONDS else " · 只删不禁")) \
-                        if ANTISPAM_ENABLED else "开关关闭"
+                    _sum_anti = (f"复读 {sget('ANTISPAM_REPEAT_N')} 条/{sget('ANTISPAM_WINDOW')}s 内 · 定时器特征 {sget('ANTISPAM_TIMER_N')} 条"
+                                 + (f" · 禁言 {sget('ANTISPAM_MUTE_SECONDS')}s" if sget("ANTISPAM_MUTE_SECONDS") else " · 只删不禁")) \
+                        if sget("ANTISPAM_ENABLED") else "开关关闭"
                     _rows_g = (_guard_row("消息自动回收", _on_rec, _sum_rec, "md_recycle")
-                               + _guard_row("刷屏识别", bool(ANTISPAM_ENABLED), _sum_anti, "md_antispam")
-                               + _guard_row("文本类规则", bool(AUTODEL_TEXT_RULES), _multi_names("autodel_text_rules", AUTODEL_TEXT_RULES)
-                                            + (f" · 阈值 {AUTODEL_LONG_LEN} 字" if "long" in str(AUTODEL_TEXT_RULES) else ""), "md_textrule")
-                               + _guard_row("媒体与系统类规则", bool(AUTODEL_MEDIA_TYPES),
-                                            _multi_names("autodel_media_types", AUTODEL_MEDIA_TYPES), "md_mediarule"))
+                               + _guard_row("刷屏识别", bool(sget("ANTISPAM_ENABLED")), _sum_anti, "md_antispam")
+                               + _guard_row("文本类规则", bool(sget("AUTODEL_TEXT_RULES")), _multi_names("autodel_text_rules", sget("AUTODEL_TEXT_RULES"))
+                                            + (f" · 阈值 {sget('AUTODEL_LONG_LEN')} 字" if "long" in str(sget("AUTODEL_TEXT_RULES")) else ""), "md_textrule")
+                               + _guard_row("媒体与系统类规则", bool(sget("AUTODEL_MEDIA_TYPES")),
+                                            _multi_names("autodel_media_types", sget("AUTODEL_MEDIA_TYPES")), "md_mediarule"))
                     form_open = ("<div class='card'><h3>🛡 防护类型</h3>"
                                  "<div class='sub'>点「✏️ 编辑」调整对应防护；弹窗内保存立即生效，只影响该防护的参数</div>"
                                  "<table class='tbl'><tr><th>防护项</th><th>状态 / 摘要</th><th style='width:90px'>操作</th></tr>"
@@ -12956,10 +13287,10 @@ def start_health_server():
                 if gkey == "mod":
                     _SENS_KEYS = {"sensitive_enabled", "sensitive_words", "sensitive_action",
                                   "sensitive_mute_seconds", "link_whitelist_enabled", "link_whitelist"}
-                    _sens_on = bool(SENSITIVE_ENABLED or LINK_WHITELIST_ENABLED)
+                    _sens_on = bool(sget("SENSITIVE_ENABLED") or sget("LINK_WHITELIST_ENABLED"))
                     _act_cn = ("删除", "删除+禁言", "删除+踢出")
-                    _sens_sum = (f"敏感词 {len(SENSITIVE_WORDS)} 个 · 命中处理 {_act_cn[SENSITIVE_ACTION] if SENSITIVE_ACTION in (0, 1, 2) else SENSITIVE_ACTION}"
-                                 + (f" · 白名单 {len(LINK_WHITELIST)} 个域名" if LINK_WHITELIST_ENABLED else " · 白名单关闭")
+                    _sens_sum = (f"敏感词 {len(sget('SENSITIVE_WORDS'))} 个 · 命中处理 {_act_cn[sget('SENSITIVE_ACTION')] if sget('SENSITIVE_ACTION') in (0, 1, 2) else sget('SENSITIVE_ACTION')}"
+                                 + (f" · 白名单 {len(sget('LINK_WHITELIST'))} 个域名" if sget("LINK_WHITELIST_ENABLED") else " · 白名单关闭")
                                  ) if _sens_on else "开关关闭"
                     _sens_card = ("<div class='card' style='margin-top:18px'><h3>🛡 防护类型</h3>"
                                   "<table class='tbl'><tr><th>防护项</th><th>状态 / 摘要</th><th style='width:90px'>操作</th></tr>"
@@ -13169,6 +13500,10 @@ def start_health_server():
                 if not _check_session(self.headers.get("Cookie")):
                     self._send(200, _login_page()); return
                 qs = parse_qs(urlparse(self.path).query)
+                # 群级上下文：URL 带 ?cid=<群ID> 时，本请求渲染的取值/回显都按该群解析
+                # （ThreadingHTTPServer 每请求一个线程，contextvar 天然按请求隔离，无需复位）
+                try: _CUR_CID.set(int(qs.get("cid", ["0"])[0] or 0))
+                except (TypeError, ValueError): _CUR_CID.set(0)
                 saved, bad = "saved" in qs, "bad" in qs
                 note = qs.get("note", [""])[0]
                 err = qs.get("err", [""])[0]
@@ -13216,6 +13551,18 @@ def start_health_server():
                             lst[idx]["on"] = 0 if int(lst[idx].get("on", 1) or 0) else 1
                         save_settings({})
                     self._redirect(back); return
+                mm = re.fullmatch(r"/gclear/(-?\d+)/([a-z0-9_]+)", path)
+                if mm:  # 群页面点「⚑ 群专属 ↺」：清除该群对该项的覆盖，改回继承全局默认
+                    _gc, _gk = int(mm.group(1)), mm.group(2)
+                    group_set(_gc, _gk, None)
+                    save_settings({})   # 立即落盘（含 group_settings）
+                    _u = urlparse(self.headers.get("Referer") or "")
+                    _back = (_u.path if _u.path.startswith("/") else "/page/dashboard")
+                    if _u.query:
+                        _back += "?" + _u.query
+                    self._redirect(_back + ("&" if "?" in _back else "?") + "note="
+                                   + quote("↺ 已恢复继承全局默认"))
+                    return
                 mm = re.fullmatch(r"/racegrp/(-?\d+)/toggle", path)
                 if mm:  # 网页直接开/关某群整点自动赛车
                     rcid = int(mm.group(1))
@@ -13346,6 +13693,9 @@ def start_health_server():
                     form = parse_qs(raw.decode("utf-8"))
                 except Exception:
                     form = {}
+                # 群级上下文：表单带 cid（群页面保存时由页面自动注入的隐藏字段）→ 本请求按该群解析
+                try: _CUR_CID.set(int((form.get("cid", [""])[0] or "0") or 0))
+                except (TypeError, ValueError): _CUR_CID.set(0)
                 if path == "/login":
                     ip = _client_ip(self)
                     with sess_lock:
@@ -13627,7 +13977,7 @@ def start_health_server():
                     try: cid_ = int(form.get("cid", ["0"])[0] or 0)
                     except ValueError: cid_ = 0
                     q_ = form.get("q", [""])[0]; a_ = form.get("a", [""])[0]; b_ = form.get("b", [""])[0]
-                    dur_ = form.get("duration", [""])[0] or GUESS_DURATION
+                    dur_ = form.get("duration", [""])[0] or sget("GUESS_DURATION")
                     if not cid_ or cid_ not in AUTHORIZED_GROUPS:
                         self._send(400, f"err=无效群ID（{cid_ or '未填'}）".encode("utf-8")); return
                     if not (_bot_app and _bot_loop):
@@ -13777,7 +14127,7 @@ def start_health_server():
                         _lc_back(err=ferr); return
                     lotteries[cid] = {
                         "title": fields["title"], "desc": fields["desc"], "prizes": fields["prizes"],
-                        "fee": int(LOTTERY_FEE), "keyword": fields["keyword"],
+                        "fee": int(sget("LOTTERY_FEE")), "keyword": fields["keyword"],
                         "min_bal": fields["min_bal"], "start_ts": time.time(),
                         "end_ts": fields["end_ts"], "msg_id": None,
                         "participants": [], "status": "open", "winners": [],
@@ -13862,9 +14212,15 @@ def start_health_server():
                                 cfg.setdefault(k, "0")
                             elif ft == "multi":
                                 cfg.setdefault(k, "")   # 全不勾 = 关闭全部规则
-                    applied = save_settings(cfg)
+                    try:
+                        _gcid = int((form.get("cid", [""])[0] or "0") or 0)
+                    except (TypeError, ValueError):
+                        _gcid = 0
+                    # 带 cid = 群级保存（只存与该群全局默认不同的项）；不带 = 原来的全局保存
+                    applied = save_group_settings(_gcid, cfg) if _gcid else save_settings(cfg)
                     skipped = [k for k in cfg if k not in applied]
-                    self._redirect(f"/page/{group}?saved=1" + ("&bad=1" if skipped else ""))
+                    self._redirect(f"/page/{group}?saved=1" + (f"&cid={_gcid}" if _gcid else "")
+                                   + ("&bad=1" if skipped else ""))
                     return
                 self._send(404, b"not found", [("Content-Type", "text/plain")])
 
@@ -13884,7 +14240,7 @@ async def auto_backup(context):
     无持久磁盘的平台容器重启会清空磁盘，有这份备份就能用 /restore 恢复，
     最坏只丢一个备份周期（30 分钟）的积分变动。
     """
-    if not BACKUP_ENABLED:  # 后台「定时任务」开关：关了就不备份，保存即时生效
+    if not sget("BACKUP_ENABLED"):  # 后台「定时任务」开关：关了就不备份，保存即时生效
         return
     if not backup_admins: backup_admins.add(ADMIN_USER_ID)
     try:
@@ -14021,8 +14377,8 @@ def main():
 
     # 云端持久化：每 24 小时自动把数据备份发给管理员，容器重启可用 /restore 恢复
     if getattr(app, "job_queue", None) is not None:
-        app.job_queue.run_repeating(auto_backup, interval=max(1, int(BACKUP_INTERVAL_HOURS)) * 3600, first=60)
-        logger.info("自动备份任务已注册：每 %s 小时一次", BACKUP_INTERVAL_HOURS)
+        app.job_queue.run_repeating(auto_backup, interval=max(1, int(sget("BACKUP_INTERVAL_HOURS"))) * 3600, first=60)
+        logger.info("自动备份任务已注册：每 %s 小时一次", sget("BACKUP_INTERVAL_HOURS"))
         # 群管中心：入群验证超时巡检（60s）+ 观察期到期巡检（10 分钟）
         app.job_queue.run_repeating(join_verify_sweep, interval=60, first=90)
         app.job_queue.run_repeating(observe_check_sweep, interval=600, first=180)

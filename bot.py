@@ -1,5 +1,6 @@
 import asyncio
 import html
+import io
 import json
 import logging
 import math
@@ -162,7 +163,6 @@ SUBPAGES = {
         ("blacklist", "拉黑管理"),
         ("god",       "赌神称号"),
         ("seasonpts", "排位分调整"),
-        ("orders",    "商城订单"),
         ("fundflow",  "资金流审查"),
     ],
 }
@@ -238,6 +238,10 @@ SETTINGS_FIELDS = [
     ("backup_enabled",          "BACKUP_ENABLED",          "自动备份开关(保存即时生效)", "bool",  0,   1,       "schedule"),
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
     ("admin_report_enabled",    "ADMIN_REPORT_ENABLED",    "经营日报推送开关",          "bool",  0,   1,       "schedule"),
+    ("sep_announce",            None, "📣 定时群公告（每天定点推送到全部授权群）", "sep", 0, 0, "schedule"),
+    ("announce_enabled",        "ANNOUNCE_ENABLED",        "定时群公告开关",            "bool",  0,   1,       "schedule"),
+    ("announce_time",           "ANNOUNCE_TIME",           "公告推送时间(时:分,北京时间)", "short", 0, 0,     "schedule"),
+    ("announce_text",           "ANNOUNCE_TEXT",           "公告内容(支持 {date}=当天日期)", "text", 0, 0,   "schedule"),
     ("sep_ad_botmsg",           None,                       "① 机器人自身消息自动回收(秒,0=不删)", "sep", 0, 0, "autodel"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "你发的命令消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
@@ -267,9 +271,15 @@ SETTINGS_FIELDS = [
     ("sep_mod_verify",        None, "① 入群验证（新人点按钮才放行）", "sep", 0, 0, "mod"),
     ("join_verify_enabled",   "JOIN_VERIFY_ENABLED",   "入群验证开关",            "bool", 0, 1, "mod"),
     ("join_verify_seconds",   "JOIN_VERIFY_SECONDS",   "验证超时(秒)",            "int",  10, 3600, "mod"),
-    ("join_verify_action",    "JOIN_VERIFY_ACTION",    "超时处理(0=只提醒 1=禁言 2=踢出)", "int", 0, 2, "mod"),
+    ("join_verify_action",    "JOIN_VERIFY_ACTION",    "超时处理(0=只提醒 1=禁言 2=踢出 3=封禁)", "int", 0, 3, "mod"),
+    ("join_verify_mode",      "JOIN_VERIFY_MODE",      "验证方式(0=点按钮 1=图片算术)", "int", 0, 1, "mod"),
+    ("join_verify_max_wrong", "JOIN_VERIFY_MAX_WRONG", "图片算术答错N次按超时档处理(0=不限)", "int", 0, 20, "mod"),
     ("join_verify_msg",       "JOIN_VERIFY_MSG",       "验证提示({name} {seconds})", "text", 0, 0, "mod"),
     ("join_verify_ok_msg",    "JOIN_VERIFY_OK_MSG",    "验证通过提示({name})",    "text", 0, 0, "mod"),
+    ("sep_mod_gate",          None, "④ 进群硬门槛（不满足直接移出，不进验证流程）", "sep", 0, 0, "mod"),
+    ("join_gate_username",    "JOIN_GATE_USERNAME",    "须有用户名",              "bool", 0, 1, "mod"),
+    ("join_gate_premium",     "JOIN_GATE_PREMIUM",     "须 Telegram Premium",     "bool", 0, 1, "mod"),
+    ("join_gate_bio",         "JOIN_GATE_BIO",         "须有简介(需查API，失败放行)", "bool", 0, 1, "mod"),
     ("sep_mod_word",          None, "② 敏感词与域名白名单", "sep", 0, 0, "mod"),
     ("sensitive_enabled",     "SENSITIVE_ENABLED",     "敏感词过滤开关",          "bool", 0, 1, "mod"),
     ("sensitive_words",       "SENSITIVE_WORDS",       "敏感词(逗号分隔；/正则/ 形式支持正则)", "names", 0, 0, "mod"),
@@ -282,6 +292,16 @@ SETTINGS_FIELDS = [
     ("observe_check_msgs",    "OBSERVE_CHECK_MSGS",    "发言少于N条视为不活跃",   "int",  0, 1000, "mod"),
     ("observe_check_avatar",  "OBSERVE_CHECK_AVATAR",  "无头像也算不活跃(查API，仅零发言者)", "bool", 0, 1, "mod"),
     ("observe_check_action",  "OBSERVE_CHECK_ACTION",  "处理方式(0=提醒管理员 1=禁言 2=踢出)", "int", 0, 2, "mod"),
+    ("sep_mod_lurker",        None, "⑤ 潜水号清理（老成员长期不冒泡）", "sep", 0, 0, "mod"),
+    ("lurker_enabled",        "LURKER_ENABLED",        "潜水清理开关",            "bool", 0, 1, "mod"),
+    ("lurker_days",           "LURKER_DAYS",           "入群超过N天才纳入扫描",    "int",  1, 365, "mod"),
+    ("lurker_msgs",           "LURKER_MSGS",           "累计发言少于N条视为潜水",  "int",  0, 1000, "mod"),
+    ("lurker_action",         "LURKER_ACTION",         "处理方式(0=提醒管理员 1=禁言 2=踢出)", "int", 0, 2, "mod"),
+    ("sep_mod_raid",          None, "⑥ 防突袭（短时间大量进群自动人墙）", "sep", 0, 0, "mod"),
+    ("raid_enabled",          "RAID_ENABLED",          "防突袭开关",              "bool", 0, 1, "mod"),
+    ("raid_window",           "RAID_WINDOW",           "检测窗口(秒)",            "int",  10, 600, "mod"),
+    ("raid_threshold",        "RAID_THRESHOLD",        "窗口内N人进群视为突袭",    "int",  3, 50, "mod"),
+    ("raid_cooldown",         "RAID_COOLDOWN",         "人墙持续秒数(到期自动解除)", "int", 60, 86400, "mod"),
     ("welcome_enabled",         "WELCOME_ENABLED",         "入群欢迎开关",              "bool",  0,   1,       "members/join"),
     ("welcome_tpl",             "WELCOME_TPL",             "入群欢迎消息(支持 {name} {group} {id})", "text", 0, 0, "members/join"),
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
@@ -472,6 +492,11 @@ JOIN_VERIFY_SECONDS = 120   # 验证超时（秒）
 JOIN_VERIFY_ACTION = 0      # 超时处理：0=只提醒 1=禁言 2=踢出
 JOIN_VERIFY_MSG = "👋 {name} 欢迎进群！请在 {seconds} 秒内点下方按钮完成验证，超时将按群规处理。"
 JOIN_VERIFY_OK_MSG = "✅ {name} 验证通过，已解除限制，畅聊吧！"
+JOIN_VERIFY_MODE = 0       # 验证方式：0=点按钮 1=图片算术验证码（直接回复数字答案；未装 Pillow 自动降级文本算式）
+JOIN_VERIFY_MAX_WRONG = 0  # 图片算术答错 N 次按超时档处理（0=不限次数）
+JOIN_GATE_USERNAME = 0     # 进群硬门槛：须有用户名（不满足直接移出，不进验证流程）
+JOIN_GATE_PREMIUM = 0      # 进群硬门槛：须 Telegram Premium
+JOIN_GATE_BIO = 0          # 进群硬门槛：须有简介（需额外查 API；查询失败宁放过不误杀）
 SENSITIVE_ENABLED = 0       # 敏感词过滤
 SENSITIVE_WORDS = []        # 敏感词表（明文子串，或 /正则/ 形式）
 SENSITIVE_ACTION = 0        # 命中处理：0=删除 1=删除+禁言 2=删除+踢出
@@ -482,8 +507,23 @@ OBSERVE_CHECK_ENABLED = 0   # 观察期到期巡检
 OBSERVE_CHECK_MSGS = 1      # 到期时本群发言少于 N 条视为不活跃
 OBSERVE_CHECK_AVATAR = 0    # 无头像也算不活跃（需额外 API 查询，仅在发言为 0 时才查）
 OBSERVE_CHECK_ACTION = 0    # 0=私聊提醒管理员 1=禁言 2=踢出
-join_verify_pending = {}    # "cid:uid" -> {"ts":秒级时间戳, "msg_id":验证消息ID}
+join_verify_pending = {}    # "cid:uid" -> {"ts":秒级时间戳, "msg_id":验证消息ID, "mode":0/1, "a","b","wrong"}
 observe_checked = set()     # 已完成观察期复核的 "cid:uid"（防重复处理）
+LURKER_ENABLED = 0          # 潜水号清理：入群超 N 天且累计发言不足 → 按档处理
+LURKER_DAYS = 30            # 入群超过 N 天才纳入扫描
+LURKER_MSGS = 5             # 累计发言少于 N 条视为潜水
+LURKER_ACTION = 0           # 0=私聊提醒管理员 1=禁言 2=踢出
+lurker_checked = set()      # 已处理/已豁免的 "cid:uid"（防重复骚扰）
+RAID_ENABLED = 0            # 防突袭：短时间大量进群 → 临时人墙（新人强制走验证禁言）
+RAID_WINDOW = 60            # 检测窗口（秒）
+RAID_THRESHOLD = 5          # 窗口内 N 人进群视为突袭
+RAID_COOLDOWN = 600         # 人墙持续秒数，到期自动解除
+raid_joins = {}             # cid -> [进群时间戳,...]（滑动窗口，重启清零即可）
+raid_until = {}             # cid -> 人墙解除时间戳
+ANNOUNCE_ENABLED = 0        # 定时群公告：每天到点向全部授权群推一条
+ANNOUNCE_TIME = "09:00"     # 推送时间（时:分，北京时间）
+ANNOUNCE_TEXT = ""          # 公告内容（支持 {date}=当天日期）
+announce_last_date = ""     # 当天已发标记（YYYY-MM-DD，重启不重发）
 # ---------- 邀请系统 ----------
 INVITE_ENABLED = 1          # 邀请系统总开关
 INVITE_NOTIFY = 1           # 邀请成功私聊通知邀请人开关
@@ -1332,6 +1372,8 @@ def force_save_now():
                 "invite_confirmed": {k: int(v) for k, v in invite_confirmed.items()},  # deep-link/主动问 锁定的归因
                 "join_verify_pending": {k: dict(v) for k, v in join_verify_pending.items() if isinstance(v, dict)},
                 "observe_checked": sorted(observe_checked),
+                "lurker_checked": sorted(lurker_checked),
+                "announce_last_date": announce_last_date,
                 "invite_debug": {str(cid): list(v) for cid, v in invite_debug.items()},
                 "invite_links": {str(cid): {str(uid): dict(v) for uid, v in users.items()}
                                  for cid, users in invite_links.items()},
@@ -1543,6 +1585,9 @@ def load_data():
         for k, v in (data.get("join_verify_pending", {}) or {}).items():   # 入群验证待处理（重启不丢）
             if isinstance(v, dict): join_verify_pending[str(k)] = dict(v)
         observe_checked.update(str(x) for x in (data.get("observe_checked", []) or []))
+        lurker_checked.update(str(x) for x in (data.get("lurker_checked", []) or []))
+        global announce_last_date
+        announce_last_date = str(data.get("announce_last_date", "") or "")   # 重启同天不重发公告
         invite_debug.clear()
         for cid, lst in data.get("invite_debug", {}).items():
             invite_debug[int(cid)] = list(lst)[-10:]
@@ -6001,29 +6046,141 @@ async def _mod_punish(context, cid, uid, action, mute_seconds, name, reason):
         elif action == 2:
             await context.bot.ban_chat_member(cid, uid)
             await context.bot.unban_chat_member(cid, uid)
+        elif action == 3:
+            await context.bot.ban_chat_member(cid, uid)   # 封禁：只 ban 不解封
     except Exception:
         logger.exception("群管处罚失败 cid=%s uid=%s action=%s（已吞并）", cid, uid, action)
 
-async def _join_verify_start(context, cid, uid, name):
-    """入群验证：先限制发言 → 发「点按钮验证」消息 → 登记待验证（超时由巡检兜底）。"""
-    key = f"{cid}:{uid}"
+def _captcha_render(a, b):
+    """画一张 a+b 算术验证码 PNG（带噪点/干扰线）；未装 Pillow 返回 None（调用方降级为文本算式）。"""
     try:
-        await context.bot.restrict_chat_member(
-            cid, uid, permissions=ChatPermissions(can_send_messages=False))
+        from PIL import Image, ImageDraw, ImageFont
     except Exception:
-        logger.exception("入群验证：限制发言失败 cid=%s uid=%s（继续发验证消息）", cid, uid)
+        return None
+    try:
+        img = Image.new("RGB", (340, 120), (246, 247, 251))
+        d = ImageDraw.Draw(img)
+        for _ in range(80):   # 噪点：防机器直读像素
+            x, y = random.randint(0, 339), random.randint(0, 119)
+            g = random.randint(140, 210)
+            d.point((x, y), fill=(g, g, min(255, g + 20)))
+        for _ in range(3):    # 干扰线
+            x1, y1 = random.randint(0, 339), random.randint(0, 119)
+            x2, y2 = random.randint(0, 339), random.randint(0, 119)
+            d.line((x1, y1, x2, y2), fill=(185, 185, 205), width=1)
+        font = None
+        for fp in ("arial.ttf", "DejaVuSans.ttf"):
+            try:
+                font = ImageFont.truetype(fp, 52); break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        d.text((26, 30), f"{a} + {b} = ?", fill=(28, 28, 58), font=font)
+        bio = io.BytesIO()
+        img.save(bio, "PNG")
+        return bio.getvalue()
+    except Exception:
+        logger.exception("验证码图片生成失败（降级文本算式）")
+        return None
+
+async def _join_verify_start(context, cid, uid, name):
+    """入群验证：mode=0 先限制发言 → 点按钮解锁；mode=1 不限制（否则没法回复答案），
+    答题期间发言全部被 _join_verify_handle_text 消费，答对/超时由巡检兜底。"""
+    key = f"{cid}:{uid}"
+    if int(JOIN_VERIFY_MODE) != 1:
+        try:
+            await context.bot.restrict_chat_member(
+                cid, uid, permissions=ChatPermissions(can_send_messages=False))
+        except Exception:
+            logger.exception("入群验证：限制发言失败 cid=%s uid=%s（继续发验证消息）", cid, uid)
     txt = (str(JOIN_VERIFY_MSG).replace("{name}", html.escape(str(name)))
            .replace("{seconds}", str(int(JOIN_VERIFY_SECONDS))))
-    mid = 0
+    mid, png, a, b = 0, None, 0, 0
+    if int(JOIN_VERIFY_MODE) == 1:
+        a, b = random.randint(2, 9), random.randint(2, 9)
+        png = _captcha_render(a, b)
+        txt += "\n\n🧮 验证问题：" + (f"看图作答（{a} + {b} = ?）" if png is None else "请直接回复图中算式的结果（只发数字）")
     try:
-        msg = await context.bot.send_message(
-            cid, txt,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                "✅ 点击完成验证", callback_data=f"jv_{cid}_{uid}")]]))
+        if png is not None:
+            msg = await context.bot.send_photo(cid, photo=png, caption=txt)
+        else:
+            msg = await context.bot.send_message(cid, txt, reply_markup=None if int(JOIN_VERIFY_MODE) == 1 else
+                                                 InlineKeyboardMarkup([[InlineKeyboardButton(
+                                                     "✅ 点击完成验证", callback_data=f"jv_{cid}_{uid}")]]))
         mid = getattr(msg, "message_id", 0) or 0
     except Exception:
         logger.exception("入群验证：发送验证消息失败 cid=%s uid=%s", cid, uid)
-    join_verify_pending[key] = {"ts": time.time(), "msg_id": mid, "name": str(name)}
+    rec = {"ts": time.time(), "msg_id": mid, "name": str(name)}
+    if int(JOIN_VERIFY_MODE) == 1:
+        rec.update({"mode": 1, "a": a, "b": b, "wrong": 0})
+    join_verify_pending[key] = rec
+
+async def _join_verify_handle_text(context, cid, uid, text):
+    """入群验证（图片算术）：待验证成员的发言优先当答案处理。返回 True=消息已消费，不再进命令/游戏逻辑。"""
+    rec = join_verify_pending.get(f"{cid}:{uid}")
+    if not rec or int(rec.get("mode", 0) or 0) != 1:
+        return False
+    name = str(rec.get("name") or f"用户{uid}")
+    ans = str(text or "").strip()
+    if ans.isdigit() and int(ans) == int(rec.get("a", 0)) + int(rec.get("b", 0)):
+        await _join_verify_pass(context, cid, uid, name, int(rec.get("msg_id", 0) or 0))
+        return True
+    rec["wrong"] = int(rec.get("wrong", 0) or 0) + 1
+    if int(JOIN_VERIFY_MAX_WRONG) > 0 and rec["wrong"] >= int(JOIN_VERIFY_MAX_WRONG):
+        join_verify_pending.pop(f"{cid}:{uid}", None)
+        if JOIN_VERIFY_ACTION == 0:
+            try:
+                await context.bot.send_message(
+                    cid, f"❌ {html.escape(name)} 答错 {rec['wrong']} 次未通过验证，请管理员留意。")
+            except Exception:
+                pass
+        else:
+            await _mod_punish(context, cid, uid, JOIN_VERIFY_ACTION, SENSITIVE_MUTE_SECONDS, name, "验证答错超限")
+            try:
+                await context.bot.send_message(
+                    cid, f"❌ {html.escape(name)} 验证答错超限，已"
+                         f"{'禁言' if JOIN_VERIFY_ACTION == 1 else '移出群' if JOIN_VERIFY_ACTION == 2 else '封禁'}。")
+            except Exception:
+                pass
+    else:
+        try:
+            await context.bot.send_message(cid, f"❌ 答案不对，请再试一次（已错 {rec['wrong']} 次）。")
+        except Exception:
+            pass
+    return True
+
+async def _join_gate_check(context, cid, member, name):
+    """进群硬门槛：用户名 / Premium / 简介，任一不满足 → 直接移出（不进验证流程）。全关或放行返回 True。"""
+    if not (JOIN_GATE_USERNAME or JOIN_GATE_PREMIUM or JOIN_GATE_BIO):
+        return True
+    reasons = []
+    if JOIN_GATE_USERNAME and not getattr(member, "username", None):
+        reasons.append("无用户名")
+    if JOIN_GATE_PREMIUM and not getattr(member, "is_premium", False):
+        reasons.append("非Premium")
+    if JOIN_GATE_BIO:
+        bio_ok = None   # None=查询失败（不拦，宁放过不误杀） True=有简介 False=无简介
+        try:
+            ch = await context.bot.get_chat(member.id)
+            bio_ok = bool(str(getattr(ch, "bio", "") or "").strip())
+        except Exception:
+            logger.exception("进群门槛：查简介失败 uid=%s（宁放过不误杀）", member.id)
+        if bio_ok is False:
+            reasons.append("无简介")
+    if not reasons:
+        return True
+    try:
+        await context.bot.ban_chat_member(cid, member.id)
+        await context.bot.unban_chat_member(cid, member.id)   # 踢出（可自行再进，先过门槛再说）
+    except Exception:
+        logger.exception("进群门槛踢出失败 cid=%s uid=%s", cid, member.id)
+    try:
+        await context.bot.send_message(
+            cid, f"🚪 {html.escape(str(name))} 未满足进群要求（{'、'.join(reasons)}），已移出。")
+    except Exception:
+        pass
+    return False
 
 async def _join_verify_pass(context, cid, uid, name, msg_id=0):
     """验证通过：解除限制 → 删掉验证消息 → 发通过提示。"""
@@ -6048,9 +6205,17 @@ async def _join_verify_pass(context, cid, uid, name, msg_id=0):
         pass
 
 async def join_verify_sweep(context):
-    """入群验证超时巡检（每 60 秒）：超时未点按钮 → 按配置提醒/禁言/踢出，并清掉验证消息。"""
-    if not JOIN_VERIFY_ENABLED:
-        return
+    """入群验证超时巡检（每 60 秒）：超时未通过 → 按配置提醒/禁言/踢出/封禁，并清掉验证消息。
+
+    不因 JOIN_VERIFY_ENABLED=0 早退：突袭人墙期间强制登记的待验证（以及关开关瞬间的存量）
+    也要正常结算，否则人被永久禁言。新登记入口才受开关控制。
+    """
+    if RAID_ENABLED:   # 防突袭：人墙到期自动解除
+        for _cid in list(raid_until):
+            try:
+                await _raid_recover(context, _cid)
+            except Exception:
+                logger.exception("防突袭恢复检查异常（已吞并）")
     now = time.time()
     for key in list(join_verify_pending):
         rec = join_verify_pending.get(key) or {}
@@ -6081,6 +6246,124 @@ async def join_verify_sweep(context):
                 await context.bot.delete_message(cid, int(rec["msg_id"]))
             except Exception:
                 pass
+
+def _raid_active(cid):
+    """突袭人墙是否生效中（人墙期间新人一律强制走验证禁言流程）。"""
+    return bool(RAID_ENABLED) and float(raid_until.get(cid, 0) or 0) > time.time()
+
+async def _raid_recover(context, cid):
+    """人墙到期自动解除（有人进群/巡检触发时惰性检查）。"""
+    until = float(raid_until.get(cid, 0) or 0)
+    if until and time.time() >= until:
+        raid_until.pop(cid, None)
+        try:
+            await context.bot.send_message(cid, "✅ 突袭警戒解除，入群恢复正常。")
+        except Exception:
+            pass
+
+async def _raid_on_join(context, cid):
+    """防突袭：滑窗计数进群人数；超阈值 → 临时人墙（期间新人强制验证禁言），到期自动解除。"""
+    if not RAID_ENABLED:
+        return
+    try:
+        await _raid_recover(context, cid)
+    except Exception:
+        logger.exception("防突袭恢复检查异常（已吞并）")
+    now = time.time()
+    arr = [t for t in raid_joins.get(cid, []) if now - float(t) < int(RAID_WINDOW)]
+    arr.append(now)
+    raid_joins[cid] = arr[-300:]
+    if len(arr) >= max(2, int(RAID_THRESHOLD)) and not raid_until.get(cid):
+        raid_until[cid] = now + max(60, int(RAID_COOLDOWN))
+        try:
+            await context.bot.send_message(
+                cid, f"🚨 检测到疑似突袭（{int(RAID_WINDOW)} 秒内 {len(arr)} 人进群），"
+                     f"已临时开启人墙：新人进群需先完成验证，{int(RAID_COOLDOWN)} 秒后自动恢复。")
+        except Exception:
+            pass
+        try:
+            await context.bot.send_message(
+                ADMIN_USER_ID, f"🚨 防突袭：群 <code>{cid}</code> {int(RAID_WINDOW)} 秒内 {len(arr)} 人进群，已临时人墙。")
+        except Exception:
+            pass
+
+async def lurker_sweep(context):
+    """潜水号清理（每 6 小时）：入群超 LURKER_DAYS 天且累计发言少于 LURKER_MSGS 条 → 按档处理。
+
+    处理过/已豁免的人记 lurker_checked 不反复骚扰；管理员豁免。
+    """
+    if not LURKER_ENABLED:
+        return
+    for cid, joined in list(member_joined_at.items()):
+        hits = []
+        for uid, jt in list(joined.items()):
+            key = f"{cid}:{uid}"
+            if key in lurker_checked:
+                continue
+            if not jt or time.time() - float(jt) < max(1, int(LURKER_DAYS)) * 86400:
+                continue
+            lurker_checked.add(key)   # 不论结果只处理一次（活跃者以后也不会变潜水：发言数只增不减）
+            if is_bot_admin(uid):
+                continue
+            prof = member_profiles.get(cid, {}).get(uid, {}) or {}
+            if int(prof.get("msgs", 0) or 0) >= int(LURKER_MSGS):
+                continue
+            hits.append((uid, str(prof.get("name") or f"用户{uid}")))
+        if not hits:
+            continue
+        if LURKER_ACTION == 0:
+            try:
+                await context.bot.send_message(
+                    ADMIN_USER_ID,
+                    f"💤 潜水巡查：群 <code>{cid}</code> 发现 {len(hits)} 个潜水号"
+                    f"（入群超 {int(LURKER_DAYS)} 天、发言少于 {int(LURKER_MSGS)} 条）：\n"
+                    + "\n".join(f"· {html.escape(nm)}（{u_}）" for u_, nm in hits[:20])
+                    + "\n可在「群管中心」改为自动禁言/踢出。")
+            except Exception:
+                pass
+        else:
+            for u_, nm in hits:
+                await _mod_punish(context, cid, u_, LURKER_ACTION, SENSITIVE_MUTE_SECONDS, nm, "潜水清理")
+            try:
+                await context.bot.send_message(
+                    ADMIN_USER_ID,
+                    f"💤 潜水巡查：群 <code>{cid}</code> 已按配置"
+                    f"{'禁言' if LURKER_ACTION == 1 else '踢出'} {len(hits)} 个潜水号。")
+            except Exception:
+                pass
+
+async def announce_sweep(context):
+    """定时群公告（每 60 秒）：北京时间到 ANNOUNCE_TIME 后向全部授权群推一条，一天只发一次。"""
+    if not ANNOUNCE_ENABLED:
+        return
+    global announce_last_date
+    try:
+        hh, mm = (int(x) for x in str(ANNOUNCE_TIME).strip().split(":")[:2])
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return
+    except Exception:
+        return
+    now = now_bj()
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if now < target or announce_last_date == now.strftime("%Y-%m-%d"):
+        return
+    txt = str(ANNOUNCE_TEXT or "").strip()
+    if not txt:
+        return
+    announce_last_date = now.strftime("%Y-%m-%d")   # 先记再发：丢一条公告好过刷屏重发
+    save_data()
+    n = 0
+    for cid in sorted(AUTHORIZED_GROUPS):
+        try:
+            await context.bot.send_message(cid, txt.replace("{date}", announce_last_date))
+            n += 1
+        except Exception:
+            logger.exception("定时公告推送失败 cid=%s", cid)
+    try:
+        await context.bot.send_message(
+            ADMIN_USER_ID, f"📣 定时群公告已推送到 {n}/{len(AUTHORIZED_GROUPS)} 个群。")
+    except Exception:
+        pass
 
 async def observe_check_sweep(context):
     """观察期到期巡检：观察期走完的人复核一次，发言不达标（可选：无头像）→ 提醒/禁言/踢出。
@@ -6157,6 +6440,12 @@ async def on_text(update, context):
             _remember_name(update)
         except Exception:
             return
+        # 入群验证（图片算术）：待验证者发言优先当答案处理，不进命令/游戏逻辑
+        try:
+            if await _join_verify_handle_text(context, cid, user.id, text):
+                return
+        except Exception:
+            logger.exception("入群验证答题处理异常（已吞并）")
 
         # 拉黑拦截：被封禁用户（非管理员）禁止使用全部功能，连帮助都看不到
         if update.effective_user.id in BLACKLISTED_USERS and not is_bot_admin(update.effective_user.id):
@@ -8451,10 +8740,13 @@ async def on_new_members_msg(update, context):
             name = member.first_name or f"用户{uid}"
             _inv_dbg(message.chat_id, f"服务消息进群 uid={uid}（new_chat_members 兜底）")
             await _invite_track_join(message, cid, uid, name, context)
-            if JOIN_VERIFY_ENABLED and not member.is_bot and not is_bot_admin(uid) \
-                    and f"{cid}:{uid}" not in join_verify_pending:
-                member_joined_at[cid][uid] = time.time()   # 普通群无 chat_member 事件，这里补观察期起点
-                await _join_verify_start(context, cid, uid, name)
+            _gate_ok = True
+            if not member.is_bot and not is_bot_admin(uid):
+                _gate_ok = await _join_gate_check(context, cid, member, name)    # 硬门槛：不满足直接移出
+                await _raid_on_join(context, cid)                                # 防突袭计数
+                if _gate_ok and (JOIN_VERIFY_ENABLED or _raid_active(cid)):
+                    member_joined_at[cid][uid] = time.time()   # 普通群无 chat_member 事件，这里补观察期起点
+                    await _join_verify_start(context, cid, uid, name)
     except Exception:
         logger.exception("message 入群事件处理异常（已吞并）")
 
@@ -8516,8 +8808,12 @@ async def on_member_event(update, context):
             member_joined_at[cid][uid] = time.time()  # 观察期起点
             _inv_dbg(cid, f"chat_member 进群事件 uid={uid}，事件链接：{(getattr(getattr(cmu, 'invite_link', None), 'link', '') or '（无）')}")
             await _invite_track_join(cmu, cid, uid, name, context)  # 邀请系统追踪（内部自吞异常）
-            if JOIN_VERIFY_ENABLED and not new.user.is_bot and not is_bot_admin(uid):
-                await _join_verify_start(context, cid, uid, name)   # 入群验证（默认关）
+            _gate_ok = True
+            if not new.user.is_bot and not is_bot_admin(uid):
+                _gate_ok = await _join_gate_check(context, cid, new.user, name)  # 硬门槛：不满足直接移出
+                await _raid_on_join(context, cid)                                # 防突袭计数
+                if _gate_ok and (JOIN_VERIFY_ENABLED or _raid_active(cid)):
+                    await _join_verify_start(context, cid, uid, name)            # 入群验证（默认关/突袭期强制）
             if WELCOME_ENABLED:
                 try:
                     text = WELCOME_TPL.replace("{name}", name).replace("{group}", getattr(cmu.chat, "title", "") or "").replace("{id}", str(uid))
@@ -9770,12 +10066,7 @@ def start_health_server():
 
         def _login_page(err=""):
             msg = "<div class='err'>密码错误，请重试</div>" if err else ""
-            # 仍是出厂默认密码 = 任何人猜到域名就能进后台，必须显著警告（但不阻断，避免把自己锁在门外）
-            # ⚠️ 绝不在页面上显示密码本身（用户多次要求）：知道值的人会更easy进，不知道的人也不需要知道
-            if _pwd_ok(WEB_DEFAULT_PASSWORD):
-                msg += ("<div class='err' style='text-align:left;line-height:1.6'>⚠️ <b>当前仍是初始默认密码</b>"
-                        "，任何知道后台地址的人都能直接登录并操作积分/数据，请立刻在「安全设置」里修改"
-                        "（至少 8 位，字母+数字）。</div>")
+            # 用户要求：登录页不放任何默认密码提示（安全红线不变：也绝不显示密码本体）
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     "<title>登录 - 机器人后台</title><style>"
@@ -10250,15 +10541,6 @@ def start_health_server():
                               "<input type='hidden' name='group' value='admin/fundflow'>"
                               + _field_rows("admin/fundflow") +
                               "<button type='submit' style='margin-top:10px'>💾 保存阈值</button></form></div>")
-                elif sub == "orders":
-                    rows = "".join(f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{html.escape(str(o.get('name', '')))}</td>"
-                                   f"<td>{html.escape(str(o.get('item', '')))}</td><td>{o.get('price', 0)}</td>"
-                                   f"<td><code>{o.get('cid', '')}</code></td></tr>"
-                                   for o in reversed(mall_orders[-50:]))
-                    body = (f"<h1>{gicon} 商城订单（最近 50）</h1>"
-                            f"<div class='sub'>玩家下单记录；发货请线下完成</div>{msg}"
-                            "<div class='card'><table class='tbl'><tr><th>时间</th><th>玩家</th><th>商品</th><th>价格</th><th>群</th></tr>"
-                            + (rows or "<tr><td colspan='5'>暂无订单</td></tr>") + "</table></div>")
                 else:
                     first = SUBPAGES["admin"][0][0]
                     if first == sub:
@@ -10299,9 +10581,7 @@ def start_health_server():
                         "<textarea name='tg_menu' rows='14' style='width:100%;font-family:inherit'>" + html.escape(menu_txt) + "</textarea>"
                         "<button type='submit' style='margin-top:12px'>💾 保存全部命令设置</button></form></div>")
             elif gkey == "security":
-                is_default = _pwd_ok(WEB_DEFAULT_PASSWORD)
-                warn = "<div class='err'>⚠️ 当前还在用初始密码，建议立即修改（至少4位）</div>" if is_default else ""
-                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码</div>{msg}{warn}"
+                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码</div>{msg}"
                         "<form method='post' action='/save'>"
                         "<input type='hidden' name='group' value='security'>"
                         "<label>新密码（至少4位）<input type='password' name='new_password'></label>"
@@ -10819,7 +11099,11 @@ def start_health_server():
                 if gkey == "mod":
                     _mod_on = [n for k, n in (("JOIN_VERIFY_ENABLED", "入群验证"), ("SENSITIVE_ENABLED", "敏感词"),
                                               ("LINK_WHITELIST_ENABLED", "域名白名单"),
-                                              ("OBSERVE_CHECK_ENABLED", "观察期巡检")) if globals().get(k)]
+                                              ("OBSERVE_CHECK_ENABLED", "观察期巡检"),
+                                              ("LURKER_ENABLED", "潜水清理"), ("RAID_ENABLED", "防突袭"),
+                                              ("JOIN_GATE_USERNAME", "门槛·用户名"),
+                                              ("JOIN_GATE_PREMIUM", "门槛·Premium"),
+                                              ("JOIN_GATE_BIO", "门槛·简介")) if globals().get(k)]
                     _mod_txt = ("、".join(_mod_on) + " 已开启") if _mod_on else \
                         "以下功能全部默认关闭，打开开关即生效；不想用了关掉开关即可，互不影响"
                     form_open = ("<div class='card' style='border-color:#3a3b5a'>"
@@ -10871,7 +11155,7 @@ def start_health_server():
                     _rows = ""
                     for _name, _on in (("每日重置", DAILY_RESET_ENABLED), ("德州日榜推送", LEADERBOARD_ENABLED),
                                        ("赛车自动开赛", RACE_AUTO_ENABLED), ("自动备份", BACKUP_ENABLED),
-                                       ("经营日报推送", ADMIN_REPORT_ENABLED)):
+                                       ("经营日报推送", ADMIN_REPORT_ENABLED), ("定时群公告", ANNOUNCE_ENABLED)):
                         _rows += ("<div style='display:flex;justify-content:space-between;padding:7px 2px;"
                                   "border-bottom:1px solid #26273a'><span>" + _name + "</span>" + _badge(_on) + "</div>")
                     # 整点赛车每群推送明细：一眼看出哪个群没收到 + 网页直接开关每群
@@ -11801,7 +12085,9 @@ def main():
         # 群管中心：入群验证超时巡检（60s）+ 观察期到期巡检（10 分钟）
         app.job_queue.run_repeating(join_verify_sweep, interval=60, first=90)
         app.job_queue.run_repeating(observe_check_sweep, interval=600, first=180)
-        logger.info("群管巡检任务已注册：入群验证超时(60s) / 观察期到期(10min)")
+        app.job_queue.run_repeating(announce_sweep, interval=60, first=30)      # 定时群公告（每分钟对表，一天一次）
+        app.job_queue.run_repeating(lurker_sweep, interval=6 * 3600, first=600)  # 潜水号清理（每 6 小时）
+        logger.info("群管巡检任务已注册：入群验证超时(60s) / 观察期到期(10min) / 定时公告(60s) / 潜水清理(6h)")
     else:
         logger.warning("JobQueue 不可用，自动备份未启用（需安装 python-telegram-bot[job-queue]）")
 

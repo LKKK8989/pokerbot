@@ -216,3 +216,27 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ============================================================
+# 本项目专属：运行时数据 / 凭据 / 备份，严禁提交（仓库是公开的）
+# ============================================================
+# 玩家数据与设置（含积分、聊天记录、密码哈希、管理员名单）
+bot_data.json
+bot_data.json.bak
+bot_data.json.tmp
+bot_settings.json
+bot_settings.json.tmp
+# 数据目录（平台挂载 Volume 时 DATA_FILE 会落到这里）
+/data/
+# 备份与临时文件
+*.bak
+*.tmp
+# 导出文件（经营报表等）
+*.xlsx
+# 日志
+*.log
+# 本地环境
+.venv/
+venv/
+__pycache__/
+*.pyc

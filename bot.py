@@ -1716,6 +1716,23 @@ def _remember_name(update):
         chat_name_cache[c.id] = c.title
 
 
+async def _warm_group_names(app):
+    """启动群名预热：把全部授权群的标题拉进 chat_name_cache。
+
+    没有这步时，新部署/没来过消息的群在网页上全是裸群ID或 ?（用户点名要求补群名）。
+    单群失败（bot 已不在该群等）只警告不炸，不影响其他群。
+    """
+    for cid in list(AUTHORIZED_GROUPS):
+        if cid in chat_name_cache:
+            continue
+        try:
+            ch = await app.bot.get_chat(cid)
+            if getattr(ch, "title", None):
+                chat_name_cache[cid] = ch.title
+        except Exception:
+            logger.warning("群名预热失败 cid=%s（bot 可能已不在该群）", cid)
+
+
 async def get_name(app, uid, with_title=True, cid=None):
     """解析玩家展示名。
 
@@ -5124,6 +5141,8 @@ async def cmd_sq(update, context):
         return
     cid = update.effective_chat.id
     AUTHORIZED_GROUPS.add(cid); save_data()
+    if update.effective_chat.title:
+        chat_name_cache[cid] = update.effective_chat.title   # 当场缓存群名，后台不再显示裸 ID
     await send_reply(update, context, f"✅ 当前群已授权：{cid}")
 
 async def cmd_qxshouquan(update, context):
@@ -8189,7 +8208,7 @@ async def cmd_buy_points(update, context):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ 确认到账", callback_data=f"buyok_{oid}"),
                                     InlineKeyboardButton("❌ 取消", callback_data=f"buyno_{oid}")]])
         await context.bot.send_message(ADMIN_USER_ID,
-            f"💳 购买积分申请｜单号 {oid}\n用户：{await get_name(context.application, uid, cid=cid)}（{uid}）\n群：{cid}\n数量：{amount} 积分", reply_markup=kb)
+            f"💳 购买积分申请｜单号 {oid}\n用户：{await get_name(context.application, uid, cid=cid)}（{uid}）\n群：{chat_name_cache.get(cid) or cid}（{cid}）\n数量：{amount} 积分", reply_markup=kb)
     except Exception:
         logger.exception("购买积分申请通知管理员失败（已吞并）")
 
@@ -9179,7 +9198,7 @@ async def cmd_schedule_status(update, context):
             if skips:
                 items = ", ".join(f"{k}×{v}" for k, v in skips.items())
                 skip_txt = f"　跳过：{items}"
-            lines.append(f"　{on} <code>{cid}</code> {html.escape(chat_name_cache.get(cid, '?'))}　最近推送：{last}{skip_txt}")
+            lines.append(f"　{on} <code>{cid}</code> {html.escape(chat_name_cache.get(cid) or str(cid))}　最近推送：{last}{skip_txt}")
     else:
         lines.append("　（无授权群）")
     lines.append("")
@@ -9405,6 +9424,7 @@ async def post_init(app):
         asyncio.create_task(lottery_scheduler(app)),
         asyncio.create_task(data_save_worker())
     })
+    background_tasks.add(asyncio.create_task(_warm_group_names(app)))   # 群名预热：网页/推送不再显示裸群ID
     # 重启恢复：竞猜：未封盘且未到点的重建封盘倒计时；已封盘的原样等待结算
     for _cid, _g in list(guesses.items()):
         if not _g.get("locked") and not _g.get("task") and _g["end_ts"] > now_bj().timestamp():
@@ -11012,7 +11032,7 @@ def start_health_server():
                     for gc, g in sorted(guesses.items()):
                         locked = bool(g.get("locked"))
                         st = "<span style='color:#e0b040'>已封盘</span>" if locked else "<span style='color:#6fd08c'>下注中</span>"
-                        gs_rows += (f"<tr><td>{gc} {html.escape(chat_name_cache.get(gc, ''))}</td>"
+                        gs_rows += (f"<tr><td>{gc} {html.escape(chat_name_cache.get(gc) or str(gc))}</td>"
                                     f"<td>{html.escape(g['q'])}</td>"
                                     f"<td>🔵 {html.escape(g['a'])}｜{g['side_pots']['A']} 分</td>"
                                     f"<td>🔴 {html.escape(g['b'])}｜{g['side_pots']['B']} 分</td>"
@@ -11050,7 +11070,7 @@ def start_health_server():
                 elif gkey == "points" and sub == "mallord":
                     _ord_src = [o for o in reversed(mall_orders[-200:]) if not sel_flt_cid or int(o.get("cid", 0) or 0) == sel_flt_cid]
                     ord_rows = "".join(
-                        f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{o.get('cid')} {html.escape(chat_name_cache.get(int(o.get('cid', 0) or 0), ''))}</td>"
+                        f"<tr><td>{html.escape(str(o.get('ts', '')))}</td><td>{o.get('cid')} {html.escape(chat_name_cache.get(int(o.get('cid', 0) or 0)) or str(o.get('cid', '')))}</td>"
                         f"<td>{o.get('uid')} {html.escape(user_names.get(o.get('uid'), ''))}</td>"
                         f"<td>{html.escape(str(o.get('item', '')))}</td><td>{o.get('price')}</td></tr>"
                         for o in _ord_src[:50])
@@ -11062,7 +11082,7 @@ def start_health_server():
                             + ord_rows + "</table></div>")
                 elif gkey == "points" and sub == "buy":
                     pend_rows = "".join(
-                        f"<tr><td><code>{oid}</code></td><td>{o.get('cid')} {html.escape(chat_name_cache.get(int(o.get('cid', 0) or 0), ''))}</td>"
+                        f"<tr><td><code>{oid}</code></td><td>{o.get('cid')} {html.escape(chat_name_cache.get(int(o.get('cid', 0) or 0)) or str(o.get('cid', '')))}</td>"
                         f"<td>{o.get('uid')} {html.escape(user_names.get(o.get('uid'), ''))}</td>"
                         f"<td>{o.get('amount')}</td><td>{html.escape(str(o.get('ts', '')))}</td></tr>"
                         for oid, o in buy_orders.items()
@@ -11167,7 +11187,7 @@ def start_health_server():
                         _badge = "<span style='color:#6fd08c'>✅ 开</span>" if _on else "<span style='color:#8a89a0'>⏸ 关</span>"
                         _last = race_last_sent.get(_cid) or "（暂无）"
                         _tg = "<a href='/racegrp/" + str(_cid) + "/toggle' style='margin-left:8px'>" + ("关闭" if _on else "开启") + "</a>"
-                        _race_rows += ("<tr><td>" + _badge + " <code>" + str(_cid) + "</code> " + html.escape(chat_name_cache.get(_cid, '?')) + _tg + "</td>"
+                        _race_rows += ("<tr><td>" + _badge + " <code>" + str(_cid) + "</code> " + html.escape(chat_name_cache.get(_cid) or str(_cid)) + _tg + "</td>"
                                        "<td>" + _last + "</td></tr>")
                     if not _race_rows:
                         _race_rows = "<tr><td colspan='2' style='text-align:center;color:#6a6982'>无授权群</td></tr>"
@@ -11178,7 +11198,7 @@ def start_health_server():
                         if not _tg:
                             _tg_txt = "<span style='color:#6fd08c'>全部授权群</span>"
                         else:
-                            _tg_txt = "<br>".join(f"<code>{c}</code> {html.escape(chat_name_cache.get(c, '?'))}" for c in _tg)
+                            _tg_txt = "<br>".join(f"<code>{c}</code> {html.escape(chat_name_cache.get(c) or str(c))}" for c in _tg)
                         _redeem_rows += (f"<tr><td>{html.escape(str(_x.get('name', '?')))}</td><td>{_tg_txt}</td></tr>")
                     if not _redeem_rows:
                         _redeem_rows = "<tr><td colspan='2' style='text-align:center;color:#6a6982'>暂无兑换商品</td></tr>"
@@ -11602,7 +11622,16 @@ def start_health_server():
                     except ValueError:
                         _back(err="参数必须是数字"); return
                     if op == "authadd" and cid_:
-                        AUTHORIZED_GROUPS.add(cid_); save_data(); _back(note=f"✅ 已授权群 {cid_}")
+                        AUTHORIZED_GROUPS.add(cid_); save_data()
+                        try:   # 顺手拉群名进缓存，授权列表不再显示裸 ID
+                            if _bot_app and _bot_loop:
+                                _ch = asyncio.run_coroutine_threadsafe(
+                                    _bot_app.bot.get_chat(cid_), _bot_loop).result(8)
+                                if getattr(_ch, "title", None):
+                                    chat_name_cache[cid_] = _ch.title
+                        except Exception:
+                            pass
+                        _back(note=f"✅ 已授权群 {cid_}")
                     elif op == "authdel" and cid_:
                         # 移除群 = 取消授权 + 清掉该群所有残留数据（邀请记录/链接、各群开关、进出群缓存），
                         # 群解散后不再在下拉里留裸数字

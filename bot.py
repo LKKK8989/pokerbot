@@ -2,6 +2,8 @@ import asyncio
 import html
 import io
 import json
+# 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
+BOT_VERSION = "2026-09-09-1100"
 import logging
 import math
 import os
@@ -10098,7 +10100,7 @@ def start_health_server():
                     "<form method='post' action='/login'>"
                     "<label>管理密码</label><input type='password' name='password' autofocus required>"
                     "<button type='submit'>登 录</button></form>"
-                    "<div class='ft'>💡 推荐：Telegram 发 <b>/后台</b>，点链接免密登录（密码为备用通道）<br>© 机器人后台</div>"
+                    "<div class='ft'>💡 推荐：Telegram 发 <b>/后台</b>，点链接免密登录（密码为备用通道）<br>© 机器人后台 · v" + BOT_VERSION + "</div>"
                     "</div></body></html>").encode("utf-8")
 
         def _field_rows(gkey):
@@ -11244,7 +11246,7 @@ def start_health_server():
             def do_GET(self):
                 path = urlparse(self.path).path
                 if path == "/health":
-                    self._send(200, b"ok", [("Content-Type", "text/plain")]); return
+                    self._send(200, f"ok {BOT_VERSION}".encode(), [("Content-Type", "text/plain")]); return
                 if path == "/magic":
                     """Telegram 一键登录：校验一次性 token → 直接建会话 → 302 进后台。"""
                     qs_m = parse_qs(urlparse(self.path).query)

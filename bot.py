@@ -3,17 +3,18 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-1300"
-# 主题色：key -> (主色, 深主色, 强色上的文字色)；网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化
+BOT_VERSION = "2026-09-09-1330"
+# 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
+# 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
-    "purple": ("#8b5cf6", "#6d3fd4", "#ffffff"),
-    "blue":   ("#3b82f6", "#2563eb", "#ffffff"),
-    "cyan":   ("#06b6d4", "#0e7490", "#ffffff"),
-    "green":  ("#10b981", "#047857", "#ffffff"),
-    "rose":   ("#f43f5e", "#be123c", "#ffffff"),
-    "amber":  ("#f59e0b", "#d97706", "#ffffff"),
-    "black":  ("#7b8194", "#3f4453", "#ffffff"),   # 黑：石墨灰黑
-    "white":  ("#dbe0ea", "#aab2c2", "#1f2430"),   # 白：银白（强色上用深色文字保证可读）
+    "purple": ("#8b5cf6", "#6d3fd4", "#ffffff", "#161320", "#1b1728", "#211c30", "#191527", "#352e4d", "#28223d", "#262038"),
+    "blue":   ("#3b82f6", "#2563eb", "#ffffff", "#131722", "#161c2a", "#1b2231", "#171d2a", "#2c3a54", "#202a40", "#212b3e"),
+    "cyan":   ("#06b6d4", "#0e7490", "#ffffff", "#0f181c", "#121f26", "#17252c", "#131f26", "#25414c", "#1b3039", "#1a2b33"),
+    "green":  ("#10b981", "#047857", "#ffffff", "#111813", "#141d17", "#1a251d", "#151d17", "#294233", "#1d3125", "#1b2a20"),
+    "rose":   ("#f43f5e", "#be123c", "#ffffff", "#1a1215", "#1e1519", "#261a1f", "#1e1519", "#432c37", "#33222b", "#2a1d23"),
+    "amber":  ("#f59e0b", "#d97706", "#ffffff", "#181510", "#1c1811", "#242017", "#1d1911", "#42391f", "#322b18", "#2b251a"),
+    "black":  ("#7b8194", "#3f4453", "#ffffff", "#121214", "#161617", "#1b1b1e", "#161617", "#2c2c31", "#222225", "#1f1f23"),
+    "white":  ("#dbe0ea", "#aab2c2", "#1f2430", "#131419", "#17181e", "#1d1f26", "#17181e", "#2f323d", "#232630", "#20222b"),
 }
 # 成员列表首字母头像色环（按 uid 取模固定颜色，同人永远同色）
 _AV_COLORS = ("#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#f43f5e", "#06b6d4", "#ec4899", "#a3e635")
@@ -9922,8 +9923,9 @@ def start_health_server():
             """阿福风格布局：左侧深色菜单栏（分组可折叠子页面）+ 右侧内容区，窄屏折叠为顶部横排。"""
             sidebar_active = sidebar_active or ""
             _thm_key = SETTINGS_SNAPSHOT.get("ui_theme") if SETTINGS_SNAPSHOT.get("ui_theme") in _UI_THEMES else "purple"
-            _ac, _ac2, _actx = _UI_THEMES[_thm_key]
+            _ac, _ac2, _actx, _bg, _side, _card, _input, _border, _thead, _hover = _UI_THEMES[_thm_key]
             _acr = ",".join(str(int(_ac[i:i + 2], 16)) for i in (1, 3, 5))   # 主色的 R,G,B（供 rgba(var(--acr),x)）
+            _bgr = ",".join(str(int(_card[i:i + 2], 16)) for i in (1, 3, 5))  # 卡片底色的 R,G,B（玻璃条用）
             items = []
             child_of = {ck: pk for pk, cks in SIDEBAR_CHILDREN.items() for ck in cks}
             meta = {g[0]: (g[1], g[2]) for g in SETTINGS_GROUPS}
@@ -9975,36 +9977,38 @@ def start_health_server():
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     f"<title>{title} - 机器人后台</title><style>"
-                    f":root{{--ac:{_ac};--ac2:{_ac2};--acr:{_acr};--ac-tx:{_actx}}}"
+                    f":root{{--ac:{_ac};--ac2:{_ac2};--acr:{_acr};--ac-tx:{_actx};"
+                    f"--bg:{_bg};--side:{_side};--card:{_card};--input:{_input};"
+                    f"--border:{_border};--thead:{_thead};--hover:{_hover};--bgr:{_bgr}}}"
                     "*{box-sizing:border-box}"
                     "html,body{height:100%}"
-                    "body{background:radial-gradient(1100px 520px at 85% -8%,rgba(139,92,246,.10),transparent 60%),"
-                    "radial-gradient(900px 500px at -10% 110%,rgba(109,63,212,.08),transparent 55%),#161320;"
+                    "body{background:radial-gradient(1100px 520px at 85% -8%,rgba(var(--acr),.10),transparent 60%),"
+                    "radial-gradient(900px 500px at -10% 110%,rgba(var(--acr),.06),transparent 55%),var(--bg);"
                     "color:#e8e6f2;font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;"
                     "margin:0;font-size:16px;-webkit-font-smoothing:antialiased}"
                     "a{color:inherit;text-decoration:none}"
-                    "code{font-family:ui-monospace,Consolas,monospace;font-size:14px;color:#d6d2f5;"
-                    "background:#191527;padding:1px 6px;border-radius:6px}"
+                    "code{font-family:ui-monospace,Consolas,monospace;font-size:14px;color:#dee1ec;"
+                    "background:var(--input);padding:1px 6px;border-radius:6px}"
                     # 顶部 header
-                    ".hd{position:sticky;top:0;z-index:50;height:54px;background:rgba(24,20,36,.92);"
-                    "backdrop-filter:blur(10px);border-bottom:1px solid #2d2740;"
+                    ".hd{position:sticky;top:0;z-index:50;height:54px;background:rgba(var(--bgr),.92);"
+                    "backdrop-filter:blur(10px);border-bottom:1px solid var(--border);"
                     "display:flex;align-items:center;padding:0 20px;gap:14px}"
                     ".hd .logo{font-size:16px;font-weight:500;color:#fff;display:flex;align-items:center;gap:8px}"
                     ".hd .crumb{color:#8a89a0;font-size:14px}"
                     ".hd .right{margin-left:auto;display:flex;align-items:center;gap:14px;color:#8a89a0;font-size:13px}"
-                    ".hd .burger{display:none;background:transparent;border:1px solid #2b2c40;color:#e6e5f0;"
+                    ".hd .burger{display:none;background:transparent;border:1px solid var(--thead);color:#e6e5f0;"
                     "border-radius:8px;padding:6px 10px;cursor:pointer}"
                     # 整体布局
                     ".wrap{display:flex;min-height:calc(100vh - 52px)}"
                     # 侧栏
-                    ".side{width:242px;background:#1b1728;border-right:1px solid #2d2740;padding:14px 10px;"
+                    ".side{width:242px;background:var(--side);border-right:1px solid var(--border);padding:14px 10px;"
                     "flex-shrink:0;overflow-y:auto;transition:transform .2s ease}"
                     ".side .grp-title{padding:14px 12px 6px;font-size:12px;color:#6a6982;letter-spacing:1px;"
                     "text-transform:uppercase;font-weight:500}"
                     ".side .grp-title:first-child{padding-top:4px}"
                     ".side a{display:flex;align-items:center;gap:10px;color:#a9a8bd;font-size:15px;"
                     "padding:9px 12px;border-radius:8px;margin-bottom:1px;transition:background .12s,color .12s}"
-                    ".side a:hover{background:#262038;color:#fff}"
+                    ".side a:hover{background:var(--hover);color:#fff}"
                     ".side a.active{background:linear-gradient(135deg,var(--ac) 0%,var(--ac2) 100%);color:var(--ac-tx);"
                     "box-shadow:0 4px 14px rgba(var(--acr),.30)}"
                     ".side a.active .badge{background:rgba(127,127,140,.25);color:var(--ac-tx)}"
@@ -10013,14 +10017,14 @@ def start_health_server():
                     "font-size:15px;color:#a9a8bd;padding:10px 12px;border-radius:8px;user-select:none;"
                     "transition:background .12s,color .12s}"
                     ".side summary::-webkit-details-marker{display:none}"
-                    ".side summary:hover{background:#262038;color:#fff}"
-                    ".side summary.active{background:#352a5e;color:#fff}"
+                    ".side summary:hover{background:var(--hover);color:#fff}"
+                    ".side summary.active{background:rgba(var(--acr),.28);color:#fff}"
                     ".side summary::after{content:'⌄';margin-left:auto;color:#6a6982;font-size:11px;transition:transform .15s}"
                     ".side details[open] summary::after{transform:rotate(180deg)}"
                     ".side .sub a{padding:9px 12px 9px 36px;font-size:14px;position:relative}"
                     ".side .sub a::before{content:'○';position:absolute;left:18px;font-size:9px;color:#6a6982}"
                     ".side .sub a.active::before{content:'●';color:#fff}"
-                    ".badge{margin-left:auto;font-size:11px;background:#2b2c40;color:#a9a8bd;"
+                    ".badge{margin-left:auto;font-size:11px;background:var(--thead);color:#a9a8bd;"
                     "border-radius:6px;padding:1px 6px;font-weight:500}"
                     # 主区
                     ".main{flex:1;padding:26px 38px;min-width:0}"
@@ -10028,12 +10032,12 @@ def start_health_server():
                     ".main h1 .ico{margin-right:6px}"
                     ".main .sub{font-size:14px;color:#8a89a0;margin-bottom:18px}"
                     # 卡片
-                    ".card{background:#211c30;border:1px solid #352e4d;border-radius:14px;padding:22px 24px;"
+                    ".card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px 24px;"
                     "margin-bottom:18px;box-shadow:0 8px 24px rgba(0,0,0,.22)}"
                     ".card h3{font-size:16px;font-weight:500;margin:0 0 14px;color:#c9c8da}"
                     # 表单
                     "label{display:block;font-size:14px;color:#a9a8bd;margin:14px 0 6px}"
-                    "input,select,textarea{width:100%;background:#191527;border:1px solid #352e4d;color:#e8e6f2;"
+                    "input,select,textarea{width:100%;background:var(--input);border:1px solid var(--border);color:#e8e6f2;"
                     "border-radius:9px;padding:10px 13px;font-size:15px;font-family:inherit;transition:border-color .12s}"
                     "input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ac);"
                     "box-shadow:0 0 0 3px rgba(var(--acr),.15)}"
@@ -10052,7 +10056,7 @@ def start_health_server():
                     "border:1px solid rgba(240,149,149,.2);border-radius:8px;margin-bottom:14px}"
                     # 统计卡片
                     ".cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}"
-                    ".stat{background:linear-gradient(135deg,#241f38 0%,#2b2444 100%);border:1px solid #3a3358;"
+                    ".stat{background:var(--card);border:1px solid var(--border);"
                     "border-radius:14px;padding:18px 20px;transition:transform .15s,border-color .15s,"
                     "box-shadow .15s;box-shadow:0 6px 18px rgba(0,0,0,.18)}"
                     ".stat:hover{transform:translateY(-2px);border-color:var(--ac2);box-shadow:0 10px 26px rgba(var(--acr),.18)}"
@@ -10060,38 +10064,38 @@ def start_health_server():
                     ".stat .t{font-size:13px;color:#8a89a0;display:flex;align-items:center;gap:6px}"
                     # 快捷入口
                     ".q{display:inline-flex;align-items:center;gap:5px;margin:5px 6px 0 0;"
-                    "background:rgba(var(--acr),.14);border:1px solid rgba(var(--acr),.22);color:#d6d2f5;"
+                    "background:rgba(var(--acr),.14);border:1px solid rgba(var(--acr),.22);color:#dee1ec;"
                     "font-size:14px;padding:9px 15px;border-radius:9px;transition:background .12s,color .12s,border-color .12s}"
                     ".q:hover{background:var(--ac);border-color:var(--ac);color:var(--ac-tx)}"
-                    # 行
-                    ".row{display:flex;align-items:center;justify-content:space-between;gap:16px;"
-                    "padding:12px 0;border-bottom:1px solid #2d2740}"
+                    # 行（照阿福紧凑表单：标签固定列宽、控件紧跟其后，整张表单限宽，不甩到屏幕最右）
+                    ".row{display:flex;align-items:center;gap:16px;"
+                    "padding:12px 0;border-bottom:1px solid var(--border);max-width:900px}"
                     ".row:last-child{border-bottom:none}"
-                    ".row .lbl{font-size:16px;color:#d6d2f5;flex:1;min-width:0;line-height:1.45}"
+                    ".row .lbl{width:320px;flex:none;font-size:16px;color:#dee1ec;min-width:0;line-height:1.45}"
                     ".row .lbl small{display:block;color:#8a89a0;font-size:13px;margin-top:3px;font-weight:400;line-height:1.5}"
-                    ".row input[type=number],.row input[type=text],.row select{width:240px;flex-shrink:0}"
+                    ".row input[type=number],.row input[type=text],.row select{width:320px;flex-shrink:0}"
                     ".row textarea{width:100%;margin-top:8px}"
                     # 简单输入双列紧凑（照阿福：数字/短文本参数两列排布）
                     ".grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));"
-                    "column-gap:30px;row-gap:2px}"
-                    ".grid2 .row{border-bottom:none;padding:9px 0}"
-                    ".grid2 .row .lbl{font-size:14px}"
+                    "column-gap:30px;row-gap:2px;max-width:900px}"
+                    ".grid2 .row{border-bottom:none;padding:9px 0;max-width:none;flex-wrap:wrap;gap:4px 12px}"
+                    ".grid2 .row .lbl{width:100%;font-size:14px}"
                     ".grid2 .row .lbl small{font-size:12px}"
                     ".grid2 .row input[type=number],.grid2 .row input[type=text],.grid2 .row select{width:100%}"
                     # 吸底保存条：滚到哪都能看到保存按钮（照阿福的受控保存区）
                     ".savebar{position:sticky;bottom:0;z-index:20;display:flex;align-items:center;gap:14px;"
-                    "margin:18px -24px -22px;padding:12px 24px;background:rgba(26,22,40,.92);"
-                    "backdrop-filter:blur(10px);border-top:1px solid #352e4d;border-radius:0 0 14px 14px}"
+                    "margin:18px -24px -22px;padding:12px 24px;background:rgba(var(--bgr),.92);"
+                    "backdrop-filter:blur(10px);border-top:1px solid var(--border);border-radius:0 0 14px 14px}"
                     ".savebar button{min-width:150px}"
                     ".savebar .hint{font-size:13px;color:#8a89a0;margin-left:auto}"
                     # 词表标签输入（照方丈：回车即添加下一个，✕ 删除，退格删末尾）
-                    ".tagbox{display:flex;flex-wrap:wrap;gap:6px;align-items:center;width:240px;flex-shrink:0;"
-                    "background:#191527;border:1px solid #352e4d;border-radius:9px;padding:6px 8px;"
+                    ".tagbox{display:flex;flex-wrap:wrap;gap:6px;align-items:center;width:320px;flex-shrink:0;"
+                    "background:var(--input);border:1px solid var(--border);border-radius:9px;padding:6px 8px;"
                     "min-height:42px;cursor:text;transition:border-color .12s}"
                     ".tagbox:focus-within{border-color:var(--ac);box-shadow:0 0 0 3px rgba(var(--acr),.15)}"
                     ".tagbox .chip{display:inline-flex;align-items:center;background:rgba(var(--acr),.16);"
                     "border:1px solid rgba(var(--acr),.35);border-radius:6px;padding:3px 4px 3px 9px;"
-                    "font-size:13px;color:#d6d2f5}"
+                    "font-size:13px;color:#dee1ec}"
                     ".tagbox .chip b{font-weight:400}"
                     ".tagbox .chip i{font-style:normal;cursor:pointer;color:#8a89a0;padding:0 5px;font-size:12px}"
                     ".tagbox .chip i:hover{color:#f09595}"
@@ -10101,38 +10105,39 @@ def start_health_server():
                     # 开关
                     ".tg{position:relative;width:44px;height:24px;flex-shrink:0}"
                     ".tg input{opacity:0;width:0;height:0;position:absolute}"
-                    ".tg .sl{position:absolute;inset:0;background:#34354a;border-radius:24px;transition:.2s;cursor:pointer}"
+                    ".tg .sl{position:absolute;inset:0;background:var(--thead);border-radius:24px;transition:.2s;cursor:pointer}"
                     ".tg .sl:before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;"
                     "background:#fff;border-radius:50%;transition:.2s}"
                     ".tg input:checked+.sl{background:var(--ac)}"
                     ".tg input:checked+.sl:before{transform:translateX(20px)}"
 # 分组标题行（sep 字段）
                     ".sec{margin:20px 0 6px;padding:10px 14px;font-size:14px;font-weight:500;color:#d9d3f0;"
-                    "background:#28223d;border-left:3px solid var(--ac);border-radius:0 8px 8px 0;letter-spacing:.3px}"
+                    "background:var(--thead);border-left:3px solid var(--ac);border-radius:0 8px 8px 0;"
+                    "letter-spacing:.3px;max-width:900px}"
                     ".sec:first-child{margin-top:2px}"
                     # 多选勾选组（multi 字段）
                     ".cbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:10px}"
-                    ".cb{display:flex;align-items:center;gap:9px;margin:0;padding:9px 11px;background:#191527;"
-                    "border:1px solid #352e4d;border-radius:9px;cursor:pointer;transition:border-color .12s,background .12s}"
-                    ".cb:hover{border-color:#5a4a8e;background:#221d33}"
+                    ".cb{display:flex;align-items:center;gap:9px;margin:0;padding:9px 11px;background:var(--input);"
+                    "border:1px solid var(--border);border-radius:9px;cursor:pointer;transition:border-color .12s,background .12s}"
+                    ".cb:hover{border-color:rgba(var(--acr),.5);background:rgba(var(--acr),.1)}"
                     ".cb input{width:16px;height:16px;flex-shrink:0;accent-color:var(--ac);cursor:pointer}"
-                    ".cb span{font-size:14px;color:#d6d2f5;line-height:1.3}"
+                    ".cb span{font-size:14px;color:#dee1ec;line-height:1.3}"
                     ".cb:has(input:checked){border-color:var(--ac);background:rgba(var(--acr),.12)}"
                     # 表格
                     ".tbl{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}"
-                    ".tbl td,.tbl th{padding:12px 10px;border-bottom:1px solid #2d2740;text-align:left}"
-                    ".tbl th{color:#b9b3d8;font-weight:500;font-size:13px;background:#28223d;"
-                    "border-bottom:1px solid #3a3358}"
+                    ".tbl td,.tbl th{padding:12px 10px;border-bottom:1px solid var(--border);text-align:left}"
+                    ".tbl th{color:#b7bcc9;font-weight:500;font-size:13px;background:var(--thead);"
+                    "border-bottom:1px solid var(--border)}"
                     ".tbl th:first-child{border-radius:8px 0 0 0}"
                     ".tbl th:last-child{border-radius:0 8px 0 0}"
-                    ".tbl td{color:#d9d6ea}"
+                    ".tbl td{color:#dfe1ea}"
                     ".tbl tr:nth-child(even) td{background:rgba(255,255,255,.015)}"
                     ".tbl tr:last-child td{border-bottom:none}"
                     ".tbl tr:hover td{background:rgba(var(--acr),.07)}"
                     # 内部表单行（季节/授权等用 div 套 input 而不是 .row）
-                    "[style*='padding:13px 2px']{padding:12px 0 !important;border-bottom:1px solid #26273a !important}"
+                    "[style*='padding:13px 2px']{padding:12px 0 !important;border-bottom:1px solid var(--border) !important}"
                     # footer
-                    ".ft{padding:18px 28px;text-align:center;color:#6f6a8a;font-size:13px;border-top:1px solid #2d2740}"
+                    ".ft{padding:18px 28px;text-align:center;color:#6f6a8a;font-size:13px;border-top:1px solid var(--border)}"
                     ".ft a{color:var(--ac)}"
                     # 移动端
                     "@media(max-width:768px){"
@@ -10156,7 +10161,7 @@ def start_health_server():
                     # 滚动条（深色风格）
                     "::-webkit-scrollbar{width:8px;height:8px}"
                     "::-webkit-scrollbar-track{background:transparent}"
-                    "::-webkit-scrollbar-thumb{background:#352e4d;border-radius:4px}"
+                    "::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}"
                     "::-webkit-scrollbar-thumb:hover{background:var(--ac2)}"
                     # 主题色切换点（顶栏）
                     ".dot{width:15px;height:15px;border-radius:50%;display:inline-block;margin-left:7px;"
@@ -10172,8 +10177,8 @@ def start_health_server():
                     ".role.admin{background:rgba(var(--acr),.16);color:#c4b5fd;border:1px solid rgba(var(--acr),.32)}"
                     ".tbl.cp td,.tbl.cp th{padding:8px 8px}"
                     ".more{position:relative;display:inline-block}"
-                    ".more .menu{display:none;position:absolute;right:0;top:100%;margin-top:3px;background:#211c30;"
-                    "border:1px solid #352e4d;border-radius:10px;padding:6px;z-index:30;min-width:130px;"
+                    ".more .menu{display:none;position:absolute;right:0;top:100%;margin-top:3px;background:var(--card);"
+                    "border:1px solid var(--border);border-radius:10px;padding:6px;z-index:30;min-width:130px;"
                     "box-shadow:0 10px 26px rgba(0,0,0,.45)}"
                     ".more:hover .menu{display:block}"
                     ".pbtn{padding:3px 10px;font-size:12px;border-radius:7px;border:none;color:#fff;cursor:pointer;margin:1px}"
@@ -10256,15 +10261,15 @@ def start_health_server():
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     "<title>二次验证 - 机器人后台</title><style>"
                     "*{box-sizing:border-box}html,body{height:100%}"
-                    "body{background:linear-gradient(135deg,#1c1d2e 0%,#151621 100%);color:#e6e5f0;"
+                    "body{background:linear-gradient(135deg,#17181d 0%,#121318 100%);color:#e6e5f0;"
                     "font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;margin:0;display:flex;"
                     "align-items:center;justify-content:center;padding:20px;min-height:100vh}"
-                    ".login{background:#1d1e2e;border:1px solid #2b2c40;border-radius:14px;padding:32px;"
+                    ".login{background:#1b1c22;border:1px solid #2a2b33;border-radius:14px;padding:32px;"
                     "width:min(380px,100%);box-shadow:0 20px 60px rgba(0,0,0,.4)}"
                     ".login h1{font-size:20px;font-weight:500;margin:0 0 4px;text-align:center;color:#fff}"
                     ".login .desc{font-size:12px;color:#8a89a0;text-align:center;margin-bottom:24px;line-height:1.6}"
                     ".login label{display:block;font-size:13px;color:#a9a8bd;margin:14px 0 6px}"
-                    ".login input{width:100%;background:#151621;border:1px solid #2b2c40;color:#e6e5f0;"
+                    ".login input{width:100%;background:#121318;border:1px solid #2a2b33;color:#e6e5f0;"
                     "border-radius:8px;padding:11px 14px;font-size:14px;transition:border-color .12s;"
                     "letter-spacing:6px;text-align:center;font-size:20px}"
                     ".login input:focus{outline:none;border-color:#7c6cf0;box-shadow:0 0 0 3px rgba(124,108,240,.12)}"
@@ -10276,9 +10281,9 @@ def start_health_server():
                     ".login .ok{color:#6fd08c;font-size:13px;padding:10px 14px;background:rgba(111,208,140,.08);"
                     "border:1px solid rgba(111,208,140,.2);border-radius:8px;margin-bottom:14px;text-align:center}"
                     ".login .resend{margin-top:14px;text-align:center}"
-                    ".login .resend button{background:transparent;border:1px solid #2b2c40;color:#a9a8bd;"
+                    ".login .resend button{background:transparent;border:1px solid #2a2b33;color:#a9a8bd;"
                     "box-shadow:none;font-size:13px;padding:8px 16px;margin-top:0}"
-                    ".login .ft{padding:14px 0 0;margin-top:20px;border-top:1px solid #26273a;font-size:11px;"
+                    ".login .ft{padding:14px 0 0;margin-top:20px;border-top:1px solid #26272e;font-size:11px;"
                     "color:#6a6982;text-align:center}"
                     "</style></head><body><div class='login'>"
                     "<h1>🔐 二次验证</h1>"
@@ -10348,15 +10353,15 @@ def start_health_server():
                     "<title>登录 - 机器人后台</title><style>"
                     "*{box-sizing:border-box}"
                     "html,body{height:100%}"
-                    "body{background:linear-gradient(135deg,#1c1d2e 0%,#151621 100%);color:#e6e5f0;"
+                    "body{background:linear-gradient(135deg,#17181d 0%,#121318 100%);color:#e6e5f0;"
                     "font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;margin:0;display:flex;"
                     "align-items:center;justify-content:center;padding:20px;min-height:100vh}"
-                    ".login{background:#1d1e2e;border:1px solid #2b2c40;border-radius:14px;padding:32px;"
+                    ".login{background:#1b1c22;border:1px solid #2a2b33;border-radius:14px;padding:32px;"
                     "width:min(380px,100%);box-shadow:0 20px 60px rgba(0,0,0,.4)}"
                     ".login h1{font-size:20px;font-weight:500;margin:0 0 4px;text-align:center;color:#fff}"
                     ".login .desc{font-size:12px;color:#8a89a0;text-align:center;margin-bottom:24px}"
                     ".login label{display:block;font-size:13px;color:#a9a8bd;margin:14px 0 6px}"
-                    ".login input{width:100%;background:#151621;border:1px solid #2b2c40;color:#e6e5f0;"
+                    ".login input{width:100%;background:#121318;border:1px solid #2a2b33;color:#e6e5f0;"
                     "border-radius:8px;padding:11px 14px;font-size:14px;transition:border-color .12s}"
                     ".login input:focus{outline:none;border-color:#7c6cf0;box-shadow:0 0 0 3px rgba(124,108,240,.12)}"
                     ".login button{width:100%;background:linear-gradient(135deg,#7c6cf0 0%,#5d4dd6 100%);"
@@ -10366,7 +10371,7 @@ def start_health_server():
                     ".login button:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(124,108,240,.45)}"
                     ".login .err{color:#f09595;font-size:13px;padding:10px 14px;background:rgba(240,149,149,.08);"
                     "border:1px solid rgba(240,149,149,.2);border-radius:8px;margin-bottom:14px;text-align:center}"
-                    ".login .ft{padding:14px 0 0;margin-top:20px;border-top:1px solid #26273a;font-size:11px;"
+                    ".login .ft{padding:14px 0 0;margin-top:20px;border-top:1px solid #26272e;font-size:11px;"
                     "color:#6a6982;text-align:center}"
                     "</style></head><body><div class='login'>"
                     "<h1>🤖 机器人后台</h1>"
@@ -10394,7 +10399,7 @@ def start_health_server():
                         rows.append(f"<div class='sec'>{html.escape(_grp_title(grp))}</div>")
                         last = grp
                     cur = globals().get(_g)
-                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                    rows.append(f"<div style='padding:13px 2px;border-bottom:1px solid var(--border)'>"
                                 f"<div class='lbl' style='display:flex;align-items:center;justify-content:space-between'>"
                                 f"<span>{html.escape(label)}<small>可用占位符见默认值；支持换行</small></span>"
                                 f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
@@ -10411,7 +10416,7 @@ def start_health_server():
                         boxes.append(f"<label class='cb'><input type='checkbox' name='{key}' "
                                      f"value='{html.escape(val, quote=True)}'{ck}>"
                                      f"<span>{html.escape(vlabel)}</span></label>")
-                    return (f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                    return (f"<div style='padding:13px 2px;border-bottom:1px solid var(--border)'>"
                             f"<div class='lbl'>{html.escape(label)}"
                             f"<small>勾选即生效；未勾选的类型一律放行</small></div>"
                             f"<div class='cbs'>{''.join(boxes)}</div></div>")
@@ -10425,11 +10430,11 @@ def start_health_server():
                         val = "\n".join(f"{x['name']}:{x['value']}" for x in cur)
                     else:
                         val = str(cur or "")
-                    return (f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                    return (f"<div style='padding:13px 2px;border-bottom:1px solid var(--border)'>"
                             f"<div class='lbl'>{html.escape(label)}<small>每行一条：名称:数值</small></div>"
                             f"<textarea name='{key}' rows='5' style='margin-top:8px'>{html.escape(val)}</textarea></div>")
                 if ftype == "text":
-                    return (f"<div style='padding:13px 2px;border-bottom:1px solid #26273a'>"
+                    return (f"<div style='padding:13px 2px;border-bottom:1px solid var(--border)'>"
                             f"<div class='lbl' style='display:flex;align-items:center;justify-content:space-between'>"
                             f"<span>{html.escape(label)}<small>可用占位符见默认值；支持换行</small></span>"
                             f"<a class='q' href='/tplprev/{key}'>🔍 预览</a></div>"
@@ -10565,11 +10570,11 @@ def start_health_server():
             for k in ordered_keys:
                 n, i = meta.get(k, (k, "•"))
                 sort_rows += ("<div style='display:flex;align-items:center;gap:12px;padding:7px 2px;"
-                              "border-bottom:1px solid #26273a'>"
+                              "border-bottom:1px solid var(--border)'>"
                               f"<span style='flex:1'>{i} {n}</span>"
-                              f"<a href='/menu_move/{k}/-1' style='padding:2px 10px;background:#26273a;"
+                              f"<a href='/menu_move/{k}/-1' style='padding:2px 10px;background:var(--hover);"
                               "border-radius:6px;font-size:12px'>▲ 上移</a>"
-                              f"<a href='/menu_move/{k}/1' style='padding:2px 10px;background:#26273a;"
+                              f"<a href='/menu_move/{k}/1' style='padding:2px 10px;background:var(--hover);"
                               "border-radius:6px;font-size:12px'>▼ 下移</a></div>")
             return _page("群体总览", "dashboard",
                 "<h1><span class='ico'>📊</span>群体总览</h1>"
@@ -10980,7 +10985,7 @@ def start_health_server():
                         f"<select name='cid' required>{_group_options()}</select></div>"
                         "<div class='row'><div class='lbl'>抽奖标题 *</div>"
                         "<input type='text' name='title' maxlength='50' required placeholder='例：群友福利'></div>"
-                        "<div style='padding:12px 0;border-bottom:1px solid #26273a'>"
+                        "<div style='padding:12px 0;border-bottom:1px solid var(--border)'>"
                         "<div class='lbl'>抽奖描述<small>（可选）显示在公告标题下方</small></div>"
                         "<textarea name='desc' rows='2' placeholder='活动说明、注意事项等（可留空）'></textarea></div>"
                         "<div class='row'><div class='lbl'>参与关键词 *</div>"
@@ -10993,7 +10998,7 @@ def start_health_server():
                         "<input type='text' name='endtime' id='endtime' placeholder='例：21:30 或 09-08 20:00'></div>"
                         "<div class='row' id='row_duration' style='display:none'><div class='lbl'>持续秒数 *<small>到点自动开奖（10 ~ 604800）</small></div>"
                         f"<input type='number' name='duration' id='duration' value='{max(10, int(LOTTERY_DEFAULT_DURATION))}' min='10'></div>"
-                        "<div style='padding:12px 0;border-bottom:1px solid #26273a'>"
+                        "<div style='padding:12px 0;border-bottom:1px solid var(--border)'>"
                         "<div class='lbl'>奖品设置 *</div>"
                         "<div id='prize_rows'>"
                         "<div class='row' style='display:flex;gap:10px'>"
@@ -11501,7 +11506,7 @@ def start_health_server():
                                        ("赛车自动开赛", RACE_AUTO_ENABLED), ("自动备份", BACKUP_ENABLED),
                                        ("经营日报推送", ADMIN_REPORT_ENABLED), ("定时群公告", ANNOUNCE_ENABLED)):
                         _rows += ("<div style='display:flex;justify-content:space-between;padding:7px 2px;"
-                                  "border-bottom:1px solid #26273a'><span>" + _name + "</span>" + _badge(_on) + "</div>")
+                                  "border-bottom:1px solid var(--border)'><span>" + _name + "</span>" + _badge(_on) + "</div>")
                     # 整点赛车每群推送明细：一眼看出哪个群没收到 + 网页直接开关每群
                     _race_rows = ""
                     for _cid in sorted(AUTHORIZED_GROUPS):
@@ -11559,9 +11564,9 @@ def start_health_server():
             return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     "<title>预览 - 机器人后台</title><style>"
-                    "body{background:#151621;color:#e6e5f0;font-family:system-ui,sans-serif;margin:0;"
+                    "body{background:#121318;color:#e6e5f0;font-family:system-ui,sans-serif;margin:0;"
                     "display:flex;justify-content:center;padding-top:10vh}"
-                    "pre{background:#1d1e2d;border:1px solid #2b2c40;border-radius:14px;padding:24px;"
+                    "pre{background:#1b1c22;border:1px solid #2a2b33;border-radius:14px;padding:24px;"
                     "width:min(420px,92vw);white-space:pre-wrap;font-size:15px;line-height:1.7;font-family:inherit}"
                     "</style></head><body><pre>" + html.escape(out) + "</pre></body></html>").encode("utf-8")
 

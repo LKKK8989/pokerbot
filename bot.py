@@ -3,7 +3,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-09-1100"
+BOT_VERSION = "2026-09-09-1120"
 import logging
 import math
 import os
@@ -11334,8 +11334,8 @@ def start_health_server():
                         hourly_race_enabled[rcid] = not hourly_race_enabled.get(rcid, True)
                         save_data()
                     self._redirect("/page/schedule"); return
-                # 4 个调度任务的作用对象切换：/sch_<task>_toggle/<id>
-                mm = re.fullmatch(r"/sch_(dailyreset|leaderboard)_toggle/(-?\d+)", path)
+                # 4 个调度任务的作用对象切换：/sch_<task>_toggle/<id>（卡片链接带 /toggle 后缀，两者都收）
+                mm = re.fullmatch(r"/sch_(dailyreset|leaderboard)_toggle/(-?\d+)(?:/toggle)?", path)
                 if mm:
                     task, rid = mm.group(1), int(mm.group(2))
                     target = daily_reset_groups if task == "dailyreset" else leaderboard_groups
@@ -11344,7 +11344,7 @@ def start_health_server():
                         else: target.add(rid)
                         save_settings({})
                     self._redirect("/page/schedule"); return
-                mm = re.fullmatch(r"/sch_(backup|report)_admins_toggle/(-?\d+)", path)
+                mm = re.fullmatch(r"/sch_(backup|report)_admins_toggle/(-?\d+)(?:/toggle)?", path)
                 if mm:
                     task, rid = mm.group(1), int(mm.group(2))
                     target = backup_admins if task == "backup" else admin_report_admins

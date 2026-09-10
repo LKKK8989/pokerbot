@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-10-0815"
+BOT_VERSION = "2026-09-10-2235"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -323,7 +323,7 @@ SETTINGS_FIELDS = [
     ("sensitive_mute_seconds", "SENSITIVE_MUTE_SECONDS", "敏感词禁言时长(秒)",    "int",  0, 86400, "mod"),
     ("link_whitelist_enabled", "LINK_WHITELIST_ENABLED", "域名白名单开关(名单内链接不删)", "bool", 0, 1, "mod"),
     ("link_whitelist",        "LINK_WHITELIST",        "白名单域名(逗号分隔，子域名自动放行)", "names", 0, 0, "mod"),
-    ("sep_mod_observe",       None, "观察期到期巡检", "sep", 0, 0, "mod"),
+    ("sep_mod_observe",       None, "观察期到期巡检（须先开观察期：群组管理→入群与观察，否则本段不生效）", "sep", 0, 0, "mod"),
     ("observe_check_enabled", "OBSERVE_CHECK_ENABLED", "到期巡检开关(需先开观察期)", "bool", 0, 1, "mod"),
     ("observe_check_msgs",    "OBSERVE_CHECK_MSGS",    "发言少于N条视为不活跃",   "int",  0, 1000, "mod"),
     ("observe_check_avatar",  "OBSERVE_CHECK_AVATAR",  "无头像也算不活跃(查API，仅零发言者)", "bool", 0, 1, "mod"),
@@ -1043,6 +1043,23 @@ invite_records = {}                                  # "cid:uid" -> {"cid","invi
 invite_pending = {}                                  # "cid:uid" -> 进群申请携带的邀请链接（人审批后 join 事件常不带链接，靠这个兜底归因；内存态）
 invite_confirmed = {}                                # "cid:uid" -> 邀请人 uid（deep-link START / 主动问按钮 锁定的归因；落盘持久化）
 invite_debug = defaultdict(list)                     # cid -> [最近10条邀请链路调试事件]（每环失败不再静默，/邀请调试 可查）
+_inv_notice_ts = {}                                  # "cid:uid" -> 上次发「进群未计入邀请/归因失败」提示的时间戳（运行时态）
+                                                     # 同一次进群会同时到 chat_member 与服务消息两个事件源，提示类副作用必须按人短窗去重（2026-09-10 用户报「收到 2 条」）
+
+
+def _inv_notice_fresh(key, window=60):
+    """诊断/失败提示的窗口去重：窗口内同一人只发一次。返回 True=允许发（并登记）。
+
+    注意：只去重「提示类」副作用，不挡归因本身——第二个事件源若带来链接仍会正常归因。"""
+    now = time.time()
+    last = float(_inv_notice_ts.get(key, 0) or 0)
+    if last and now - last < max(10, int(window)):
+        return False
+    _inv_notice_ts[key] = now
+    if len(_inv_notice_ts) > 3000:                   # 防无限膨胀：清 1 小时前的旧键
+        for k in [k for k, t in _inv_notice_ts.items() if now - float(t) > 3600]:
+            _inv_notice_ts.pop(k, None)
+    return True
 
 
 def _inv_dbg(cid, msg):
@@ -5727,7 +5744,12 @@ def _invite_card_body_kb(uid, cid, cname, my_name, link, refresh_cb):
     body = _invite_progress_text(uid, cid, my_name, cname)
     rows = []
     if link:
-        body += f"\n🔗 <b>你的专属链接</b>（好友点开直接进群）\n<code>{link}</code>\n\n📌 好友进群先记账为「待达标」，本群达标后自动发奖；也可点下方「刷新进度」立即重判。"
+        # 2026-09-10 用户报障「专属链接无效」：/link 发的是 deep-link，好友点开后**必须点「开始」**
+        # 才会触发归因并拿到加群按钮。旧文案写「点开直接进群」，新人不点开始 → 以为链接无效。
+        body += (f"\n🔗 <b>你的专属链接</b>\n<code>{link}</code>\n\n"
+                 f"📌 好友点开后，<b>先点页面底部的「开始 / START」</b>，机器人会回他一个"
+                 f"「加入群组」按钮，再点一下才能进群（不点开始 = 链接没反应）。\n"
+                 f"📌 好友进群先记账为「待达标」，本群达标后自动发奖；也可点下方「刷新进度」立即重判。")
         rows.append([InlineKeyboardButton("打开链接", url=link),
                      InlineKeyboardButton("分享给好友", url="https://t.me/share/url?url=" + quote(link, safe=""))])
     else:
@@ -7544,6 +7566,9 @@ async def _join_verify_handle_text(context, cid, uid, text):
             pass
     return True
 
+_gate_kicked_ts = {}   # "cid:uid" -> 上次硬门槛踢人的时间戳（双事件源去重，运行时态）
+
+
 async def _join_gate_check(context, cid, member, name):
     """进群硬门槛：用户名 / Premium / 简介，任一不满足 → 直接移出（不进验证流程）。全关或放行返回 True。"""
     if not (sget("JOIN_GATE_USERNAME") or sget("JOIN_GATE_PREMIUM") or sget("JOIN_GATE_BIO")):
@@ -7564,6 +7589,12 @@ async def _join_gate_check(context, cid, member, name):
             reasons.append("无简介")
     if not reasons:
         return True
+    # 双事件源去重：同一次进群 chat_member + 服务消息各调一次，不去重会重复 ban + 提示发 2 条（2026-09-10 复扫发现）
+    _gk = f"{cid}:{member.id}"
+    _now = time.time()
+    if float(_gate_kicked_ts.get(_gk, 0) or 0) and _now - float(_gate_kicked_ts[_gk]) < 60:
+        return False
+    _gate_kicked_ts[_gk] = _now
     try:
         await context.bot.ban_chat_member(cid, member.id)
         await context.bot.unban_chat_member(cid, member.id)   # 踢出（可自行再进，先过门槛再说）
@@ -10516,7 +10547,7 @@ async def _invite_track_join(cmu, cid, uid, name, context):
         if not inviter:
             if link:
                 _inv_dbg(cid, f"⚠️ 归因失败：链接不在已存表（已存：{[i.get('link','')[-12:] for i in invite_links.get(cid, {}).values()]}）")
-                if str(sget("INVITE_INVALID_MSG")).strip():
+                if str(sget("INVITE_INVALID_MSG")).strip() and _inv_notice_fresh(key):
                     try:
                         await context.bot.send_message(chat_id=cid, text=_fmt_tpl("invite_invalid_msg", name=name))
                     except Exception:
@@ -10534,13 +10565,15 @@ async def _invite_track_join(cmu, cid, uid, name, context):
                     _inv_dbg(cid, f"✅ 手动拉人计入邀请：uid={uid} 由 {a_id} 添加（开关已开）")
                 else:
                     # 黑盒终结：给管理员私聊发诊断通知（不打扰群），说明为何没计入
+                    # 双事件源去重：chat_member + 服务消息各调一次，不去重管理员会收到 2 条（2026-09-10 用户报障）
                     try:
-                        await context.bot.send_message(
-                            ADMIN_USER_ID,
-                            f"ℹ️ 进群未计入邀请：{name}（<code>{uid}</code>）加入群 <code>{cid}</code> 时"
-                            f"未携带任何邀请链接（多为手动拉人/直接搜索进群）。\n"
-                            f"邀请只认「邀请人的专属链接」进群；可让邀请人邀请，或后台开启「手动拉人计入邀请」。",
-                            parse_mode="HTML")
+                        if _inv_notice_fresh(key):
+                            await context.bot.send_message(
+                                ADMIN_USER_ID,
+                                f"ℹ️ 进群未计入邀请：{name}（<code>{uid}</code>）加入群 <code>{cid}</code> 时"
+                                f"未携带任何邀请链接（多为手动拉人/直接搜索进群）。\n"
+                                f"邀请只认「邀请人的专属链接」进群；可让邀请人邀请，或后台开启「手动拉人计入邀请」。",
+                                parse_mode="HTML")
                     except Exception:
                         pass
             if not inviter:
@@ -10641,7 +10674,12 @@ async def cmd_invite_link(update, context):
         await send_reply(update, context, "❌ 邀请系统未开启（网页「群组设置 → 邀请系统」可开启）。"); return
     cid = update.effective_chat.id
     uid = update.effective_user.id
-    deep = f"https://t.me/{context.bot.username}?start=inv_{uid}_{cid}"
+    # 守卫：bot 用户名未就绪时会拼出 t.me/None 这种坏链接（深链功能的已知坑），宁可直接提示也别发坏链
+    _bot_un = (getattr(context.bot, "username", "") or "").strip() or str(globals().get("_BOT_USERNAME") or "").strip()
+    if not _bot_un:
+        await send_reply(update, context, "❌ 机器人用户名尚未就绪，请稍等几秒后重试（或联系管理员）。")
+        return
+    deep = f"https://t.me/{_bot_un}?start=inv_{uid}_{cid}"
     mine = invite_links.get(cid, {}).get(uid)
     if not mine or mine.get("mode") != "deeplink" or mine.get("link") != deep:
         invite_links.setdefault(cid, {})[uid] = {"link": deep,

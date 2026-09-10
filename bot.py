@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-10-2235"
+BOT_VERSION = "2026-09-10-2340"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -3166,6 +3166,16 @@ async def update_poker_waiting(game, app):
     await safe_edit(app.bot, game.chat_id, game.game_msg_id, await poker_waiting_text(game, app), reply_markup=InlineKeyboardMarkup(rows))
 
 
+def _poker_quick_amounts(game, uid):
+    """行动快捷档金额：poker_table_text 的「🎚 快捷档」行 与 poker_buttons 按钮共用一份计算（防两处漂移）。
+    返回 (to_call, min_raise, half, pot)。"""
+    _min_raise = game.min_raise   # 排位局可能用独立的最低加注额
+    half_amt = max(_min_raise, game.pot // 2)
+    pot_amt = max(_min_raise, game.pot)
+    to_call = max(0, game.current_bet - game.round_bets[uid])
+    return to_call, _min_raise, half_amt, pot_amt
+
+
 async def poker_table_text(game, app):
     phase = {"preflop":"翻牌前", "flop":"翻牌圈", "turn":"转牌圈", "river":"河牌圈"}.get(game.phase, game.phase)
     lines = [
@@ -3176,11 +3186,26 @@ async def poker_table_text(game, app):
     current = game.current()
     if current:
         lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需跟：{max(0, game.current_bet - game.round_bets[current])}")
+        # 快捷档金额集中在这里展示（按钮上不放数字 → 同行按钮等宽不歪，2026-09-10 用户报障）
+        if current not in game.folded and current not in game.all_in:
+            _tc, _mr, _half, _pot = _poker_quick_amounts(game, current)
+            _parts = [] if _tc >= game.chips[current] else [f"加注 {_mr}"]
+            if _half < _pot and _tc + _half <= game.chips[current]:
+                _parts.append(f"半池+{_half}")
+            if _tc + _pot <= game.chips[current]:
+                _parts.append(f"全池+{_pot}")
+            if game.chips[current] > 0:
+                _parts.append(f"全下 {game.chips[current]}")
+            if _parts:
+                lines.append("🎚 快捷档：" + "｜".join(_parts))
     lines.append("━━━━━━━━━━━━━━━━━")
+    # 玩家行两段式（2026-09-10 用户报「文本不对齐」）：名字长短不定，把 状态/投/余 挪到第二行
+    # 统一格式后天然左对齐；名字再长也不挤压后面的字段。
     for index, uid in enumerate(game.players, 1):
         status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
         mark = "👉" if uid == current else ""
-        lines.append(f"{mark}{index}. {await get_name(app, uid)} {status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
+        lines.append(f"{mark}{index}. {await get_name(app, uid)}")
+        lines.append(f"　　{status}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
     return "\n".join(lines)
 
 
@@ -3189,30 +3214,29 @@ def poker_buttons(game, uid):
     if not acting:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🃏 查看手牌", callback_data="texas_hand")]])
     to_call = max(0, game.current_bet - game.round_bets[uid])
-    # 面板宽度=最宽行：每行最多2个按钮压宽度；跟注+加注同行、半池+全池同行、全下独占
+    # 手机端对齐铁律（SKILL §4.14）：同一行按钮文字必须等长 → 按钮统一 emoji+2字，
+    # 金额不放按钮（数字位数不定会把行挤歪），改显示在正文「🎚 快捷档」行（_poker_quick_amounts）。
     rows = [[InlineKeyboardButton("🃏 手牌", callback_data="texas_hand"),
              InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold")]]
-    act_btn = InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}",
+    act_btn = InlineKeyboardButton("✅ 过牌" if not to_call else "✅ 跟注",
                                    callback_data="texas_check" if not to_call else "texas_call")
     if uid not in game.raise_locked:
         # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底
-        _min_raise = game.min_raise  # 排位局可能用独立的最低加注额
-        half_amt = max(_min_raise, game.pot // 2)
-        pot_amt = max(_min_raise, game.pot)
+        _tc, _min_raise, half_amt, pot_amt = _poker_quick_amounts(game, uid)
         row_act = [act_btn]
         if game.chips[uid] >= to_call + _min_raise and half_amt > _min_raise:
-            row_act.append(InlineKeyboardButton(f"🔼 加注 {_min_raise}", callback_data=f"texas_raise_{_min_raise}"))
+            row_act.append(InlineKeyboardButton("🔼 加注", callback_data=f"texas_raise_{_min_raise}"))
         rows.append(row_act)
         row_p = []
         if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
-            row_p.append(InlineKeyboardButton(f"💰 半池+{half_amt}", callback_data="texas_raise_half"))
+            row_p.append(InlineKeyboardButton("💰 半池", callback_data="texas_raise_half"))
         if game.chips[uid] >= to_call + pot_amt:
-            row_p.append(InlineKeyboardButton(f"💰 全池+{pot_amt}", callback_data="texas_raise_pot"))
+            row_p.append(InlineKeyboardButton("💰 全池", callback_data="texas_raise_pot"))
         if row_p: rows.append(row_p)
     else:
         rows.append([act_btn])
     if game.chips[uid] > 0:
-        rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
+        rows.append([InlineKeyboardButton("🔥 全下", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -3270,18 +3294,18 @@ async def settle_poker(game, app):
         if len(game.showdown_order) > 1:
             lines.append("亮牌：")
             for uid in game.players:
-                if uid in game.folded: lines.extend([f"{names[uid]}：弃牌", ""])
-                else: lines.extend([f"{names[uid]}：{'  '.join(card_str(card) for card in game.hands[uid])}｜{hand_types.get(uid, '')}", ""])
+                if uid in game.folded: lines.append(f"　{names[uid]}：弃牌")
+                else: lines.append(f"　{names[uid]}：{'  '.join(card_str(card) for card in game.hands[uid])}｜{hand_types.get(uid, '')}")
         else:
             lines.append("亮牌牌型：")
             for uid in game.players:
-                if uid not in game.folded: lines.append(f"{names[uid]}：未亮牌")
-                else: lines.append(f"{names[uid]}：弃牌")
-            lines.append("")
-        
+                if uid not in game.folded: lines.append(f"　{names[uid]}：未亮牌")
+                else: lines.append(f"　{names[uid]}：弃牌")
+        lines.append("")
+
         lines.append("派奖：")
         for uid, hand, amount, details, _ in sorted(result, key=lambda item: item[2], reverse=True):
-            lines.extend([f"{names[uid]}：{hand}｜+{amount}（{'，'.join(f'{pool}+{value}' for pool, value in details)}）", ""])
+            lines.append(f"　{names[uid]}：{hand}｜+{amount}（{'，'.join(f'{pool}+{value}' for pool, value in details)}）")
         
         # 抽水先算（官方模式），面板「盈亏」行直接带实收；资金流审查同源
         _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players} \
@@ -3297,7 +3321,8 @@ async def settle_poker(game, app):
                 poker_profit_by_date[date][game.chat_id][uid] += net
             r_amt = rake_per.get(uid, 0)
             r_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
-            lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}{r_txt}", ""])
+            lines.append(f"　{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}{r_txt}")
+        lines.append("")
 
         # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌送分"）；排位分不记
         if game.mode == "official" and not game.season:
@@ -4614,6 +4639,15 @@ async def jinhua_table_text(game, app):
     current = game.current() if game.phase == "betting" else None
     if current:
         lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需补：{max(0, game._target(current) - game.round_bets[current])}")
+        # 快捷档金额集中展示（按钮上不放数字 → 同行按钮等宽，2026-09-10 与德州同款改造）
+        if current not in game.folded and current not in game.all_in:
+            _parts = []
+            if game.chips[current] >= game._target(current) + sget("JINHUA_BASE") and current not in game.raise_locked:
+                _parts.append(f"加注 {sget('JINHUA_BASE')}")
+            if game.chips[current] > 0:
+                _parts.append(f"全下 {game.chips[current]}")
+            if _parts:
+                lines.append("🎚 快捷档：" + "｜".join(_parts))
     lines.append("━━━━━━━━━━━━━━━━━")
     # 紧凑排版：每人 1 行；👉 标记当前行动者（与德州/21点一致）
     for index, uid in enumerate(game.players, 1):
@@ -4627,26 +4661,26 @@ async def jinhua_table_text(game, app):
 def jinhua_buttons(game, uid):
     """紧凑布局：非行动玩家仅「看牌」；行动玩家每行最多2按钮（看牌|弃牌 → 跟注|比牌 → 加注|刷新 → 全下）。"""
     if uid not in game.folded:
-        label = "🃏 查看手牌" if uid in game.seen else "👁 看牌"
+        label = "🃏 手牌" if uid in game.seen else "👁 看牌"   # 统一 emoji+2字（同行等宽，2026-09-10 对齐改造）
         if uid != game.current():
             return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="jh_see")]])
     else:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新界面", callback_data="jh_refresh")]])
     to_call = max(0, game._target(uid) - game.round_bets[uid])
-    # 每行最多2个按钮压宽度（面板宽度=最宽行）：看牌|弃牌 / 跟注|比牌 / 加注|刷新 / 全下独占
+    # 每行最多2个按钮压宽度；金额不放按钮（挪到正文「🎚 快捷档」行）→ 同行按钮等宽不歪
     rows = [[InlineKeyboardButton(label, callback_data="jh_see"),
              InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold")]]
-    row_call = [InlineKeyboardButton("✅ 过牌" if not to_call else f"✅ 跟注 {to_call}", callback_data="jh_call")]
+    row_call = [InlineKeyboardButton("✅ 过牌" if not to_call else "✅ 跟注", callback_data="jh_call")]
     if sum(1 for p in game.players if p not in game.folded) >= 2:
         row_call.append(InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"))
     rows.append(row_call)
     row_raise = []
     if uid not in game.raise_locked and game.chips[uid] >= to_call + sget("JINHUA_BASE"):
-        row_raise.append(InlineKeyboardButton(f"🔼 加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"))
+        row_raise.append(InlineKeyboardButton("🔼 加注", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"))
     row_raise.append(InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh"))
     rows.append(row_raise)
     if game.chips[uid] > 0:
-        rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="jh_allin")])
+        rows.append([InlineKeyboardButton("🔥 全下", callback_data="jh_allin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -4773,18 +4807,20 @@ async def settle_jinhua(game, app):
         lines.append("亮牌：")
         for uid in game.players:
             if uid in game.folded:
-                lines.extend([f"{names[uid]}：弃牌", ""])
+                lines.append(f"　{names[uid]}：弃牌")
             else:
                 cards = "  ".join(card_str(c) for c in game.hands[uid])
-                lines.extend([f"{names[uid]}：{cards}｜{hand_types.get(uid, '')}", ""])
+                lines.append(f"　{names[uid]}：{cards}｜{hand_types.get(uid, '')}")
+        lines.append("")
         lines.append("派奖：")
         for uid, hand, amount, details, _ in sorted(result, key=lambda item: item[2], reverse=True):
             if amount > 0:
-                lines.extend([f"{names[uid]}：{hand}｜+{amount}（{'，'.join(f'{pool}+{value}' for pool, value in details)}）", ""])
+                lines.append(f"　{names[uid]}：{hand}｜+{amount}（{'，'.join(f'{pool}+{value}' for pool, value in details)}）")
         # 抽水先算（官方模式），面板「盈亏」行直接带实收
         _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players} \
             if game.mode == "official" else {}
         rake_per = calc_rake(_nets)[1] if _nets else {}
+        lines.append("")
         lines.append("投入 / 盈亏：")
         for uid in game.players:
             net = game.chips[uid] - game.initial_chips[uid]
@@ -4792,7 +4828,7 @@ async def settle_jinhua(game, app):
                 jinhua_profit_by_date[date][game.chat_id][uid] += net
             r_amt = rake_per.get(uid, 0)
             r_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
-            lines.extend([f"{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}{r_txt}", ""])
+            lines.append(f"　{names[uid]}：投入 {game.total_bet[uid]}｜盈亏 {net:+d}{r_txt}")
         # 资金流审查：官方模式把本局人对人净转移记账（防"故意输牌/比牌倒赔送分"）
         if game.mode == "official":
             record_game_flows(game.chat_id, _nets, "金花")

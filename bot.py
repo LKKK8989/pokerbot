@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-10-0605"
+BOT_VERSION = "2026-09-10-0815"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -3835,6 +3835,8 @@ async def cmd_start(update, context):
             await _deep_redeem_start(update, context, _a0); return
         if _a0.startswith("mall_"):
             await _deep_mall_start(update, context, _a0); return
+        if _a0.startswith("sexch_"):
+            await _deep_season_exchange_start(update, context, _a0); return
         if _a0.startswith("inv_"):
             await _deep_invite_start(update, context, _a0); return
     await send_reply(update, context, "👋 你好！我是娱乐机器人 🎮\n\n发 /help 查看全部功能（游戏 / 积分 / 邀请 / 数据）。")
@@ -5418,38 +5420,28 @@ def _exchange_rate_text():
     return f"{sget('RANKED_EXCHANGE_COST')} 积分 = {sget('RANKED_EXCHANGE_GAIN')} 排位分"
 
 
-async def cmd_season_exchange(update, context):
-    """聊天积分兑换排位分（比例、开关、每日上限均可在后台「排位赛」分组调整）。"""
-    if not await need_auth(update, context): return
-    if not await require_group_chat(update, "积分兑换排位分", "兑换排位", context): return
+async def _season_exchange_execute(context, cid, uid, cost):
+    """聊天积分 → 排位分（**唯一扣款入口**：群内命令与私聊蓝字确认共用，避免两套逻辑漂移）。
+    返回 (ok, 提示文本)。比例/开关/每日上限全部读后台设置，改比例无需动代码。"""
     if not sget("RANKED_EXCHANGE_ENABLED"):
-        await send_reply(update, context, "❌ 积分兑换排位分功能未开启（管理员可在后台「排位赛」分组开启）。"); return
-    cid, uid = update.effective_chat.id, update.effective_user.id
-    args = context.args or []
-    if not args or not args[0].isdigit() or int(args[0]) <= 0:
-        await send_reply(update, context,
-                         f"用法：/兑换排位 数量（兑换的是聊天积分，按 {_exchange_rate_text()} 折算成排位分）\n"
-                         f"例：/兑换排位 {sget('RANKED_EXCHANGE_COST') * 10} → 得到 {sget('RANKED_EXCHANGE_GAIN') * 10} 排位分")
-        return
-    cost = int(args[0])
-    if player_is_busy(cid, uid):
-        await send_reply(update, context, "⚠️ 你正在游戏中，请先结束再兑换排位分。"); return
+        return False, "❌ 积分兑换排位分功能未开启（管理员可在后台「排位赛」分组开启）。"
     if cost < sget("RANKED_EXCHANGE_COST"):
-        await send_reply(update, context, f"❌ 最少兑换 {sget('RANKED_EXCHANGE_COST')} 积分（当前比例 {_exchange_rate_text()}）。"); return
+        return False, f"❌ 最少兑换 {sget('RANKED_EXCHANGE_COST')} 积分（当前比例 {_exchange_rate_text()}）。"
     gain = cost * sget("RANKED_EXCHANGE_GAIN") // sget("RANKED_EXCHANGE_COST")
     if gain <= 0:
-        await send_reply(update, context, f"❌ 兑换数量太小，至少能得到 1 排位分（比例 {_exchange_rate_text()}）。"); return
+        return False, f"❌ 兑换数量太小，至少能得到 1 排位分（比例 {_exchange_rate_text()}）。"
+    if player_is_busy(cid, uid):
+        return False, "⚠️ 你正在游戏中，请先结束再兑换排位分。"
     # 每日上限：按「消耗的聊天积分」累计，跨天自动重置（键为业务日）
     today = business_date()
     if sget("RANKED_EXCHANGE_DAILY_LIMIT") > 0:
         used = season_exchange_daily[today][cid].get(uid, 0)
         if used + cost > sget("RANKED_EXCHANGE_DAILY_LIMIT"):
-            await send_reply(update, context,
-                             f"❌ 超出每日兑换上限：今日已兑换 {used} 积分，上限 {sget('RANKED_EXCHANGE_DAILY_LIMIT')}（管理员可在后台调整）。")
-            return
+            return False, (f"❌ 超出每日兑换上限：今日已兑换 {used} 积分，上限 "
+                           f"{sget('RANKED_EXCHANGE_DAILY_LIMIT')}（管理员可在后台调整）。")
     async with user_wallet_locks([uid]):
         if game_chips[cid][uid] < cost:
-            await send_reply(update, context, f"❌ 聊天积分不足：需要 {cost}，当前 {game_chips[cid][uid]}。"); return
+            return False, f"❌ 聊天积分不足：需要 {cost}，当前 {game_chips[cid][uid]}。"
         game_chips[cid][uid] -= cost
         # 排位分账本：赛季未开赛也允许先兑换，开赛后报名即可带入（与 /赛季分 同一容器）
         season_points.setdefault(cid, defaultdict(int))[uid] += gain
@@ -5464,10 +5456,69 @@ async def cmd_season_exchange(update, context):
         ledger_add(cid, uid, 0, cost, "兑换排位分")  # 资金流台账：聊天积分回收
         save_data()
         await asyncio.to_thread(force_save_now)
-    await send_reply(update, context,
-                     f"✅ 兑换成功：-{cost} 聊天积分 → +{gain} 排位分\n"
-                     f"💰 聊天积分余额 {game_chips[cid][uid]}｜🏆 当前排位分 {season_points[cid][uid]}\n"
-                     f"（比例 {_exchange_rate_text()}；兑换分算「额外底分」，每日 0 点重置后保留、不计入盈亏榜。用 /排位 开局入座）")
+    return True, (f"✅ 兑换成功：-{cost} 聊天积分 → +{gain} 排位分\n"
+                  f"💰 聊天积分余额 {game_chips[cid][uid]}｜🏆 当前排位分 {season_points[cid][uid]}\n"
+                  f"（比例 {_exchange_rate_text()}；兑换分算「额外底分」，每日 0 点重置后保留、不计入盈亏榜。用 /排位 开局入座）")
+
+
+def _season_exchange_panel(cid, uid):
+    """兑换排位分面板：正文蓝色文本超链接（与商城/兑换同款），点蓝字跳私聊确认。
+    档位按后台比例生成 1×/10×/100×（去重、超上限截断）；命令 /游戏积分兑换 数量 仍可自定义直接兑换。
+    返回 (text, rows)。"""
+    unit_c = max(1, sget("RANKED_EXCHANGE_COST"))
+    unit_g = max(1, sget("RANKED_EXCHANGE_GAIN"))
+    bal = game_chips[cid][uid]
+    lines = ["🏆 <b>积分兑换排位分</b>", ""]
+    lines.append(f"💰 聊天积分：{bal}")
+    lines.append(f"🏆 当前排位分：{season_points[cid][uid]}")
+    lines.append(f"📊 兑换比例：{_exchange_rate_text()}")
+    if sget("RANKED_EXCHANGE_DAILY_LIMIT") > 0:
+        _used = season_exchange_daily[business_date()][cid].get(uid, 0)
+        lines.append(f"📅 今日已兑换：{_used}／{sget('RANKED_EXCHANGE_DAILY_LIMIT')} 积分")
+    else:
+        lines.append("📅 每日不限")
+    lines.append("")
+    tiers = []
+    for _m in (1, 10, 100):
+        _c = unit_c * _m
+        if _c > 100000000:
+            break
+        if _c not in tiers:
+            tiers.append(_c)
+    rows = []
+    for _c in tiers:
+        _g = _c * unit_g // unit_c
+        url = _deep_buy_url("sexch", cid, _c)
+        lines.append(f"🟡 <b>{_c} 聊天积分 → {_g} 排位分</b>")
+        if url:
+            lines.append(f"└ <a href='{html.escape(url, quote=True)}'>立即兑换</a>")
+        else:
+            # 启动早期/无 bot 用户名 → 拿不到深链，退回群内按钮直兑
+            rows.append([InlineKeyboardButton(f"💱 {_c} 积分 → {_g} 排位分",
+                                              callback_data=f"sexch_ask_{_c}")])
+        lines.append("")
+    lines.append("💡 也可发「/游戏积分兑换 数量」自定义数量直接兑换")
+    return "\n".join(lines), rows
+
+
+async def cmd_season_exchange(update, context):
+    """聊天积分兑换排位分（比例、开关、每日上限均可在后台「排位赛」分组调整）。
+    无参数 → 发蓝字面板（点链接跳私聊确认）；带数量 → 直接兑换（命令兜底，保留）。"""
+    if not await need_auth(update, context): return
+    if not await require_group_chat(update, "积分兑换排位分", "游戏积分兑换", context): return
+    if not sget("RANKED_EXCHANGE_ENABLED"):
+        await send_reply(update, context, "❌ 积分兑换排位分功能未开启（管理员可在后台「排位赛」分组开启）。"); return
+    cid, uid = update.effective_chat.id, update.effective_user.id
+    args = context.args or []
+    if not args or not args[0].isdigit() or int(args[0]) <= 0:
+        text, rows = _season_exchange_panel(cid, uid)
+        msg = await safe_send(context.bot, cid, text,
+                              reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+        if msg and MALL_LIST_DELETE_SECONDS > 0:
+            schedule_delete(context.application, cid, msg, MALL_LIST_DELETE_SECONDS)
+        return
+    ok, txt = await _season_exchange_execute(context, cid, uid, int(args[0]))
+    await send_reply(update, context, txt)
 
 
 async def cmd_season_help(update, context):
@@ -5484,7 +5535,8 @@ async def cmd_season_help(update, context):
         "• /赌神 — 查看 🎰赌神 称号与历届荣誉墙\n"
         "• 大厅看板按钮：📊 看排位榜\n\n"
         "<b>积分兑换排位分</b>\n"
-        f"• /兑换排位 数量 — 把聊天积分换成排位分（当前比例 {_exchange_rate_text()}）\n"
+        "• /游戏积分兑换 — 打开兑换面板，点蓝字「立即兑换」跳私聊确认（推荐）\n"
+        f"• /游戏积分兑换 数量 — 自定义数量直接兑换（当前比例 {_exchange_rate_text()}）\n"
         f"• 开关：{'已开启' if sget('RANKED_EXCHANGE_ENABLED') else '已关闭'}"
         + (f"｜每人每日上限 {sget('RANKED_EXCHANGE_DAILY_LIMIT')} 积分" if sget("RANKED_EXCHANGE_DAILY_LIMIT") else "｜每日不限")
         + "（管理员可在后台「排位赛」分组调整）\n"
@@ -5530,7 +5582,7 @@ async def cmd_season_play(update, context):
     if sget("SEASON_MIN_ENTRY_CHIPS") and season_points[cid][uid] < sget("SEASON_MIN_ENTRY_CHIPS"):
         await send_reply(update, context,
                          f"❌ 进入排位赛至少需要 {sget('SEASON_MIN_ENTRY_CHIPS')} 排位分，你当前 {season_points[cid][uid]}。\n"
-                         f"可用 /兑换排位 数量 把聊天积分换成排位分。"); return
+                         f"可用 /游戏积分兑换 数量 把聊天积分换成排位分。"); return
     game = active_poker_games.get(cid)
     if game:
         if game.season:
@@ -6261,10 +6313,20 @@ async def on_button(update, context):
         _remember_name(update)
         # 私聊兑换确认回调（redeem/mall ok|no_<cid>_<idx>）：在 bot 私聊里点「确认/取消」触发，
         # 聊天是私聊（cid=用户id），不能用群授权拦截；真实目标群 id 内嵌在 data 里。
-        if data.startswith(("redeem_ok_", "redeem_no_", "mall_ok_", "mall_no_")):
+        if data.startswith(("redeem_ok_", "redeem_no_", "mall_ok_", "mall_no_", "sexch_ok_", "sexch_no_")):
             if uid in BLACKLISTED_USERS and not is_bot_admin(uid):
                 await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
             await _deep_start_confirm(q, data, context)
+            return
+        # --- 兑换排位分：无深链兜底（_BOT_USERNAME 为空时面板给的是 callback 按钮） ---
+        if data.startswith("sexch_ask_"):
+            try: _sc = int(data[len("sexch_ask_"):])
+            except ValueError:
+                await q.answer("按钮已过期", show_alert=True); return
+            _sok, _stxt = await _season_exchange_execute(context, cid, uid, _sc)
+            if _sok:
+                await send_reply(update, context, _stxt)
+            await q.answer(_stxt.split("\n")[0][:190], show_alert=not _sok)
             return
         # --- 邀请：私聊刷新（面板推送到私聊后，私聊 chat.id 不是群 id，必须在群授权前处理） ---
         if data.startswith("invite_refresh_priv_"):
@@ -6497,10 +6559,10 @@ async def on_button(update, context):
                     await q.answer("✅ 已报名")
                 return
             if data == "season_exchange_info":
-                # 大厅按钮：只回提示，不直接扣分（避免误触扣款，兑换走 /兑换排位 数量）
+                # 大厅按钮：只回提示，不直接扣分（避免误触扣款，兑换走 /游戏积分兑换 数量）
                 if not sget("RANKED_EXCHANGE_ENABLED"):
                     await q.answer("积分兑换排位分功能未开启", show_alert=True); return
-                await q.answer(f"发「/兑换排位 数量」即可兑换\n当前比例 {_exchange_rate_text()}"
+                await q.answer(f"发「/游戏积分兑换 数量」即可兑换\n当前比例 {_exchange_rate_text()}"
                                + (f"\n每人每日上限 {sget('RANKED_EXCHANGE_DAILY_LIMIT')} 积分" if sget("RANKED_EXCHANGE_DAILY_LIMIT") else ""),
                                show_alert=True)
                 return
@@ -8717,11 +8779,11 @@ def _parse_dm_redeem_data(data):
 
 
 async def _deep_start_confirm(q, data, context):
-    """群内点「立即兑换」蓝色按钮 → 跳转 bot 私聊 → 机器人显示 是否兑换/积分不足。
-    本函数处理私聊里确认/取消按钮回调（callback_data=redeem_ok_*/redeem_no_*/mall_*）。"""
+    """群内点「立即兑换」蓝色文字 → 跳转 bot 私聊 → 机器人显示 是否兑换/积分不足。
+    本函数处理私聊里确认/取消按钮回调（callback_data=redeem_ok_*/redeem_no_*/mall_*/sexch_*）。"""
     kind, action, cid, idx = _parse_dm_redeem_data(data)
     uid = q.from_user.id
-    if kind not in ("redeem", "mall") or action not in ("ok", "no") or cid is None:
+    if kind not in ("redeem", "mall", "sexch") or action not in ("ok", "no") or cid is None:
         await q.answer("无效操作", show_alert=True); return
     if uid in BLACKLISTED_USERS and not is_bot_admin(uid):
         await q.answer("🚫 你已被禁止使用本机器人", show_alert=True); return
@@ -8731,8 +8793,11 @@ async def _deep_start_confirm(q, data, context):
         await q.answer("已取消"); return
     if kind == "redeem":
         ok, txt = await _redeem_dm_ok(context, cid, uid, idx)
-    else:
+    elif kind == "mall":
         ok, txt = await _mall_dm_ok(context, cid, uid, idx)
+    else:
+        # sexch：idx 段承载的是「消耗的聊天积分」
+        ok, txt = await _season_exchange_execute(context, cid, uid, idx)
     try:
         await q.message.edit_text(txt)
     except Exception:
@@ -8766,12 +8831,16 @@ async def _deep_redeem_start(update, context, payload):
     left = int(item.get("left", 0) or 0)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ 确认兑换", callback_data=f"redeem_ok_{cid}_{idx}"),
-        InlineKeyboardButton("❌ 取消", callback_data=f"redeem_no_{cid}_{idx}"),
+        InlineKeyboardButton("❌ 取消兑换", callback_data=f"redeem_no_{cid}_{idx}"),
     ]])
+    # 逐行字段 + 等长按钮：手机端两个按钮宽度才一致（用户 2026-09-10 截图报「文本和按钮没对齐」）
     txt = (f"🎁 <b>{item['name']}</b>\n"
-           f"价格：{price} 积分｜剩余 {'不限' if left <= 0 else left}\n"
-           f"━━━━━━━━━\n"
-           f"当前积分：{bal}\n\n是否兑换？")
+           f"━━━━━━━━━━━━━━━\n"
+           f"价格：{price} 积分\n"
+           f"剩余：{'不限' if left <= 0 else left}\n"
+           f"当前积分：{bal}\n"
+           f"━━━━━━━━━━━━━━━\n"
+           f"是否兑换？")
     # 确认弹窗不清除（等用户点确认/取消后再编辑）；不走 REPLY_DELETE_SECONDS
     await send_reply(update, context, txt, kb=kb, parse_mode="HTML", delete_after=0)
 
@@ -8804,13 +8873,64 @@ async def _deep_mall_start(update, context, payload):
         return
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ 确认兑换", callback_data=f"mall_ok_{cid}_{idx}"),
-        InlineKeyboardButton("❌ 取消", callback_data=f"mall_no_{cid}_{idx}"),
+        InlineKeyboardButton("❌ 取消兑换", callback_data=f"mall_no_{cid}_{idx}"),
     ]])
+    # 逐行字段 + 等长按钮：与积分兑换确认卡同款（手机端按钮宽度一致）
     txt = (f"🛒 <b>{item['name']}</b>\n"
+           f"━━━━━━━━━━━━━━━\n"
            f"价格：{price} 积分\n"
-           f"━━━━━━━━━\n"
-           f"当前积分：{bal}\n\n是否兑换？")
+           f"当前积分：{bal}\n"
+           f"━━━━━━━━━━━━━━━\n"
+           f"是否兑换？")
     # 确认弹窗不清除（等用户点确认/取消后再编辑）；不走 REPLY_DELETE_SECONDS
+    await send_reply(update, context, txt, kb=kb, parse_mode="HTML", delete_after=0)
+
+
+async def _deep_season_exchange_start(update, context, payload):
+    """私聊里收到 /start sexch_<cid>_<cost>：显示「是否兑换 / 积分不足」确认卡片。
+    与兑换/商城同一套竞品式流程；真正扣款仍走 _season_exchange_execute（唯一入口）。"""
+    if not update.effective_chat or update.effective_chat.type != "private":
+        await send_reply(update, context, "⚠️ 请到机器人私聊完成兑换确认。"); return
+    try:
+        _, cid_s, cost_s = payload.split("_", 2)
+        cid, cost = int(cid_s), int(cost_s)
+    except (ValueError, AttributeError):
+        await send_reply(update, context, "❌ 兑换链接无效，请回群重新打开面板。"); return
+    uid = update.effective_user.id
+    if not is_auth(cid):
+        await send_reply(update, context, "❌ 该群未授权使用本机器人。"); return
+    if not sget("RANKED_EXCHANGE_ENABLED"):
+        await send_reply(update, context, "❌ 积分兑换排位分功能未开启（管理员可在后台「排位赛」分组开启）。"); return
+    unit_c = max(1, sget("RANKED_EXCHANGE_COST"))
+    if cost < unit_c:
+        await send_reply(update, context, f"❌ 最少兑换 {unit_c} 积分（当前比例 {_exchange_rate_text()}）。"); return
+    gain = cost * sget("RANKED_EXCHANGE_GAIN") // unit_c
+    if gain <= 0:
+        await send_reply(update, context, f"❌ 兑换数量太小，至少能得到 1 排位分（比例 {_exchange_rate_text()}）。"); return
+    bal = game_chips[cid][uid]
+    if bal < cost:
+        await send_reply(update, context,
+                         f"❌ 聊天积分不足：需要 {cost}，当前 {bal}。\n去群聊赢积分后再来兑换吧～")
+        return
+    if sget("RANKED_EXCHANGE_DAILY_LIMIT") > 0:
+        used = season_exchange_daily[business_date()][cid].get(uid, 0)
+        if used + cost > sget("RANKED_EXCHANGE_DAILY_LIMIT"):
+            await send_reply(update, context,
+                             f"❌ 超出每日兑换上限：今日已兑换 {used} 积分，"
+                             f"上限 {sget('RANKED_EXCHANGE_DAILY_LIMIT')}（管理员可在后台调整）。")
+            return
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 确认兑换", callback_data=f"sexch_ok_{cid}_{cost}"),
+        InlineKeyboardButton("❌ 取消兑换", callback_data=f"sexch_no_{cid}_{cost}"),
+    ]])
+    txt = (f"🏆 <b>积分兑换排位分</b>\n"
+           f"━━━━━━━━━━━━━━━\n"
+           f"消耗：{cost} 聊天积分\n"
+           f"获得：{gain} 排位分\n"
+           f"当前积分：{bal}\n"
+           f"当前排位分：{season_points[cid][uid]}\n"
+           f"━━━━━━━━━━━━━━━\n"
+           f"是否兑换？")
     await send_reply(update, context, txt, kb=kb, parse_mode="HTML", delete_after=0)
 
 
@@ -11360,6 +11480,8 @@ CMD_ALIASES = {
     "赛季分": cmd_season_points, "加赛季分": cmd_season_points, "减赛季分": cmd_season_points, "seasonpoints": cmd_season_points,
     "兑换排位": cmd_season_exchange, "排位兑换": cmd_season_exchange, "积分换排位": cmd_season_exchange,
     "兑换排位分": cmd_season_exchange, "seasonexchange": cmd_season_exchange,
+    # 2026-09-10 用户指定：聊天积分→排位分 的主推触发词（更好记）
+    "游戏积分兑换": cmd_season_exchange, "游戏积分换排位": cmd_season_exchange, "排位分兑换": cmd_season_exchange,
     # 旧英文/数字别名（保留兼容，仍可用）
     "start": cmd_start, "help": cmd_help, "dz": cmd_dz, "sm": cmd_sm,
     "21": cmd_21, "end": cmd_end,

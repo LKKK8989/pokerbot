@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1325"
+BOT_VERSION = "2026-09-11-1400"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -3321,25 +3321,27 @@ def poker_buttons(game, uid):
         return InlineKeyboardMarkup([[InlineKeyboardButton("🃏 查看手牌", callback_data="texas_hand")]])
     to_call = max(0, game.current_bet - game.round_bets[uid])
     # 2026-09-11 用户要求撤销「emoji+2字」改造：按钮恢复带金额旧样式（快捷档行已删）
-    rows = [[InlineKeyboardButton("🃏 手牌", callback_data="texas_hand"),
-             InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold")]]
+    # 2026-09-11 用户要求（防误触）：过牌/跟注上移到首行右侧（高频且顺手），
+    # 弃牌下移到第二行最左——与高频键拉开距离，避免手滑点错直接出局。
     act_btn = InlineKeyboardButton("✅ 过牌" if not to_call else "✅ 跟注",
                                    callback_data="texas_check" if not to_call else "texas_call")
+    fold_btn = InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold")
+    rows = [[InlineKeyboardButton("🃏 手牌", callback_data="texas_hand"), act_btn]]
     if uid not in game.raise_locked:
         # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底
         _tc, _min_raise, half_amt, pot_amt = _poker_quick_amounts(game, uid)
-        row_act = [act_btn]
+        row_act = [fold_btn]
         if game.chips[uid] >= to_call + _min_raise and half_amt > _min_raise:
-            row_act.append(InlineKeyboardButton(f"🔼 加注 {_min_raise}", callback_data=f"texas_raise_{_min_raise}"))
+            row_act.append(InlineKeyboardButton(f"🚀 加注 {_min_raise}", callback_data=f"texas_raise_{_min_raise}"))
         rows.append(row_act)
         row_p = []
         if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
-            row_p.append(InlineKeyboardButton(f"💰 半池+{half_amt}", callback_data="texas_raise_half"))
+            row_p.append(InlineKeyboardButton(f"💰 半池 {half_amt}", callback_data="texas_raise_half"))
         if game.chips[uid] >= to_call + pot_amt:
-            row_p.append(InlineKeyboardButton(f"💰 全池+{pot_amt}", callback_data="texas_raise_pot"))
+            row_p.append(InlineKeyboardButton(f"💰 全池 {pot_amt}", callback_data="texas_raise_pot"))
         if row_p: rows.append(row_p)
     else:
-        rows.append([act_btn])
+        rows.append([fold_btn])
     if game.chips[uid] > 0:
         rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
@@ -5532,7 +5534,10 @@ async def jinhua_table_text(game, app):
 
 
 def jinhua_buttons(game, uid):
-    """紧凑布局：非行动玩家仅「看牌」；行动玩家每行最多2按钮（看牌|弃牌 → 跟注|比牌 → 加注|刷新 → 全下）。"""
+    """紧凑布局：非行动玩家仅「看牌」；行动玩家 4 行
+    （看牌单独首行 → 弃牌|跟注|比牌 → 加注|刷新 → 全下）。
+    2026-09-11 用户要求（防误触）：看牌独占首行、弃牌退到第二行最左，
+    与高频的跟注/加注拉开距离。"""
     if uid not in game.folded:
         label = "🃏 手牌" if uid in game.seen else "👁 看牌"   # 统一 emoji+2字（同行等宽，2026-09-10 对齐改造）
         if uid != game.current():
@@ -5541,15 +5546,16 @@ def jinhua_buttons(game, uid):
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新界面", callback_data="jh_refresh")]])
     to_call = max(0, game._target(uid) - game.round_bets[uid])
     # 2026-09-11 用户要求撤销「emoji+2字」改造：金额回到按钮上（快捷档行已删）
-    rows = [[InlineKeyboardButton(label, callback_data="jh_see"),
-             InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold")]]
-    row_call = [InlineKeyboardButton("✅ 过牌" if not to_call else "✅ 跟注", callback_data="jh_call")]
+    # 2026-09-11 用户要求（防误触）：看牌独占首行；弃牌退到第二行最左，跟注/比牌在其右
+    rows = [[InlineKeyboardButton(label, callback_data="jh_see")]]
+    row_call = [InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold"),
+                InlineKeyboardButton("✅ 过牌" if not to_call else "✅ 跟注", callback_data="jh_call")]
     if sum(1 for p in game.players if p not in game.folded) >= 2:
         row_call.append(InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"))
     rows.append(row_call)
     row_raise = []
     if uid not in game.raise_locked and game.chips[uid] >= to_call + sget("JINHUA_BASE"):
-        row_raise.append(InlineKeyboardButton(f"🔼 加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"))
+        row_raise.append(InlineKeyboardButton(f"🚀 加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"))
     row_raise.append(InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh"))
     rows.append(row_raise)
     if game.chips[uid] > 0:
@@ -5603,7 +5609,7 @@ async def show_jinhua_action(game, app):
             [InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold"),
              InlineKeyboardButton("⚔️ 比牌", callback_data="jh_compare_menu"),
              InlineKeyboardButton("🃏 开牌比大小", callback_data="jh_open")],
-            [InlineKeyboardButton(f"🔼 继续加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"),
+            [InlineKeyboardButton(f"🚀 继续加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"),
              InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh")],
         ])
         await _sync_jinhua_msg(game, app, text, kb)

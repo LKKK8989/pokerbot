@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-0030"
+BOT_VERSION = "2026-09-11-0905"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -2627,6 +2627,24 @@ async def action_notice(cid, app, uid, desc):
         asyncio.create_task(delete_later())
 
 
+def schedule_notice_delete(app, cid, message, kind="panel"):
+    """给机器人「提示/播报」类消息挂后台自动回收（2026-09-11 用户报「超时自动过牌」「亮牌」等不删）。
+
+    kind="panel"  过程类（超时自动行动提示、亮牌按钮卡、比牌公告）→ PANEL_DELETE_SECONDS
+    kind="settle" 结算类播报（亮牌收池播报、结算失败提示）→ SETTLE_DELETE_SECONDS
+    秒数为 0 表示不删（与后台设置语义一致）；message 为空时静默跳过。
+    """
+    if not message:
+        return
+    secs = sget("SETTLE_DELETE_SECONDS") if kind == "settle" else sget("PANEL_DELETE_SECONDS")
+    try:
+        secs = int(secs or 0)
+    except (TypeError, ValueError):
+        secs = 0
+    if secs > 0:
+        schedule_delete(app, cid, message, secs)
+
+
 def ledger_add(cid, frm, to, amt, typ):
     """资金流台账：红包领取/转赠等人对人转移逐笔记账（防小号审查用，留 5000 条）。"""
     ledger.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "frm": frm, "to": to, "amt": amt, "typ": typ})
@@ -3176,7 +3194,7 @@ async def update_poker_waiting(game, app):
 
 
 def _poker_quick_amounts(game, uid):
-    """行动快捷档金额：poker_table_text 的「🎚 快捷档」行 与 poker_buttons 按钮共用一份计算（防两处漂移）。
+    """行动金额计算：poker_buttons 的加注/半池/全池按钮共用一份计算（防两处漂移）。
     返回 (to_call, min_raise, half, pot)。"""
     _min_raise = game.min_raise   # 排位局可能用独立的最低加注额
     half_amt = max(_min_raise, game.pot // 2)
@@ -3193,26 +3211,18 @@ async def poker_table_text(game, app):
         f"💰 奖池 {game.pot}｜下注 {game.current_bet}",
     ]
     current = game.current()
-    if current:
-        lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需跟：{max(0, game.current_bet - game.round_bets[current])}")
-        # 快捷档金额集中在这里展示（按钮上不放数字 → 同行按钮等宽不歪，2026-09-10 用户报障）
-        if current not in game.folded and current not in game.all_in:
-            _tc, _mr, _half, _pot = _poker_quick_amounts(game, current)
-            _parts = [] if _tc >= game.chips[current] else [f"加注 {_mr}"]
-            if _half < _pot and _tc + _half <= game.chips[current]:
-                _parts.append(f"半池+{_half}")
-            if _tc + _pot <= game.chips[current]:
-                _parts.append(f"全池+{_pot}")
-            if game.chips[current] > 0:
-                _parts.append(f"全下 {game.chips[current]}")
-            if _parts:
-                lines.append("🎚 快捷档：" + "｜".join(_parts))
     lines.append("━━━━━━━━━━━━━━━━━")
+    if current:
+        # 2026-09-11 用户要求：行动提示放到分隔线之后、玩家列表之前（分隔线 = 牌面/行动区的分界）；
+        # 并与「请在N秒内行动」合并成一行（原两句重复且不显眼）
+        _need = max(0, game.current_bet - game.round_bets[current])
+        lines.append(f"⏳ <b>{await get_name(app, current)}</b> 行动中｜需跟 {_need}｜{game.turn_timeout} 秒未操作自动过牌/弃牌")
     # 玩家行两段式（2026-09-10 用户报「文本不对齐」）：名字长短不定，把 状态/投/余 挪到第二行
     # 统一格式后天然左对齐；名字再长也不挤压后面的字段。
+    # 2026-09-11 用户要求：👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
     for index, uid in enumerate(game.players, 1):
         status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
-        mark = "👉" if uid == current else ""
+        mark = "👉 " if uid == current else "   "
         lines.append(f"{mark}{index}. {await get_name(app, uid)}")
         lines.append(f"　　{status}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
     return "\n".join(lines)
@@ -3223,8 +3233,7 @@ def poker_buttons(game, uid):
     if not acting:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🃏 查看手牌", callback_data="texas_hand")]])
     to_call = max(0, game.current_bet - game.round_bets[uid])
-    # 手机端对齐铁律（SKILL §4.14）：同一行按钮文字必须等长 → 按钮统一 emoji+2字，
-    # 金额不放按钮（数字位数不定会把行挤歪），改显示在正文「🎚 快捷档」行（_poker_quick_amounts）。
+    # 2026-09-11 用户要求撤销「emoji+2字」改造：按钮恢复带金额旧样式（快捷档行已删）
     rows = [[InlineKeyboardButton("🃏 手牌", callback_data="texas_hand"),
              InlineKeyboardButton("❌ 弃牌", callback_data="texas_fold")]]
     act_btn = InlineKeyboardButton("✅ 过牌" if not to_call else "✅ 跟注",
@@ -3234,24 +3243,24 @@ def poker_buttons(game, uid):
         _tc, _min_raise, half_amt, pot_amt = _poker_quick_amounts(game, uid)
         row_act = [act_btn]
         if game.chips[uid] >= to_call + _min_raise and half_amt > _min_raise:
-            row_act.append(InlineKeyboardButton("🔼 加注", callback_data=f"texas_raise_{_min_raise}"))
+            row_act.append(InlineKeyboardButton(f"🔼 加注 {_min_raise}", callback_data=f"texas_raise_{_min_raise}"))
         rows.append(row_act)
         row_p = []
         if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
-            row_p.append(InlineKeyboardButton("💰 半池", callback_data="texas_raise_half"))
+            row_p.append(InlineKeyboardButton(f"💰 半池+{half_amt}", callback_data="texas_raise_half"))
         if game.chips[uid] >= to_call + pot_amt:
-            row_p.append(InlineKeyboardButton("💰 全池", callback_data="texas_raise_pot"))
+            row_p.append(InlineKeyboardButton(f"💰 全池+{pot_amt}", callback_data="texas_raise_pot"))
         if row_p: rows.append(row_p)
     else:
         rows.append([act_btn])
     if game.chips[uid] > 0:
-        rows.append([InlineKeyboardButton("🔥 全下", callback_data="texas_allin")])
+        rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="texas_allin")])
     return InlineKeyboardMarkup(rows)
 
 
 async def update_poker_table(game, app):
     # 游戏开始后：把等待房消息直接编辑成牌桌（不删除；操作按钮在行动消息里）
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, await poker_table_text(game, app), reply_markup=None)
+    await safe_edit(app.bot, game.chat_id, game.game_msg_id, await poker_table_text(game, app), reply_markup=None, parse_mode="HTML")
 
 
 async def start_turn_timer(game, app):
@@ -3262,7 +3271,8 @@ async def start_turn_timer(game, app):
         return
     # 行动消息携带完整牌桌 + 行动提示 + 操作按钮（一条消息）
     await safe_delete(app.bot, game.chat_id, game.action_msg_id)
-    text = f"{await poker_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {game.turn_timeout} 秒内行动。"
+    # 行动提示已并入牌桌文本（见 poker_table_text），此处不再追加第二句
+    text = await poker_table_text(game, app)
     msg = await safe_send(app.bot, game.chat_id, text, reply_markup=poker_buttons(game, uid), parse_mode="HTML")
     game.action_msg_id = msg.message_id if msg else None
 
@@ -3278,7 +3288,8 @@ async def start_turn_timer(game, app):
         else:
             game.action(uid, "fold")
             desc = "超时自动弃牌"
-        await safe_send(app.bot, game.chat_id, f"⏰ {desc}：{await get_name(app, uid)}")
+        await schedule_notice_delete(app, game.chat_id,
+                                     await safe_send(app.bot, game.chat_id, f"⏰ {desc}：{await get_name(app, uid)}"))
         if game.phase == "showdown":
             await safe_delete(app.bot, game.chat_id, game.action_msg_id)
             await settle_poker(game, app)
@@ -3399,6 +3410,7 @@ async def settle_poker(game, app):
                 btn = await safe_send(app.bot, game.chat_id,
                     "💡 本局单挑收池，赢家可选择亮出底牌：",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🃏 亮牌", callback_data="texas_reveal")]]))
+                schedule_notice_delete(app, game.chat_id, btn)
                 # 入队而非覆盖：同一群可同时存在多局未亮牌的单赢
                 recent_poker_reveals[game.chat_id].append({
                     "winner": winner,
@@ -3438,12 +3450,17 @@ async def handle_texas_reveal(cid, uid, q, context):
     name = await get_name(context.application, info["winner"])
     hand_text = "  ".join(card_str(c) for c in info["hand"])
     board_text = "  ".join(card_str(c) for c in info["board"]) if info["board"] else "（未发公牌）"
-    await safe_send(context.bot, cid,
+    _reveal_msg = await safe_send(context.bot, cid,
         f"🃏 <b>{name} 亮牌</b>：{hand_text}\n🃏 公牌：{board_text}（收全部底池）",
         parse_mode="HTML")
+    schedule_notice_delete(context.application, cid, _reveal_msg, kind="settle")
     rid = info.get("reveal_msg_id")
     if rid:
         await safe_edit(context.bot, cid, rid, "🃏 已亮牌", reply_markup=None)
+        # 亮完牌的按钮卡片同样回收（之前编辑成「已亮牌」后就永久留在群里）
+        _rid_secs = int(sget("PANEL_DELETE_SECONDS") or 0)
+        if _rid_secs > 0:
+            schedule_delete_ids(context.application, cid, rid, _rid_secs)
     # 仅移除本条亮牌记录，其余未亮牌的单赢保留
     recent_poker_reveals[cid] = [it for it in infos if it is not info]
     if not recent_poker_reveals[cid]:
@@ -3910,7 +3927,8 @@ async def start_bj_turn_timer(game, app):
         if active_blackjack_games.get(game.chat_id) is not game: return  # 游戏已终止或被替换
         if game.phase == "playing" and game.players[game.current_player_idx] == curr_uid:
             game.next_player()
-            await safe_send(app.bot, game.chat_id, f"⏰ {await get_name(app, curr_uid)} 超时自动停牌。")
+            schedule_notice_delete(app, game.chat_id,
+                                   await safe_send(app.bot, game.chat_id, f"⏰ {await get_name(app, curr_uid)} 超时自动停牌。"))
             if game.phase == "dealer_turn": await update_blackjack_ui(game, app)
             else: await update_blackjack_ui(game, app); await start_bj_turn_timer(game, app)
     game.timer_task = asyncio.create_task(timeout())
@@ -3969,10 +3987,13 @@ async def update_blackjack_ui(game, app):
         my_score = game.get_score(game.hands[curr_uid])
         # 单一权威面板：牌桌+操作按钮同一条消息，原地编辑不闪跳；信息不再写两遍
         lines = ["🃏 <b>21点</b>", f"🏛 庄家：{dealer_peek}", "━━━━━━━━━━━━━━━━━"]
-        for i, uid in enumerate(game.players, 1):
-            mark = "👉" if uid == curr_uid else ""
-            lines.append(f"{mark}{i}. {await get_name(app, uid)} {game.get_card_str(game.hands[uid])} ({game.get_score(game.hands[uid])})")
+        # 2026-09-11 用户要求：行动行放到分隔线之后、玩家列表之前
         lines.append(f"⏳ <b>{await get_name(app, curr_uid)}</b> 行动｜我 {my_hand} ({my_score}点)")
+        lines.append("")
+        # 👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
+        for i, uid in enumerate(game.players, 1):
+            mark = "👉 " if uid == curr_uid else "   "
+            lines.append(f"{mark}{i}. {await get_name(app, uid)} {game.get_card_str(game.hands[uid])} ({game.get_score(game.hands[uid])})")
         text = "\n".join(lines)
 
         kb_rows = [[
@@ -4197,8 +4218,13 @@ _CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6,
 
 def parse_dice_bid(text):
     """把群友的叫牌文本解析成 (数量, 点数)。不是叫牌返回 None。
-    支持：6个3 / 6個3 / 6 3 / 六个三 / 六個三 / 两 个 四 / 十个2。"""
+    宽容识别（玩家怎么顺手怎么打）：
+      6个3 / 6個3 / 6 3 / 六个三 / 六個三 / 两 个 四 / 十个2
+      叫6个3 / 喊 6个3 / 报6个3 / 我出6个3 / 6个3吧
+    """
     t = text.strip()
+    t = re.sub(r"^\s*(?:我\s*)?(?:叫|喊|报|出|要)\s*[:：]?\s*", "", t)
+    t = re.sub(r"\s*(?:吧|起|了)\s*$", "", t)
     mm = re.fullmatch(r"(\d{1,2}|[一二两三四五六七八九十]+)\s*[个個]\s*(\d|[一二三四五六]+)", t)
     if not mm:
         mm = re.fullmatch(r"(\d{1,2})\s+(\d)", t)
@@ -4230,6 +4256,7 @@ class DiceGame:
         self.dice = {}         # uid -> 剩余骰子数
         self.hands = {}        # uid -> [点数列表]（仅本局内存，绝不下发群）
         self.out = set()       # 已出局
+        self.dropped = []      # 开局因底注不足被剔除的玩家（调用方提示用）
         self.pot = 0
         self.bid = None        # 当前叫牌 (count, face, uid)
         self.starter_uid = None  # 本手先叫者（上一手输家先叫）
@@ -4251,6 +4278,12 @@ class DiceGame:
 
     # ---- 开局 ----
     def start(self):
+        if len(self.players) < 2: return False
+        # 底注不足者剔除（否则 paid=0 却能分奖池 = 零成本白拿），由调用方提示
+        _ante = sget("DICE_ANTE")
+        self.dropped = [u for u in self.players if game_chips[self.chat_id][u] < _ante]
+        if self.dropped:
+            self.players = [u for u in self.players if u not in self.dropped]
         if len(self.players) < 2: return False
         random.shuffle(self.players)
         self.cancel_wait(); self.out.clear(); self.settled = False
@@ -4416,8 +4449,11 @@ def dice_buttons(game, uid):
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新界面", callback_data="dice_refresh")]])
     if uid != game.actor or game.phase != "playing":
         return InlineKeyboardMarkup([[InlineKeyboardButton("🎲 看牌", callback_data="dice_see")]])
-    rows = [[InlineKeyboardButton("🎲 看牌", callback_data="dice_see"),
-             InlineKeyboardButton("➕ 加码", callback_data="dice_raise")]]
+    row1 = [InlineKeyboardButton("🎲 看牌", callback_data="dice_see")]
+    # 无合法加码（数量点数双顶满）时隐藏「加码」，避免用户点了才被拒
+    if dice_min_raise(game):
+        row1.append(InlineKeyboardButton("➕ 加码", callback_data="dice_raise"))
+    rows = [row1]
     row2 = []
     if game.bid:
         row2.append(InlineKeyboardButton("🎯 开骰", callback_data="dice_open"))
@@ -4436,12 +4472,14 @@ async def dice_table_text(game, app):
         bc, bf, bidder = game.bid
         lines.append(f"🎙 当前叫牌：{bc}个{bf}（{await get_name(app, bidder)}）")
     cur = game.actor if game.phase == "playing" else None
-    if cur:
-        lines.append(f"⏳ 当前行动：{await get_name(app, cur)}（加码或开骰）")
     lines.append("━━━━━━━━━━━━━━━━━")
+    if cur:
+        # 2026-09-11 用户要求：行动提示放到分隔线之后、玩家列表之前；并与超时提示合并为一行
+        lines.append(f"⏳ <b>{await get_name(app, cur)}</b> 行动中（加码或开骰）｜{sget('DICE_THINK_SECONDS')} 秒未操作自动开骰")
     # 两段式玩家行（§4.14 铁律：名字一行、数据一行全角缩进，手机端不挤）
+    # 2026-09-11 用户要求：👉 留在行首，非行动者补 3 个半角空格占位 → 序号落在同一列
     for index, uid in enumerate(game.players, 1):
-        mark = "👉" if uid == cur else ""
+        mark = "👉 " if uid == cur else "   "
         lines.append(f"{mark}{index}. {await get_name(app, uid)}")
         if uid in game.out:
             lines.append("　　💀 已出局")
@@ -4454,14 +4492,17 @@ async def dice_table_text(game, app):
 async def show_dice_action(game, app):
     cur = game.actor if game.phase == "playing" else None
     if cur:
-        text = f"{await dice_table_text(game, app)}\n\n⏰ <b>{await get_name(app, cur)}</b> 请在 {sget('DICE_THINK_SECONDS')} 秒内加码或开骰。"
-        await _sync_jinhua_msg(game, app, text, dice_buttons(game, cur))
+        # 行动提示已并入牌桌文本（见 dice_table_text），此处不再追加第二句
+        await _sync_jinhua_msg(game, app, await dice_table_text(game, app), dice_buttons(game, cur))
     else:
         await _sync_jinhua_msg(game, app, await dice_table_text(game, app), dice_buttons(game, game.owner_id))
 
 
 async def start_dice_turn_timer(game, app):
     game.cancel_timer()
+    # 先判终局：showdown 直接结算，绝不留一个带按钮但不结算的死界面（牌局卡死）
+    if game.phase == "showdown":
+        await settle_dice(game, app); return
     await show_dice_action(game, app)
     if game.phase != "playing": return
     uid = game.actor
@@ -4469,16 +4510,24 @@ async def start_dice_turn_timer(game, app):
     async def timeout_action():
         await asyncio.sleep(sget("DICE_THINK_SECONDS"))
         if game.settled or game.phase != "playing" or game.actor != uid: return
+        _who = await get_name(app, uid)
         if game.bid:
             ok, _ = game.action(uid, "open")
             if not ok: return
-            game.last_action = f"{await get_name(app, uid)} 超时自动开骰"
+            game.last_action = f"{_who} 超时自动开骰"
+            # 超时是玩家掉骰子的直接原因，必须让群里知道发生了什么
+            schedule_notice_delete(app, game.chat_id,
+                                   await safe_send(app.bot, game.chat_id,
+                                                   f"⏰ {_who} 超时未行动（{sget('DICE_THINK_SECONDS')}秒），自动开骰。"))
             await _dice_resolve_and_continue(game, app, uid)
         else:
             mr = dice_min_raise(game)
             if not mr: return
             game.action(uid, "bid", mr)
-            game.last_action = f"{await get_name(app, uid)} 超时自动叫 {mr[0]}个{mr[1]}"
+            game.last_action = f"{_who} 超时自动叫 {mr[0]}个{mr[1]}"
+            schedule_notice_delete(app, game.chat_id,
+                                   await safe_send(app.bot, game.chat_id,
+                                                   f"⏰ {_who} 超时未叫牌（{sget('DICE_THINK_SECONDS')}秒），自动叫 {mr[0]}个{mr[1]}。"))
             await start_dice_turn_timer(game, app)
     game.turn_task = asyncio.create_task(timeout_action())
 
@@ -4503,14 +4552,15 @@ async def _dice_resolve_and_continue(game, app, opener):
         f"{calc}实际 {actual} 个 < 叫 {bc} 个 → {bidder_name} 吹牛实锤，掉一颗骰子"
     elim = game.apply_loss(loser)
     if game.phase == "showdown":
-        await safe_send(app.bot, game.chat_id, f"{tail}，{loser_name} 出局！")
+        schedule_notice_delete(app, game.chat_id,
+                               await safe_send(app.bot, game.chat_id, f"{tail}，{loser_name} 出局！"))
         await settle_dice(game, app)
         return
     nxt_name = await get_name(app, game.starter_uid)
     tail += f"（剩 {game.dice[loser]} 颗）" if not elim else ""
     lines.append(tail)
     lines.append(f"全员重摇，{nxt_name} 先叫。")
-    await safe_send(app.bot, game.chat_id, "\n".join(lines))
+    schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, "\n".join(lines)))
     await start_dice_turn_timer(game, app)
 
 
@@ -4520,13 +4570,21 @@ async def settle_dice(game, app):
     try:
         async with user_wallet_locks([u for u in game.players if u >= 0]):
             winner = game.alive()[0] if game.alive() else None
-            if winner: game.chips[winner] += game.pot
+            if winner:
+                game.chips[winner] += game.pot
+            else:
+                # 极端兜底（理论不可达）：无人存活 → 底注原路退回，禁止积分凭空消失
+                for uid in game.players:
+                    game.chips[uid] = game.initial_chips.get(uid, game.chips[uid])
             for uid in game.players:
                 game_chips[game.chat_id][uid] += game.chips[uid] - game.initial_chips.get(uid, game_chips[game.chat_id][uid])
         save_data(); await asyncio.to_thread(force_save_now)
         names = {uid: await get_name(app, uid) for uid in game.players}
         lines = ["🎲 <b>大话骰结算</b>", "━━━━━━━━━━━━━━━━━", ""]
-        lines.append(f"🏆 幸存者：{names.get(winner, '？')}｜通吃奖池 {game.pot}")
+        if winner:
+            lines.append(f"🏆 幸存者：{names.get(winner)}｜通吃奖池 {game.pot}")
+        else:
+            lines.append("🏆 本局无人存活，底注已原路退回")
         lines.append("")
         lines.append("终局牌面：")
         for uid in game.players:
@@ -4586,10 +4644,18 @@ async def start_dice_wait_timeout(game, app):
         if game.phase != "waiting" or active_dice_games.get(game.chat_id) is not game: return
         if len(game.players) >= 2:
             if game.start():
+                await _dice_notify_dropped(game, app)
                 await start_dice_turn_timer(game, app)
         else:
             await refund_dice(game, app, f"⌛ 大话骰等待 {_wait} 秒不足 2 人，房间已自动解散。")
-    game.wait_task = asyncio.create_task(countdown())
+
+
+async def _dice_notify_dropped(game, app):
+    """开局时因底注不足被剔除的玩家，群里明确告知（避免「我怎么没在局里」的困惑）。"""
+    if not game.dropped: return
+    _names = "、".join([await get_name(app, u) for u in game.dropped])
+    await safe_send(app.bot, game.chat_id,
+                    f"⚠️ {_names} 积分不足 {sget('DICE_ANTE')} 底注，本局未参与（余额可先签到/兑换）。")
 
 
 async def cmd_dice(update, context):
@@ -4601,12 +4667,18 @@ async def cmd_dice(update, context):
     if game:
         if game.phase != "waiting":
             await send_reply(update, context, "当前已有进行中的大话骰。"); return
+        room_name, _ = poker_room_of(cid, uid, exclude_game=game)
+        if room_name:
+            await send_reply(update, context, f"⚠️ 你已在 {room_name} 房间，请先结束再加入大话骰。"); return
         if len(game.players) >= sget("DICE_MAX_PLAYERS"):
             await send_reply(update, context, "等待房间已满。"); return
         if game.add(uid):
             await update_dice_waiting(game, context.application); await send_reply(update, context, "已加入当前等待房间。")
         else: await send_reply(update, context, "你已在等待房间中。")
         return
+    room_name, _ = poker_room_of(cid, uid)
+    if room_name:
+        await send_reply(update, context, f"⚠️ 你已在 {room_name} 房间，请先结束再开大话骰。"); return
     if game_chips[cid][uid] < sget("MIN_ENTRY_CHIPS"):
         await send_reply(update, context, f"❌ 进入大话骰至少需要 {sget('MIN_ENTRY_CHIPS')} 积分。"); return
     game = DiceGame(cid, uid, current_game_mode()); game.add(uid); active_dice_games[cid] = game
@@ -5085,23 +5157,16 @@ async def jinhua_table_text(game, app):
     if game.last_action:
         lines.append(f"🔔 上一手：{game.last_action}")
     current = game.current() if game.phase == "betting" else None
-    if current:
-        lines.append(f"⏳ 当前行动：{await get_name(app, current)}｜需补：{max(0, game._target(current) - game.round_bets[current])}")
-        # 快捷档金额集中展示（按钮上不放数字 → 同行按钮等宽，2026-09-10 与德州同款改造）
-        if current not in game.folded and current not in game.all_in:
-            _parts = []
-            if game.chips[current] >= game._target(current) + sget("JINHUA_BASE") and current not in game.raise_locked:
-                _parts.append(f"加注 {sget('JINHUA_BASE')}")
-            if game.chips[current] > 0:
-                _parts.append(f"全下 {game.chips[current]}")
-            if _parts:
-                lines.append("🎚 快捷档：" + "｜".join(_parts))
     lines.append("━━━━━━━━━━━━━━━━━")
-    # 紧凑排版：每人 1 行；👉 标记当前行动者（与德州/21点一致）
+    if current:
+        # 2026-09-11 用户要求：行动提示放到分隔线之后、玩家列表之前；并与超时提示合并为一行
+        _need = max(0, game._target(current) - game.round_bets[current])
+        lines.append(f"⏳ <b>{await get_name(app, current)}</b> 行动中｜需补 {_need}｜{sget('TURN_TIMEOUT')} 秒未操作自动弃牌")
+    # 紧凑排版：每人 1 行；👉 留在行首，非行动者补 3 个半角空格占位 → 序号落在同一列
     for index, uid in enumerate(game.players, 1):
         status = "❌弃" if uid in game.folded else "🔥全下" if uid in game.all_in else "🟢"
         seen_mark = "👁" if uid in game.seen else "🎴"
-        mark = "👉" if uid == current else ""
+        mark = "👉 " if uid == current else "   "
         lines.append(f"{mark}{index}. {await get_name(app, uid)} {seen_mark}{status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
     return "\n".join(lines)
 
@@ -5115,7 +5180,7 @@ def jinhua_buttons(game, uid):
     else:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 刷新界面", callback_data="jh_refresh")]])
     to_call = max(0, game._target(uid) - game.round_bets[uid])
-    # 每行最多2个按钮压宽度；金额不放按钮（挪到正文「🎚 快捷档」行）→ 同行按钮等宽不歪
+    # 2026-09-11 用户要求撤销「emoji+2字」改造：金额回到按钮上（快捷档行已删）
     rows = [[InlineKeyboardButton(label, callback_data="jh_see"),
              InlineKeyboardButton("❌ 弃牌", callback_data="jh_fold")]]
     row_call = [InlineKeyboardButton("✅ 过牌" if not to_call else "✅ 跟注", callback_data="jh_call")]
@@ -5124,11 +5189,11 @@ def jinhua_buttons(game, uid):
     rows.append(row_call)
     row_raise = []
     if uid not in game.raise_locked and game.chips[uid] >= to_call + sget("JINHUA_BASE"):
-        row_raise.append(InlineKeyboardButton("🔼 加注", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"))
+        row_raise.append(InlineKeyboardButton(f"🔼 加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"))
     row_raise.append(InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh"))
     rows.append(row_raise)
     if game.chips[uid] > 0:
-        rows.append([InlineKeyboardButton("🔥 全下", callback_data="jh_allin")])
+        rows.append([InlineKeyboardButton(f"🔥 全下 {game.chips[uid]}", callback_data="jh_allin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -5197,8 +5262,8 @@ async def show_jinhua_action(game, app):
                 nxt = game._next()
                 if nxt: await start_jinhua_turn_timer(game, app)
         return
-    text = f"{await jinhua_table_text(game, app)}\n\n⏰ <b>{await get_name(app, uid)}</b> 请在 {sget('TURN_TIMEOUT')} 秒内行动。"
-    await _sync_jinhua_msg(game, app, text, jinhua_buttons(game, uid))
+    # 行动提示已并入牌桌文本（见 jinhua_table_text），此处不再追加第二句
+    await _sync_jinhua_msg(game, app, await jinhua_table_text(game, app), jinhua_buttons(game, uid))
 
 
 async def start_jinhua_turn_timer(game, app):
@@ -6525,10 +6590,11 @@ def player_is_busy(cid, uid):
 
 
 def poker_room_of(cid, uid, exclude_game=None):
-    """玩家所在的扑克游戏房间（德州/炸金花，含等待房）。exclude_game 用于排除当前房间。
+    """玩家所在的游戏房间（德州/炸金花/大话骰，含等待房）。exclude_game 用于排除当前房间。
     返回 (游戏名, 游戏对象)，不在任何房间则返回 (None, None)。"""
     for name, g in (("德州", active_poker_games.get(cid)),
-                    ("炸金花", active_jinhua_games.get(cid))):
+                    ("炸金花", active_jinhua_games.get(cid)),
+                    ("大话骰", active_dice_games.get(cid))):
         if g and g is not exclude_game and uid in g.players:
             return name, g
     return None, None
@@ -7167,6 +7233,9 @@ async def on_button(update, context):
                 return
             if game.phase == "waiting":
                 if data == "dice_join":
+                    _room, _ = poker_room_of(cid, uid, exclude_game=game)
+                    if _room:
+                        await q.answer(f"你已在 {_room} 房间，请先结束再加入", show_alert=True); return
                     if len(game.players) >= sget("DICE_MAX_PLAYERS"):
                         await q.answer("房间已满", show_alert=True); return
                     if game_chips[cid][uid] < sget("MIN_ENTRY_CHIPS"):
@@ -7174,9 +7243,18 @@ async def on_button(update, context):
                     if game.add(uid):
                         await q.answer("已加入"); await update_dice_waiting(game, context.application)
                     else: await q.answer("你已在等待房间中。", show_alert=True)
-                elif data == "dice_start" and uid == game.owner_id and game.start():
-                    game.cancel_wait()
-                    await q.answer("游戏开始"); await start_dice_turn_timer(game, context.application)
+                elif data == "dice_start":
+                    if uid != game.owner_id:
+                        await q.answer("只有发起人可开始游戏（满 2 人会倒计时自动开始）", show_alert=True); return
+                    if len(game.players) < 2:
+                        await q.answer("至少要 2 人才能开始", show_alert=True); return
+                    if game.start():
+                        game.cancel_wait()
+                        await _dice_notify_dropped(game, context.application)
+                        await q.answer("游戏开始")
+                        await start_dice_turn_timer(game, context.application)
+                    else:
+                        await q.answer("开局失败：至少 2 人且余额够底注", show_alert=True)
                 else: await q.answer("无法执行此操作", show_alert=True)
                 return
             if data == "dice_see":
@@ -7186,8 +7264,14 @@ async def on_button(update, context):
                     await q.answer("你已出局，没有骰子了", show_alert=True); return
                 ds = " ".join(map(str, game.hands[uid]))
                 bid_txt = f"{game.bid[0]}个{game.bid[1]}" if game.bid else "待开叫（你是先叫方）"
-                await safe_send(context.bot, uid, f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}")
-                await q.answer("已私聊发你 🎲")
+                _view = f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}"
+                # 私聊优先；但玩家从未和 bot 私聊过时 Telegram 会拒发（历史上表现为「点按钮没反应」）
+                # → 发不出去就退化成单击弹窗（弹窗只有点击者本人可见，不泄露骰子）
+                _pm = await safe_send(context.bot, uid, _view)
+                if _pm is None:
+                    await q.answer(_view, show_alert=True)
+                else:
+                    await q.answer("已私聊发你 🎲")
                 return
             if data == "dice_raise":
                 if uid != game.actor or game.phase != "playing":
@@ -7271,7 +7355,8 @@ async def on_button(update, context):
                 ann = f"⚔️ {cname} 比牌 {tname}：{cname if challenger_win else tname} 胜，{lname} 出局"
                 if penalty:
                     ann += f"（看牌者向闷牌者比牌落败，倒赔 {penalty}）"
-                await safe_send(context.bot, cid, ann)
+                await schedule_notice_delete(context.application, cid,
+                                             await safe_send(context.bot, cid, ann))
                 # 仅比牌双方私聊亮牌，旁观者看不到牌面
                 ccards = "  ".join(card_str(c) for c in game.hands[challenger])
                 tcards = "  ".join(card_str(c) for c in game.hands[target])
@@ -8660,17 +8745,21 @@ async def on_text(update, context):
                 else: await update(game, context.application); await start_timer(game, context.application)
                 return
 
-        # 大话骰：群里直接打「6个3」「6 3」「六個三」叫牌；打「开」/「开骰」＝开骰
+        # 大话骰：群里直接打「6个3」「6 3」「六個三」叫牌（也认「叫6个3」）；
+        # 打「开」「开骰」「开牌」「不信」「掀」＝开骰
         #（仅轮到你时消费消息；不是你的回合/不是叫牌则照常走聊天积分等后续逻辑）
         _dg = active_dice_games.get(cid)
         if _dg and _dg.phase == "playing":
-            if re.fullmatch(r"开骰?|开", text):
+            if re.fullmatch(r"开骰?|开牌|开他|开盅|掀盅?|不信|不開|不开", text.replace(" ", "")):
                 if user.id == _dg.actor and _dg.bid:
                     ok, _d = _dg.action(user.id, "open")
                     if ok:
                         _dg.last_action = f"{await get_name(context.application, user.id)} 开骰"
                         await _dice_resolve_and_continue(_dg, context.application, user.id)
                         return
+                elif user.id in _dg.players and not _dg.bid:
+                    await send_reply(update, context, "❌ 你是先叫方，起手必须先叫牌（如「3个4」）。")
+                    return
             else:
                 _bid = parse_dice_bid(text)
                 if _bid is not None:

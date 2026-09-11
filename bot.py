@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1400"
+BOT_VERSION = "2026-09-11-1645"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -150,6 +150,7 @@ SETTINGS_GROUPS = [
     ("general",   "通用与应急", "⚙️"),
     ("admin",     "管理员中心", "👑"),
     ("security",  "安全",       "🔒"),
+    ("botlog",    "谁拉机器人", "🔗"),
 ]
 # 子页面制：有子页的分组在侧边栏折叠展开（照阿福模板）。None=未开通占位页
 SIDEBAR_ORDER = []   # 侧边栏自定义排序（组键列表，网页「群体总览」可 ▲▼ 调整，随设置持久化）
@@ -160,7 +161,7 @@ MOD_PAGE_FIELDS = []
 # 排序逻辑：机器人日常 → 群治理(成员/群管/删除) → 增长与经济(邀请/积分/抽奖) → 娱乐游戏 → 系统管理殿后
 SIDEBAR_SECTIONS = [
     ("🤖 机器人设置", ["dashboard", "schedule", "commands", "tpls", "general"]),
-    ("👥 群组设置",   ["members", "mod", "autodel", "invite", "points", "lottery"]),
+    ("👥 群组设置",   ["members", "mod", "autodel", "invite", "points", "lottery", "botlog"]),
     ("🎲 娱乐功能",   ["texas", "blackjack", "jinhua", "dice", "race", "rake"]),
     ("🛠 系统管理",   ["admin", "security"]),
 ]
@@ -1098,6 +1099,9 @@ member_profiles = defaultdict(lambda: defaultdict(dict))  # member_profiles[cid]
 whitelist = defaultdict(set)                         # whitelist[cid] = {uid} 白名单（免疫禁言等）
 leave_records = defaultdict(list)                    # leave_records[cid] = [{"ts","uid","name"}] 退群记录(每群留100)
 join_requests = defaultdict(list)                    # join_requests[cid] = [{"ts","uid","name"}] 入群申请(每群留100)
+# 谁把机器人拉进群：bot_added_by[cid] = {"by": 邀请人uid, "ts": "2026-09-11 13:00", "title": "群名"}
+# 用于追溯「未授权群却有人发命令」是谁拉进来的（my_chat_member 事件记录，普通群也抓得到）。
+bot_added_by = {}
 member_joined_at = defaultdict(lambda: defaultdict(float))  # member_joined_at[cid][uid] = 入群时间戳（新成员观察期用，运行时态）
 _bot_app = None   # 运行中的 Application（网页后台跨线程调 bot API 用，post_init 里赋值）
 _bot_loop = None  # bot 主事件循环
@@ -1903,6 +1907,11 @@ def force_save_now():
                 "member_profiles": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in member_profiles.items()},
                 "whitelist": {str(cid): sorted(users) for cid, users in whitelist.items()},
                 "leave_records": {str(cid): v[-100:] for cid, v in leave_records.items()},
+                # 谁把机器人拉进群：bot 被拉进/踢出的溯源（普通群也能抓到，靠 my_chat_member 事件）
+                "bot_added_by": {str(cid): {"by": int(v.get("by", 0) or 0), "by_name": v.get("by_name", ""),
+                                           "ts": v.get("ts", ""), "title": v.get("title", ""),
+                                           "left_ts": v.get("left_ts", "")}
+                               for cid, v in bot_added_by.items() if isinstance(v, dict)},
                 "join_requests": {str(cid): v[-100:] for cid, v in join_requests.items()},
                 "admin_logs": admin_logs[-300:],
                 "ledger": ledger[-5000:],
@@ -1992,6 +2001,14 @@ def load_data():
     try:
         # 兼容旧存档：group_chips 键迁移为统一积分
         restore_nested(game_chips, data.get("game_chips", data.get("group_chips", {})))
+        # 幽灵键清理：game_chips 的键必须是真实群 ID（负数）；
+        # 私聊里 cid==uid（正数）经 defaultdict 读会误建「以用户 ID 为群」的幽灵键，
+        # 既污染后台群下拉，又会随备份持久化。启动时一次性剔除所有非群键（清历史 + 防复发）。
+        _ghost_keys = [c for c in list(game_chips.keys()) if not str(c).startswith("-")]
+        for _gk in _ghost_keys:
+            game_chips.pop(_gk, None)
+        if _ghost_keys:
+            logger.warning("已剔除 %d 个非群幽灵键（game_chips）：%s", len(_ghost_keys), _ghost_keys)
         # 统一积分：旧存档的德州专用积分余额一次性并入统一积分（在 game_chips 覆盖恢复之后追加，之后不再单独保存）
         for cid, users in data.get("texas_chips", {}).items():
             try:
@@ -2173,6 +2190,11 @@ def load_data():
             whitelist[int(cid)].update(int(u) for u in uids)
         for cid, v in data.get("leave_records", {}).items():
             leave_records[int(cid)] = list(v)[-100:]
+        for cid, v in data.get("bot_added_by", {}).items():
+            if isinstance(v, dict):
+                bot_added_by[int(cid)] = {"by": int(v.get("by", 0) or 0), "by_name": v.get("by_name", ""),
+                                         "ts": v.get("ts", ""), "title": v.get("title", ""),
+                                         "left_ts": v.get("left_ts", "")}
         for cid, v in data.get("join_requests", {}).items():
             join_requests[int(cid)] = list(v)[-100:]
         admin_logs.extend(data.get("admin_logs", [])[-300:])
@@ -3299,11 +3321,16 @@ async def poker_table_text(game, app):
     ]
     current = game.current()
     lines.append("━━━━━━━━━━━━━━━━━")
+    # ⚠️⚠️ 行动提示 = **两行**（2026-09-11 用户第 3 次明确 + 选「拆回两行·原样」）：
+    #   ① 牌桌内（分隔线后、玩家列表前）：`⏳ 当前行动：名｜需跟：N`
+    #   ② 牌桌底部单独一行：`⏰ 名 请在 N 秒内行动。`
+    # 我曾把这两句**并成一行**（"行动中｜需跟 N｜N 秒未操作自动X"），用户否决「不是成一行」。
+    # 别再合并、别再改文案。原文案取自合并前版本（GitHub 474e6893）。
+    _cur_name = None
     if current:
-        # 2026-09-11 用户要求：行动提示放到分隔线之后、玩家列表之前（分隔线 = 牌面/行动区的分界）；
-        # 并与「请在N秒内行动」合并成一行（原两句重复且不显眼）
         _need = max(0, game.current_bet - game.round_bets[current])
-        lines.append(f"⏳ <b>{await get_name(app, current)}</b> 行动中｜需跟 {_need}｜{game.turn_timeout} 秒未操作自动过牌/弃牌")
+        _cur_name = await get_name(app, current)
+        lines.append(f"⏳ 当前行动：{_cur_name}｜需跟：{_need}")
     # 玩家行两段式（2026-09-10 用户报「文本不对齐」）：名字长短不定，把 状态/投/余 挪到第二行
     # 统一格式后天然左对齐；名字再长也不挤压后面的字段。
     # 2026-09-11 用户要求：👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
@@ -3312,6 +3339,9 @@ async def poker_table_text(game, app):
         mark = "👉 " if uid == current else "   "
         lines.append(f"{mark}{index}. {await get_name(app, uid)}")
         lines.append(f"　　{status}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
+    if _cur_name is not None:   # 牌桌底部：超时提示单独一行（原样第 ② 句）
+        lines.append("")
+        lines.append(f"⏰ <b>{_cur_name}</b> 请在 {game.turn_timeout} 秒内行动。")
     return "\n".join(lines)
 
 
@@ -3358,12 +3388,17 @@ async def start_turn_timer(game, app):
     if uid is None:
         if game.phase == "showdown": await settle_poker(game, app)
         return
-    # 行动消息携带完整牌桌 + 行动提示 + 操作按钮（一条消息）
-    await safe_delete(app.bot, game.chat_id, game.action_msg_id)
-    # 行动提示已并入牌桌文本（见 poker_table_text），此处不再追加第二句
+    # 行动提示 + 操作按钮直接原地编辑唯一权威牌桌（game_msg_id），不再额外发一条带按钮的
+    # action_msg_id 消息——否则"静态牌桌"与"行动消息"各渲染一次行动行，群友看到的就是"有2行"。
+    # 与 21点(原地编辑)/炸金花·大话骰(删旧发新)一致：全群始终只有这一条牌桌。
     text = await poker_table_text(game, app)
-    msg = await safe_send(app.bot, game.chat_id, text, reply_markup=poker_buttons(game, uid), parse_mode="HTML")
-    game.action_msg_id = msg.message_id if msg else None
+    if game.game_msg_id:
+        await safe_edit(app.bot, game.chat_id, game.game_msg_id, text,
+                        reply_markup=poker_buttons(game, uid), parse_mode="HTML")
+    else:
+        msg = await safe_send(app.bot, game.chat_id, text,
+                              reply_markup=poker_buttons(game, uid), parse_mode="HTML")
+        if msg: game.game_msg_id = msg.message_id
 
     # 真实超时任务：无需跟注自动过牌，否则自动弃牌，防止牌局卡死
     async def timeout_action():
@@ -3380,7 +3415,6 @@ async def start_turn_timer(game, app):
         await schedule_notice_delete(app, game.chat_id,
                                      await safe_send(app.bot, game.chat_id, f"⏰ {desc}：{await get_name(app, uid)}"))
         if game.phase == "showdown":
-            await safe_delete(app.bot, game.chat_id, game.action_msg_id)
             await settle_poker(game, app)
         else: await update_poker_table(game, app); await start_turn_timer(game, app)
     game.turn_task = asyncio.create_task(timeout_action())
@@ -3485,7 +3519,8 @@ async def settle_poker(game, app):
         # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
         _rank_lines = None
         if game.mode == "official" and not game.season:
-            rank = sorted(poker_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:50]
+            # 2026-09-11 用户要求：榜单别刷屏，一页 10 人
+            rank = sorted(poker_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:RANK_PAGE_SIZE]
             if rank:
                 _rank_lines = ["🏆 <b>当日德州累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"]
                 _rank_lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
@@ -3905,7 +3940,7 @@ class HorseRace:
                 # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
                 _rank_lines = None
                 if self.mode == "official":
-                    day_rank = sorted(total_profit_by_game(race_profit_by_date, self.chat_id).items(), key=lambda item: item[1], reverse=True)[:50]
+                    day_rank = sorted(total_profit_by_game(race_profit_by_date, self.chat_id).items(), key=lambda item: item[1], reverse=True)[:RANK_PAGE_SIZE]
                     if day_rank:
                         _rank_lines = ["🏆 <b>赛车累计盈利榜（总数）</b>", "━━━━━━━━━━━━━━━━━"]
                         for index, (uid, amount) in enumerate(day_rank, 1):
@@ -4236,7 +4271,7 @@ async def update_blackjack_ui(game, app):
             # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
             _rank_lines = None
             if game.mode == "official":
-                bj_rank = sorted(total_profit_by_game(blackjack_profit_by_date, game.chat_id).items(), key=lambda item: item[1], reverse=True)[:30]
+                bj_rank = sorted(total_profit_by_game(blackjack_profit_by_date, game.chat_id).items(), key=lambda item: item[1], reverse=True)[:RANK_PAGE_SIZE]
                 if bj_rank:
                     _rank_lines = ["🏆 <b>21点 累计盈利榜（总数）</b>"]
                     for i, (u, a) in enumerate(bj_rank, 1):
@@ -4729,9 +4764,11 @@ async def dice_table_text(game, app):
         lines.append(f"🎙 当前叫牌：{bc}个{bf}（{await get_name(app, bidder)}）")
     cur = game.actor if game.phase == "playing" else None
     lines.append("━━━━━━━━━━━━━━━━━")
+    # ⚠️ 行动提示 = 两行（见 poker_table_text 同款注释，用户选「拆回两行·原样」，别再合并）
+    _cur_name = None
     if cur:
-        # 2026-09-11 用户要求：行动提示放到分隔线之后、玩家列表之前；并与超时提示合并为一行
-        lines.append(f"⏳ <b>{await get_name(app, cur)}</b> 行动中（加码或开骰）｜{sget('DICE_THINK_SECONDS')} 秒未操作自动开骰")
+        _cur_name = await get_name(app, cur)
+        lines.append(f"⏳ 当前行动：{_cur_name}（加码或开骰）")
     # 两段式玩家行（§4.14 铁律：名字一行、数据一行全角缩进，手机端不挤）
     # 2026-09-11 用户要求：👉 留在行首，非行动者补 3 个半角空格占位 → 序号落在同一列
     for index, uid in enumerate(game.players, 1):
@@ -4741,6 +4778,9 @@ async def dice_table_text(game, app):
             lines.append("　　💀 已出局")
         else:
             lines.append(f"　　🎲{game.dice[uid]}颗 🟢 余{game.chips[uid]}")
+    if _cur_name is not None:   # 牌桌底部：超时提示单独一行（原样第 ② 句）
+        lines.append("")
+        lines.append(f"⏰ <b>{_cur_name}</b> 请在 {sget('DICE_THINK_SECONDS')} 秒内加码或开骰。")
     lines.append("💡 群里打「6个3」叫牌｜「➕ 加一个」懒得算｜「🎯 开骰」掀盅｜点「🎲 看牌」弹窗看骰")
     return "\n".join(lines)
 
@@ -5520,16 +5560,21 @@ async def jinhua_table_text(game, app):
         lines.append(f"🔔 上一手：{game.last_action}")
     current = game.current() if game.phase == "betting" else None
     lines.append("━━━━━━━━━━━━━━━━━")
+    # ⚠️ 行动提示 = 两行（见 poker_table_text 同款注释，用户选「拆回两行·原样」，别再合并）
+    _cur_name = None
     if current:
-        # 2026-09-11 用户要求：行动提示放到分隔线之后、玩家列表之前；并与超时提示合并为一行
         _need = max(0, game._target(current) - game.round_bets[current])
-        lines.append(f"⏳ <b>{await get_name(app, current)}</b> 行动中｜需补 {_need}｜{sget('TURN_TIMEOUT')} 秒未操作自动弃牌")
+        _cur_name = await get_name(app, current)
+        lines.append(f"⏳ 当前行动：{_cur_name}｜需补：{_need}")
     # 紧凑排版：每人 1 行；👉 留在行首，非行动者补 3 个半角空格占位 → 序号落在同一列
     for index, uid in enumerate(game.players, 1):
         status = "❌弃" if uid in game.folded else "🔥全下" if uid in game.all_in else "🟢"
         seen_mark = "👁" if uid in game.seen else "🎴"
         mark = "👉 " if uid == current else "   "
         lines.append(f"{mark}{index}. {await get_name(app, uid)} {seen_mark}{status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
+    if _cur_name is not None:   # 牌桌底部：超时提示单独一行（原样第 ② 句）
+        lines.append("")
+        lines.append(f"⏰ <b>{_cur_name}</b> 请在 {sget('TURN_TIMEOUT')} 秒内行动。")
     return "\n".join(lines)
 
 
@@ -5563,7 +5608,7 @@ def jinhua_buttons(game, uid):
     return InlineKeyboardMarkup(rows)
 
 
-async def _sync_jinhua_msg(game, app, text, kb):
+async def _sync_jinhua_msg(game, app, text, kb, edit_only=False):
     """渲染唯一权威牌桌消息：**删旧发新**，全群始终只有这一条，且永远停在群最底部。
 
     2026-09-11 用户明确：炸金花与大话骰**统一删旧发新**。
@@ -5571,8 +5616,17 @@ async def _sync_jinhua_msg(game, app, text, kb):
     用户当时的抱怨是界面文本与按钮乱，跟发消息方式无关。）
     原地编辑位置不动，会被后来的聊天顶上去，群友就看不到轮到谁了。
     加锁避免快速连续操作（连点/超时与点击并发）时出现两条牌桌。
+
+    edit_only=True：**原地编辑、绝不删除**。用于「看牌」这类非轮次推进的动作——
+    删旧发新会让群里刷出「X 删除了消息」的系统提示，玩家根本不知道发生了什么
+    （2026-09-11 用户报障）。看牌只更新自己那一行，下一个人操作时才走删旧发新。
     """
     async with game._render_lock:
+        if edit_only and game.game_msg_id:
+            res = await safe_edit(app.bot, game.chat_id, game.game_msg_id, text,
+                                  reply_markup=kb, parse_mode="HTML")
+            if res is not None:
+                return
         old_id = game.game_msg_id
         msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
         if msg:
@@ -5586,10 +5640,11 @@ async def update_jinhua_table(game, app):
     await show_jinhua_action(game, app)
 
 
-async def show_jinhua_action(game, app):
-    """渲染唯一权威牌桌消息（牌桌文本 + 当前操作者按钮），原地编辑 game_msg_id。
+async def show_jinhua_action(game, app, edit_only=False):
+    """渲染唯一权威牌桌消息（牌桌文本 + 当前操作者按钮）。
 
     三种视图：比牌选人菜单 / 跟平阶段全员开牌·继续加注 / 下注阶段当前玩家行动。
+    edit_only=True 时只原地编辑、不删旧发新（看牌专用，见 _sync_jinhua_msg 注释）。
     """
     if game.compare_menu_owner is not None:
         owner = game.compare_menu_owner
@@ -5601,7 +5656,7 @@ async def show_jinhua_action(game, app):
             rows.append([InlineKeyboardButton(f"{tmark} {tname}", callback_data=f"jh_pk_{t}")])
         rows.append([InlineKeyboardButton("❌ 取消", callback_data="jh_cancel_pk")])
         text = f"{await jinhua_table_text(game, app)}\n\n⚔️ {await get_name(app, owner)} 选择比牌对手（仅比牌双方亮牌，其余玩家看不到牌面）："
-        await _sync_jinhua_msg(game, app, text, InlineKeyboardMarkup(rows))
+        await _sync_jinhua_msg(game, app, text, InlineKeyboardMarkup(rows), edit_only=edit_only)
         return
     if game.phase == "open_pending":
         text = f"{await jinhua_table_text(game, app)}\n\n💡 已跟平：可 <b>弃牌</b> 止损、<b>比牌/开牌</b> 定胜负，或 <b>继续加注</b> 偷鸡。"
@@ -5612,7 +5667,7 @@ async def show_jinhua_action(game, app):
             [InlineKeyboardButton(f"🚀 继续加注 {sget('JINHUA_BASE')}", callback_data=f"jh_raise_{sget('JINHUA_BASE')}"),
              InlineKeyboardButton("🔄 刷新", callback_data="jh_refresh")],
         ])
-        await _sync_jinhua_msg(game, app, text, kb)
+        await _sync_jinhua_msg(game, app, text, kb, edit_only=edit_only)
         return
     uid = game.current()
     if uid is None:
@@ -5627,7 +5682,8 @@ async def show_jinhua_action(game, app):
                 if nxt: await start_jinhua_turn_timer(game, app)
         return
     # 行动提示已并入牌桌文本（见 jinhua_table_text），此处不再追加第二句
-    await _sync_jinhua_msg(game, app, await jinhua_table_text(game, app), jinhua_buttons(game, uid))
+    await _sync_jinhua_msg(game, app, await jinhua_table_text(game, app), jinhua_buttons(game, uid),
+                           edit_only=edit_only)
 
 
 async def start_jinhua_turn_timer(game, app):
@@ -5737,7 +5793,7 @@ async def settle_jinhua(game, app):
         # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
         _rank_lines = None
         if game.mode == "official":
-            rank = sorted(jinhua_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:50]
+            rank = sorted(jinhua_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:RANK_PAGE_SIZE]
             if rank:
                 _rank_lines = ["🏆 <b>当日炸金花累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"]
                 _rank_lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
@@ -7006,54 +7062,124 @@ async def cmd_add(update, context):
 
 
 
+# ══════════ 排行榜分页（2026-09-11 用户要求：群里 100+ 人，榜单太长刷屏，改「一页 10 人 + 翻页」） ══════════
+# 设计：榜单消息只有一条，翻页 = **原地编辑**同一条（不会刷屏、也不会产生「删除了消息」提示）。
+# 消息**不自动删除**（要留给人翻页），所以不走 send_reply / REPLY_DELETE_SECONDS。
+RANK_PAGE_SIZE = 10
+
+_RANK_TITLES = {
+    "points":       "💰 积分榜",
+    "points_lv":    "💰 积分排行榜",
+    "profit":       "🏆 累计盈利榜（总数）",
+    "texas_day":    "🃏 德州当日盈亏",
+    "other_profit": "🎮 其他游戏累计盈亏",
+}
+# 每种榜可切换到哪个榜（切换按钮行）；单元素 = 无切换按钮
+_RANK_GROUPS = {
+    "points":       ("points", "profit"),
+    "profit":       ("points", "profit"),
+    "points_lv":    ("points_lv",),
+    "texas_day":    ("texas_day", "other_profit"),
+    "other_profit": ("texas_day", "other_profit"),
+}
+_RANK_SIGNED = {"profit", "other_profit", "texas_day"}   # 盈亏榜带 +/-；积分榜不带
+
+
+def _rank_source(cid, kind):
+    """返回某榜的原始数据 [(uid, value)]，已降序。
+
+    一律用 `.get` / 遍历取值，**不用裸下标读 defaultdict**（读了会凭空建幽灵键，见 SKILL §4.31）。
+    """
+    if kind in ("points", "points_lv"):
+        rows = list(game_chips.get(cid, {}).items())
+    elif kind == "texas_day":
+        rows = list(poker_profit_by_date.get(business_date(), {}).get(cid, {}).items())
+    else:  # profit / other_profit：炸金花 + 21点 + 赛车（含老虎机）累计合并
+        combined = {}
+        for g in (blackjack_profit_by_date, race_profit_by_date, jinhua_profit_by_date):
+            for u, v in total_profit_by_game(g, cid).items():
+                combined[u] = combined.get(u, 0) + v
+        rows = list(combined.items())
+    rows.sort(key=lambda x: x[1], reverse=True)
+    return rows
+
+
+async def _rank_page_text(app, cid, kind, page):
+    """渲染某榜第 page 页（0 基）。返回 (text, page, pages)。"""
+    src = _rank_source(cid, kind)
+    total = len(src)
+    pages = max(1, (total + RANK_PAGE_SIZE - 1) // RANK_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    start = page * RANK_PAGE_SIZE
+    chunk = src[start:start + RANK_PAGE_SIZE]
+    lines = [f"<b>{_RANK_TITLES[kind]}</b>", "━" * 14]
+    if not chunk:
+        lines.append("暂无记录")
+        return "\n".join(lines), page, pages
+    for i, (uid, value) in enumerate(chunk, start + 1):
+        name = await get_name(app, uid, cid=cid)
+        if kind in _RANK_SIGNED:
+            lines.append(f"{rank_marker(i)} {name}：{value:+d}")
+        elif kind == "points_lv":
+            lv = _level_of(cid, uid)[0]
+            lines.append(f"{rank_marker(i)} {name}：{value}" + (f"｜{lv}" if lv else ""))
+        else:
+            lines.append(f"{rank_marker(i)} {name}：{value}")
+    lines.append("")
+    lines.append(f"<i>共 {total} 人 · 第 {page + 1}/{pages} 页</i>")
+    return "\n".join(lines), page, pages
+
+
+def _rank_keyboard(kind, page, pages, kinds):
+    rows = []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"rk_{kind}_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"第 {page + 1}/{pages} 页", callback_data="rk_noop_0"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"rk_{kind}_{page + 1}"))
+    rows.append(nav)
+    if len(kinds) > 1:
+        rows.append([InlineKeyboardButton(_RANK_TITLES[k], callback_data=f"rk_{k}_0") for k in kinds])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_rank_page(update, context, kind, page=0):
+    """发出分页榜单（第一条消息）。绝不自动删除，翻页靠原地编辑。"""
+    cid = update.effective_chat.id
+    text, page, pages = await _rank_page_text(context.application, cid, kind, page)
+    kb = _rank_keyboard(kind, page, pages, _RANK_GROUPS.get(kind, (kind,)))
+    return await context.bot.send_message(chat_id=cid, text=text, reply_markup=kb, parse_mode="HTML")
+
+
+async def on_rank_page(update, context):
+    """榜单翻页 / 切换榜单：原地编辑同一条消息。"""
+    q = update.callback_query
+    data = q.data or ""
+    m = re.fullmatch(r"rk_([a-z_]+)_(\d+)", data)
+    if not m:
+        await q.answer(); return
+    kind, page = m.group(1), int(m.group(2))
+    if kind == "noop":
+        await q.answer(); return
+    if kind not in _RANK_TITLES:
+        await q.answer("该榜已下线", show_alert=True); return
+    await q.answer()
+    cid = q.message.chat_id
+    text, page, pages = await _rank_page_text(context.application, cid, kind, page)
+    kb = _rank_keyboard(kind, page, pages, _RANK_GROUPS.get(kind, (kind,)))
+    await safe_edit(context.bot, cid, q.message.message_id, text, reply_markup=kb, parse_mode="HTML")
+
+
 async def cmd_cx(update, context):
     if not await need_auth(update, context): return
-    cid = update.effective_chat.id
-    date = business_date()
-    texas = poker_profit_by_date[date].get(cid, {})
-    combined = {}
-    for g in (blackjack_profit_by_date, race_profit_by_date, jinhua_profit_by_date):
-        for uid, v in total_profit_by_game(g, cid).items():
-            combined[uid] = combined.get(uid, 0) + v
-    if not texas and not combined:
-        reply = await send_reply(update, context, "当前业务日暂无盈亏记录。")
-        if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
-            schedule_delete(context.application, cid, reply, sget("REPLY_DELETE_SECONDS"))
-        return
-    lines = ["🃏 德州当日盈亏", "━"*14]
-    if texas:
-        for i, (uid, value) in enumerate(sorted(texas.items(), key=lambda x:x[1], reverse=True)[:50], 1):
-            lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value:+d}")
-    else:
-        lines.append("暂无记录")
-    lines.extend(["", "🎮 其他游戏累计盈亏", "━"*14])
-    if combined:
-        for i, (uid, value) in enumerate(sorted(combined.items(), key=lambda x:x[1], reverse=True)[:50], 1):
-            lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value:+d}")
-    else:
-        lines.append("暂无记录")
-    msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
-    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, msgs, sget("REPLY_DELETE_SECONDS"))
+    await send_rank_page(update, context, "texas_day")
 
 async def cmd_ph(update, context):
+    # 2026-09-11 用户要求：榜单太长刷屏（群里 100+ 人），改分页，一页 10 人；
+    # 底部按钮可翻页，也可切到「累计盈利榜」。
     if not await need_auth(update, context): return
-    cid = update.effective_chat.id
-    lines = ["💰 积分榜", "━"*14]
-    for i, (uid, value) in enumerate(sorted(game_chips[cid].items(), key=lambda x:x[1], reverse=True)[:50], 1):
-        lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value}")
-    # 累计盈利榜（含老虎机），方便随时核对战绩，不再只能从抽奖结果里看滞后的榜单
-    combined = {}
-    for g in (blackjack_profit_by_date, race_profit_by_date, jinhua_profit_by_date):
-        for u, v in total_profit_by_game(g, cid).items():
-            combined[u] = combined.get(u, 0) + v
-    if combined:
-        lines.extend(["", "🏆 累计盈利榜（总数）", "━"*14])
-        for i, (u, v) in enumerate(sorted(combined.items(), key=lambda x:x[1], reverse=True)[:50], 1):
-            lines.append(f"{rank_marker(i)} {await get_name(context.application, u, cid=cid)}：{v:+d}")
-    msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
-    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, msgs, sget("REPLY_DELETE_SECONDS"))
+    await send_rank_page(update, context, "points")
 
 async def cmd_sq(update, context):
     if not is_bot_admin(update.effective_user.id):
@@ -7579,7 +7705,7 @@ async def on_button(update, context):
             if not action: await q.answer("未知操作", show_alert=True); return
             ok, desc = game.action(uid, action, extra)
             if not ok: await q.answer(desc, show_alert=True); return
-            await q.answer(desc); await safe_delete(context.bot, cid, game.action_msg_id); await action_notice(cid, context.application, uid, desc)
+            await q.answer(desc); await action_notice(cid, context.application, uid, desc)
             if game.phase == "showdown": await settle_poker(game, context.application)
             else: await update_poker_table(game, context.application); await start_turn_timer(game, context.application)
             return
@@ -7681,9 +7807,12 @@ async def on_button(update, context):
                 cards = "  ".join(card_str(c) for c in game.hands[uid])
                 await q.answer(f"你的手牌：{cards}｜{game._hand_name(uid)}", show_alert=True)
                 if first:
-                    # 看牌是公开信息（闷牌→已看牌），写入状态行并原地重编辑同一牌桌消息
+                    # 看牌是公开信息（闷牌→已看牌），写入状态行并**原地编辑**同一牌桌消息。
+                    # 2026-09-11 用户报障：原来看牌走「删旧发新」，群里立刻刷「X 删除了消息」，
+                    # 玩家根本不知道发生了什么 → 看牌改为 edit_only（只编辑、不删），
+                    # 轮到下一个人操作时才删旧发新。
                     game.last_action = f"{await get_name(context.application, uid)} 看了牌"
-                    await show_jinhua_action(game, context.application)
+                    await show_jinhua_action(game, context.application, edit_only=True)
                 return
             if data == "jh_compare_menu":
                 if uid in game.folded:
@@ -9166,13 +9295,13 @@ def _earn_add(cid, uid, amount):
 def _earn_get(cid, uid):
     """取「累计获得」。老玩家账本为空时用「当前余额」兜底，避免升级后一夜掉级。"""
     try:
-        got = int(total_earned[cid][uid] or 0)
+        got = int(total_earned.get(cid, {}).get(uid, 0) or 0)
     except Exception:
         got = 0
     if got > 0:
         return got
     try:
-        return max(0, int(game_chips[cid][uid] or 0))
+        return max(0, int(game_chips.get(cid, {}).get(uid, sget("GAME_STARTING_CHIPS")) or 0))
     except Exception:
         return 0
 
@@ -9363,7 +9492,7 @@ def _level_base(cid, uid):
     """等级判定基数。降级开关开 → 当前余额；否则 → 累计获得（消费不掉级）。"""
     if sget("LEVEL_ALLOW_DEMOTE"):
         try:
-            return max(0, int(game_chips[cid][uid] or 0))
+            return max(0, int(game_chips.get(cid, {}).get(uid, sget("GAME_STARTING_CHIPS")) or 0))
         except Exception:
             return 0
     return _earn_get(cid, uid)
@@ -9490,7 +9619,7 @@ async def cmd_my_level(update, context):
     cid, uid = update.effective_chat.id, update.effective_user.id
     if not sget("POINT_LEVELS"):
         await send_reply(update, context, _fmt_tpl("level_query_none_tpl")); return
-    bal = game_chips[cid][uid]
+    bal = game_chips.get(cid, {}).get(uid, sget("GAME_STARTING_CHIPS"))
     lv, base = _level_of(cid, uid)
     next_lv, next_val = "", None
     for item in sget("POINT_LEVELS"):
@@ -9648,7 +9777,7 @@ async def cmd_sign_rank(update, context):
 async def cmd_my_points(update, context):
     if not await need_auth(update, context): return
     cid, uid = update.effective_chat.id, update.effective_user.id
-    balance = game_chips[cid][uid]
+    balance = game_chips.get(cid, {}).get(uid, sget("GAME_STARTING_CHIPS"))
     date = now_bj().strftime("%Y-%m-%d")
     today_chat = chat_today.get(date, {}).get(cid, {}).get(uid, 0)
     streak = sign_data.get(cid, {}).get(uid, {}).get("streak", 0)
@@ -9661,16 +9790,9 @@ async def cmd_my_points(update, context):
     return reply
 
 async def cmd_points_rank(update, context):
+    # 2026-09-11 用户要求：改为分页（一页 10 人），带等级标签
     if not await need_auth(update, context): return
-    cid = update.effective_chat.id
-    lines = ["💰 积分排行榜", "━" * 14]
-    for i, (uid, value) in enumerate(sorted(game_chips[cid].items(), key=lambda x: x[1], reverse=True)[:20], 1):
-        lv = _level_of(cid, uid)[0]   # 等级按累计获得（与我的等级一致）
-        tag = f"｜{lv}" if lv else ""
-        lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：{value}{tag}")
-    msgs = await safe_send_long(context.bot, cid, "\n".join(lines))
-    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, msgs, sget("REPLY_DELETE_SECONDS"))
+    await send_rank_page(update, context, "points_lv")
 
 def _parse_dt_bj(spec):
     """'YYYY-MM-DD HH:MM' 或 'YYYY-MM-DD'（北京时间）→ aware datetime；空/非法返回 None。"""
@@ -11881,6 +12003,48 @@ async def on_member_event(update, context):
     except Exception:
         logger.exception("成员事件处理异常（已吞并）")
 
+
+async def on_my_chat_member(update, context):
+    """bot 自身成员状态变化（MY_CHAT_MEMBER）：记录「谁把机器人拉进群」。
+
+    普通群收不到普通成员的 chat_member，但 bot 被拉进/踢出群会触发 my_chat_member，
+    且 from_user 就是操作者——这正是「未授权群却有人发命令」的溯源入口（用户 2026-09-11 需求）。
+    只在「进入群」时记录，踢出只补 left_ts，避免状态抖动重复写。
+    """
+    try:
+        mcu = update.my_chat_member
+        if not mcu:
+            return
+        new, old = mcu.new_chat_member, mcu.old_chat_member
+        if not new or not new.user or not new.user.is_bot:
+            return  # 只关心 bot 自己
+        cid = mcu.chat.id
+        if cid >= 0:
+            return  # 群 ID 必为负数；私聊不是群，跳过
+        _old = old.status if old else None
+        _new = new.status
+        if _new in ("member", "administrator", "creator") and _old not in ("member", "administrator", "creator"):
+            inviter = mcu.from_user.id if mcu.from_user else 0
+            inv_name = (mcu.from_user.first_name or f"用户{inviter}") if mcu.from_user else "未知"
+            if inviter:
+                user_names[inviter] = inv_name
+            bot_added_by[cid] = {
+                "by": inviter,
+                "by_name": inv_name,
+                "ts": now_bj().strftime("%Y-%m-%d %H:%M"),
+                "title": getattr(mcu.chat, "title", "") or "",
+            }
+            logger.info("机器人被拉进群 cid=%s 群名=%s 操作者=%s(%s) 已授权=%s",
+                        cid, bot_added_by[cid]["title"], inviter, inv_name, cid in AUTHORIZED_GROUPS)
+            save_data()
+        elif _new in ("left", "kicked") and _old not in ("left", "kicked"):
+            rec = bot_added_by.get(cid)
+            if rec:
+                rec["left_ts"] = now_bj().strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        logger.exception("my_chat_member 处理异常（已吞并）")
+
+
 async def on_join_request(update, context):
     """入群申请处理（三路归因，全部不依赖群事件的链接字段可靠性）：
     ① deep-link/按钮 已锁定归因（invite_confirmed）→ 无条件自动批准秒进；
@@ -12077,7 +12241,7 @@ async def leaderboard_scheduler(app):
                 if cid not in target_groups: continue  # 只推目标群
                 _CUR_CID.set(_safe_cid(cid))
                 lines = [f"🏆 德州当日排行榜（{date}）", "━"*14]
-                for i, (uid, amount) in enumerate(sorted(data.items(), key=lambda x:x[1], reverse=True)[:50], 1): lines.append(f"{rank_marker(i)} {await get_name(app, uid)}：{amount:+d}")
+                for i, (uid, amount) in enumerate(sorted(data.items(), key=lambda x:x[1], reverse=True)[:RANK_PAGE_SIZE], 1): lines.append(f"{rank_marker(i)} {await get_name(app, uid)}：{amount:+d}")
                 await safe_send_long(app.bot, cid, "\n".join(lines))
             # 排位赛每日 23:50 推送「当日盈亏」（当前分 - 基准分，兑换底分不计入）
             if season_active:
@@ -12090,7 +12254,7 @@ async def leaderboard_scheduler(app):
                     day_rows = [(u, val - _season_base(cid, u)) for u, val in users.items()]
                     day_standings = sorted(day_rows, key=lambda x: (-x[1], x[0]))
                     lines = [f"🏆 第{season_id}赛季 当日盈亏榜（基准分 {sget('SEASON_START_CHIPS')}+兑换底分）", "━" * 18]
-                    for i, (u, val) in enumerate(day_standings[:50], 1):
+                    for i, (u, val) in enumerate(day_standings[:RANK_PAGE_SIZE], 1):
                         g = season_games[cid].get(u, 0)
                         tag = "" if g >= sget("SEASON_MIN_GAMES") else f"（{g}局·未达标）"
                         lines.append(f"{rank_marker(i)} {await get_name(app, u, cid=cid, with_title=False)}：{val:+d}｜{g}局{tag}")
@@ -13151,9 +13315,10 @@ def start_health_server():
                     "rows.forEach(function(r){tb.appendChild(r);});});</script>")
 
         def _group_options(selected=0):
-            """已知群下拉选项（授权群 ∪ 有积分数据的群）；selected=回显选中。"""
+            """已知群下拉选项（仅真实群 ID，负数；过滤私聊/幽灵键）；selected=回显选中。"""
+            valid = [c for c in set(AUTHORIZED_GROUPS) | set(game_chips.keys()) if str(c).startswith("-")]
             return "".join(f"<option value='{cid}'{' selected' if cid == selected else ''}>{html.escape(chat_name_cache.get(cid) or '')} {cid}</option>"
-                           for cid in sorted(set(AUTHORIZED_GROUPS) | set(game_chips.keys())))
+                           for cid in sorted(valid))
 
         def _all_user_options(selected=0):
             """全部已知用户选项（value=ID，label=昵称；selected=回显选中）。"""
@@ -13630,8 +13795,34 @@ def start_health_server():
                              + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows[-30:]) + "</div>")
             return "".join(parts)
 
+        def _botlog_page():
+            """谁把机器人拉进群：溯源页（只读）。"""
+            rows = []
+            for _cid, rec in sorted(bot_added_by.items(), key=lambda kv: kv[1].get("ts", ""), reverse=True):
+                cid = int(_cid)
+                auth = "✅ 已授权" if cid in AUTHORIZED_GROUPS else "⚠️ 未授权"
+                by = int(rec.get("by", 0) or 0)
+                _raw = rec.get("by_name") or (user_names.get(by) if by else None) or (f"用户{by}" if by else "未知")
+                by_name = html.escape(str(_raw))
+                left = rec.get("left_ts")
+                left_txt = f"｜已离开 {html.escape(left)}" if left else ""
+                gname = html.escape(rec.get("title") or chat_name_cache.get(cid) or "未知群")
+                rows.append(
+                    f"<tr><td>{gname}</td><td>{cid}</td><td>{by_name}（{by}）</td>"
+                    f"<td>{html.escape(rec.get('ts', ''))}{left_txt}</td><td>{auth}</td></tr>")
+            body = ("<div class='card'><h3>🤖 谁把机器人拉进群</h3>"
+                    "<p style='color:#aaa;font-size:13px'>记录 bot 被拉进每个群的来源（含未授权群）。"
+                    "未授权群却有人发命令时，可在此溯源是谁拉进来的。</p>"
+                    "<table class='tbl'><thead><tr><th>群名</th><th>群ID</th><th>拉人者</th>"
+                    "<th>时间</th><th>授权状态</th></tr></thead><tbody>"
+                    + ("".join(rows) if rows else "<tr><td colspan='5' style='text-align:center;color:#888'>暂无记录</td></tr>")
+                    + "</tbody></table></div>")
+            return _page("谁拉机器人", "botlog", body)
+
         def _admin_page(gkey, sub=None, saved=False, bad=False, note="", err="", uid=0, flt=None):
             gname, gicon = next((n, i) for k, n, i in SETTINGS_GROUPS if k == gkey)
+            if gkey == "botlog":   # 只读溯源页，不走通用表单渲染
+                return _botlog_page()
             msg = "<div class='ok'>✅ 已保存并立即生效</div>" if saved else ""
             msg += "<div class='err'>部分数值超出范围或非法，已跳过这些项</div>" if bad else ""
             msg += f"<div class='ok'>{html.escape(note)}</div>" if note else ""
@@ -15681,12 +15872,17 @@ def main():
     # 用户只能看到「开关开了没用」）。
     # 现在：group 0=文本命令与按钮，group 1=媒体类自动删除，group 2=成员/入群事件。
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^/'), route_command))
+    # 榜单翻页按钮：必须注册在 on_button 之前（同 group 内先匹配者 break），否则 rk_* 会被 on_button 当未知操作
+    app.add_handler(CallbackQueryHandler(on_rank_page, pattern=r"^rk_"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'), on_text))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_media), group=1)  # 自动删除规则中心：媒体类
     # 关键：chat_member_types 必须显式传 ANY_CHAT_MEMBER（默认 -1=MY_CHAT_MEMBER 只听 bot 自身状态变化，
     # 普通新成员入群/退群触发的 chat_member 更新会被静默丢弃，调试里"最近事件"无埋点）
     app.add_handler(ChatMemberHandler(on_member_event, chat_member_types=ChatMemberHandler.ANY_CHAT_MEMBER), group=2)
+    # 谁把 bot 拉进群：MY_CHAT_MEMBER 只听 bot 自身成员状态变化（普通群也触发，操作者在 from_user）；
+    # 单独放 group=3，避免与上面的 ANY_CHAT_MEMBER 在同一 group 内被先匹配 break 掉（用户 2026-09-11 需求）
+    app.add_handler(ChatMemberHandler(on_my_chat_member, chat_member_types=ChatMemberHandler.MY_CHAT_MEMBER), group=3)
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members_msg), group=2)  # 普通群入群兜底
     app.add_handler(ChatJoinRequestHandler(on_join_request), group=2)  # 入群申请事件（群需开「申请加入」）
     app.add_error_handler(on_app_error)  # 全局错误兜底：handler 异常不再静默

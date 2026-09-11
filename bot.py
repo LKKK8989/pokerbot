@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1840"
+BOT_VERSION = "2026-09-11-2200"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -158,6 +158,37 @@ SIDEBAR_ORDER = []   # 侧边栏自定义排序（组键列表，网页「群体
 SIDEBAR_CHILDREN = {"texas": ["season"]}  # 把某些独立组折叠进父组显示（路由不变）：排位赛归入德州
 # 群管中心（跨组聚合页）直接内嵌的高频开关；新增群管功能时往这里加键即可
 MOD_PAGE_FIELDS = []
+# ---------- 页面入口登记表（防「该上线的没上线」） ----------
+# 自动删除页的 4 个弹窗各自负责哪些设置键（弹窗 = 该页的**唯一**入口）。
+# ⚠️ 该页没有主表单（只渲染「防护类型」一览 + 弹窗），任何一个 autodel 字段只要不在这 4 个
+#    集合里，就等于「后台永远改不了它」——2026-09-11 实测踩到：autodel_default_seconds
+#    （默认回收总开关）与 rank_delete_seconds（榜单回收）两个字段谁也不认领，页面上根本没有。
+#    新增字段请加进对应集合；test_web_field_reachable.py 会强制校验，漏了直接红。
+AUTODEL_TAB_RECYCLE = {
+    "panel_delete_seconds", "autodel_default_seconds", "points_delete_seconds",
+    "reply_delete_seconds", "settle_delete_seconds", "race_notice_delete_seconds",
+    "rank_delete_seconds",
+}
+AUTODEL_TAB_ANTISPAM = {
+    "antispam_enabled", "antispam_repeat_n", "antispam_window", "antispam_min_len",
+    "antispam_timer_n", "antispam_timer_tol", "antispam_mute_seconds",
+    "antispam_mute_escalate", "antispam_notice_seconds",
+}
+AUTODEL_TAB_TEXT = {"autodel_text_rules", "autodel_long_len", "autodel_text_seconds"}
+AUTODEL_TAB_MEDIA = {"autodel_media_types", "autodel_media_seconds"}
+AUTODEL_TAB_SETS = {
+    "md_recycle": AUTODEL_TAB_RECYCLE,
+    "md_antispam": AUTODEL_TAB_ANTISPAM,
+    "md_textrule": AUTODEL_TAB_TEXT,
+    "md_mediarule": AUTODEL_TAB_MEDIA,
+}
+# mod 页「移进弹窗、主表单不再渲染」的键 = 主表单剔除名单的**唯一来源**。
+# 别再写第二份内联字面量：曾经页面里外各写一份，改一处漏一处 ⇒ 保存一个弹窗把没提交的
+# 开关静默清零（2026-09-09 用户报障真凶）。
+MOD_MODAL_KEYS = {
+    "sensitive_enabled", "sensitive_words", "sensitive_action", "sensitive_mute_seconds",
+    "link_whitelist_enabled", "link_whitelist", "sep_mod_word",
+}
 # 侧边栏四大节（照阿福/方丈：节标题 + 节内菜单项）。不在任何节里的组保持原样渲染在最后。
 # 排序逻辑：机器人日常 → 群治理(成员/群管/删除) → 增长与经济(邀请/积分/抽奖) → 娱乐游戏 → 系统管理殿后
 SIDEBAR_SECTIONS = [
@@ -194,6 +225,7 @@ SUBPAGES = {
     ],
     "members": [
         ("mlist",   "群组成员列表"),
+        ("titg",    "称号加封"),
         ("records", "进出与申请"),
         ("ops",     "白名单与操作"),
         ("join",    "入群与观察"),
@@ -244,6 +276,7 @@ SETTINGS_FIELDS = [
     ("jinhua_seen_double",      "JINHUA_SEEN_DOUBLE",      "看牌者投注加倍开关",        "bool",  0,   1,       "jinhua"),
     ("jinhua_enabled",          "JINHUA_ENABLED",          "炸金花开关",                "bool",  0,   1,       "jinhua"),
     ("jinhua_admin_only",       "JINHUA_ADMIN_ONLY",       "炸金花仅管理员开局",        "bool",  0,   1,       "jinhua"),
+    ("jinhua_open_timeout",     "JINHUA_OPEN_PENDING_TIMEOUT", "跟平阶段超时自动开牌(秒)", "int", 30, 3600, "jinhua"),
     # ---------- 大话骰（吹牛·港式标准） ----------
     ("dice_ante",               "DICE_ANTE",               "底注(开局一次性扣进奖池)",  "int",   1,   100000,  "dice"),
     ("dice_dice_count",        "DICE_DICE_COUNT",         "每人骰子数",                "int",   1,   10,      "dice"),
@@ -263,6 +296,7 @@ SETTINGS_FIELDS = [
     ("race_track_length",       "RACE_TRACK_LENGTH",       "赛道长度(格)",              "int",   5,   50,      "race"),
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
+    ("race_parimutuel",         "RACE_PARIMUTUEL",         "押注池赔率(1=赔率=总池÷该马注额,押得少赔率高,派彩合计=总池;0=旧模型按胜率)", "bool", 0, 1, "race"),
     ("race_enabled",            "RACE_ENABLED",            "赛车开关",                  "bool",  0,   1,       "race"),
     ("race_subsidy_enabled",    "RACE_SUBSIDY_ENABLED",    "赛车系统加奖开关(每场给奖池加钱拉人气)", "bool", 0, 1, "race"),
     ("race_subsidy_amount",     "RACE_SUBSIDY_AMOUNT",     "赛车系统加奖金额(每场,押中者按注额分)", "int", 0, 100000, "race"),
@@ -308,6 +342,7 @@ SETTINGS_FIELDS = [
     ("reply_delete_seconds",    "REPLY_DELETE_SECONDS",    "查询类回复删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("race_notice_delete_seconds", "RACE_NOTICE_DELETE_SECONDS", "赛车倒计时提示删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("rank_delete_seconds",     "RANK_DELETE_SECONDS",      "榜单消息删除(秒,0=不删；带翻页按钮的榜单也按此回收)", "int", 0, 86400, "autodel"),
     ("web_base_url",            "WEB_BASE_URL",            "后台公网地址(/后台一键登录用)",          "text", 0,   0,    "general"),
     ("observe_enabled",         "OBSERVE_ENABLED",         "新成员观察期开关(入群未满时长禁言)", "bool", 0, 1, "members/join"),
     ("observe_seconds",         "OBSERVE_SECONDS",         "新成员观察期时长(秒,0=不限制)", "int", 0, 86400, "members/join"),
@@ -315,6 +350,7 @@ SETTINGS_FIELDS = [
     ("antispam_enabled",        "ANTISPAM_ENABLED",        "定时刷屏识别开关(复读+定时器特征)", "bool", 0,   1,    "autodel"),
     ("antispam_repeat_n",       "ANTISPAM_REPEAT_N",       "复读命中条数(窗口内同内容)", "int",  2,   10,   "autodel"),
     ("antispam_window",         "ANTISPAM_WINDOW",         "复读检测窗口(秒)", "int",  10,  3600, "autodel"),
+    ("antispam_min_len",        "ANTISPAM_MIN_LEN",        "参与统计的最短字数(更短的消息不参与判定)", "int", 1, 50, "autodel"),
     ("antispam_timer_n",        "ANTISPAM_TIMER_N",        "定时器特征最少累计条数", "int",  3,   20,   "autodel"),
     ("antispam_timer_tol",      "ANTISPAM_TIMER_TOL",      "定时器间隔偏差容忍(%)", "int",  5,   90,   "autodel"),
     ("antispam_mute_seconds",   "ANTISPAM_MUTE_SECONDS",   "命中禁言基础时长(秒,0=只删不禁)", "int",  0,   86400,"autodel"),
@@ -373,12 +409,15 @@ SETTINGS_FIELDS = [
     ("emergency_chips",         "EMERGENCY_CHIPS",         "归零赠送积分",              "int",   0,   100000,  "general"),
     ("emergency_max_uses",      "EMERGENCY_MAX_USES",      "归零每日赠送次数",          "int",   0,   99,      "general"),
     ("emergency_min_games",     "EMERGENCY_MIN_GAMES",     "归零赠送要求累计玩过局数(0=不限)", "int", 0, 9999, "general"),
+    # ---------- 安全（后台登录） ----------
+    ("web_otp_enabled",         "WEB_OTP_ENABLED",         "后台登录需要验证码(二次验证)", "bool", 0, 1, "security"),
     ("season_start_chips",      "SEASON_START_CHIPS",      "每人起始分",                "int",   100, 1000000, "season"),
     ("season_min_players",      "SEASON_MIN_PLAYERS",      "最少开赛人数",              "int",   2,   50,      "season"),
     ("season_min_games",        "SEASON_MIN_GAMES",        "结算最少局数",              "int",   0,   999,     "season"),
     ("season_days",             "SEASON_DAYS",             "赛季天数",                  "int",   1,   90,      "season"),
     ("season_rebuy_count",      "SEASON_REBUY_COUNT",      "每日重买次数上限",          "int",   0,   20,      "season"),
     ("season_rebuy_amount",     "SEASON_REBUY_AMOUNT",     "每次重买金额",              "int",   0,   1000000, "season"),
+    ("season_bet_percent",      "SEASON_BET_PERCENT",      "排位赛单人单局投入上限比例(×落座筹码总和)", "float", 0.0, 1.0, "season"),
     # ===== 排位赛德州独立参数（0=沿用日常德州设置；填非 0 值即排位局专用） =====
     ("sep_season_texas",        None, "排位赛德州规则（留空/0 = 沿用日常德州；填了就是排位局专用）", "sep", 0, 0, "season"),
     ("season_min_entry_chips",  "SEASON_MIN_ENTRY_CHIPS",  "入座最低排位分(0=只要>0即可)", "int", 0, 1000000, "season"),
@@ -428,6 +467,7 @@ SETTINGS_FIELDS = [
     ("level_enabled",           "LEVEL_ENABLED",           "积分等级系统开关",          "bool",  0,   1,       "points/level"),
     ("level_allow_demote",      "LEVEL_ALLOW_DEMOTE",      "积分不足是否允许降级",      "bool",  0,   1,       "points/level"),
     ("level_sync_tag",          "LEVEL_SYNC_TAG",          "积分称号同步成员标签开关",  "bool",  0,   1,       "points/level"),
+    ("tag_sync_max",            "TAG_SYNC_MAX",            "批量同步标签人数上限(每群)", "int",   1,   1000,   "points/level"),
     ("level_up_msg_tpl",        "LEVEL_UP_MSG_TPL",        "用户升级通知",              "text",  0,   0,       "points/level"),
     ("level_down_notify_enabled", "LEVEL_DOWN_NOTIFY_ENABLED", "用户降级通知开关",      "bool",  0,   1,       "points/level"),
     ("level_down_msg_tpl",      "LEVEL_DOWN_MSG_TPL",      "用户降级通知",              "text",  0,   0,       "points/level"),
@@ -448,6 +488,7 @@ SETTINGS_FIELDS = [
     ("mall_msg_empty",          "MALL_MSG_EMPTY",          "无商品提示消息",            "text",  0,   0,       "points/mall"),
     ("mall_min_age_days",       "MALL_MIN_AGE_DAYS",       "兑换门槛-使用满N天(0=不限,防小号)", "int", 0, 365, "points/mall"),
     ("mall_min_active_days",    "MALL_MIN_ACTIVE_DAYS",    "兑换门槛-游戏活跃天数≥N(0=不限)", "int", 0, 365,   "points/mall"),
+    ("mall_list_delete_seconds","MALL_LIST_DELETE_SECONDS","商城/兑换列表消息删除(秒,0=不删)", "int", 0, 86400, "points/mall"),
     ("inherit_enabled",         "INHERIT_ENABLED",         "积分转赠(继承)开关",        "bool",  0,   1,       "points/inherit"),
     ("inherit_msg_ok",          "INHERIT_MSG_OK",          "转赠成功消息",              "text",  0,   0,       "points/inherit"),
     ("inherit_daily_limit",     "INHERIT_DAILY_LIMIT",     "每日转赠上限(0=不限,防小号)", "int",  0,   1000000, "points/inherit"),
@@ -457,10 +498,12 @@ SETTINGS_FIELDS = [
     ("guess_min_bet",           "GUESS_MIN_BET",           "竞猜单注下限(积分)",        "int",   1,   100000,  "points/guess"),
     ("guess_max_bet",           "GUESS_MAX_BET",           "竞猜单注上限(积分,0=不限)", "int",   0,   1000000, "points/guess"),
     ("guess_duration",          "GUESS_DURATION",          "竞猜下注时长(分钟)",        "int",   1,   1440,    "points/guess"),
+    ("guess_auto_settle_minutes","GUESS_AUTO_SETTLE_MINUTES","封盘后自动撤销退款(分钟,0=不自动)", "int", 0, 1440, "points/guess"),
     # 群组抽奖（基础版：1 个 prize+count 形式；点数抽奖/乐透等高级类型后续按需扩展）
     ("lottery_enabled",         "LOTTERY_ENABLED",         "群组抽奖总开关",            "bool",  0,   1,       "lottery"),
     ("lottery_keyword",         "LOTTERY_KEYWORD",         "参与触发词(也支持 /开奖)",   "short", 0,   0,       "lottery"),
     ("lottery_default_duration","LOTTERY_DEFAULT_DURATION","倒计时默认时长(秒)",          "int",   10,  3600,    "lottery"),
+    ("lottery_max_prizes",      "LOTTERY_MAX_PRIZES",      "单次抽奖最多奖品档数",       "int",   1,   20,      "lottery"),
     ("lottery_fee",             "LOTTERY_FEE",             "参与扣积分(0=免费)",         "int",   0,   10000,   "lottery"),
     ("lottery_msg_start",       "LOTTERY_MSG_START",       "活动公告模板",              "text", 0,   0,       "lottery"),
     ("lottery_msg_joined",      "LOTTERY_MSG_JOINED",      "参与成功模板",              "text", 0,   0,       "lottery"),
@@ -515,6 +558,7 @@ _GROUP_NEVER = {
     "stale_text_command_seconds", "broadcast_enabled", "broadcast_min_amount",
     "admin_adjust", "fund_flow_alert",
     "rank_1_emoji", "rank_2_emoji", "rank_3_emoji",
+    "web_otp_enabled",   # 后台登录二次验证：全站唯一，按群覆盖没有意义
 }
 _settings_lock = threading.Lock()
 _web_password = WEB_DEFAULT_PASSWORD  # 运行时明文（仅内存，落盘绝不写它）；改密后由 hash 接管校验
@@ -757,6 +801,7 @@ SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
 PANEL_DELETE_SECONDS = 300 # 游戏卡片/下注面板：本局结束后自动删除（0=不删）
 AUTODEL_DEFAULT_SECONDS = 300  # 「默认自动删除」：群里**无按钮**消息一律按此回收（0=关，见 install_autodelete_default）
 RACE_NOTICE_DELETE_SECONDS = 60  # 赛车倒计时提示自动删除（0=不删）
+RANK_DELETE_SECONDS = 300  # 榜单/排行消息回收（0=不删）：榜单带翻页按钮，但属"查询结果"，不该永久占屏
 _pending_deletes = []      # 待删消息队列 [[cid, mid, 到期时间戳], ...]：随 bot_data 持久化，重启后重放，重部署不再残留消息
 _delete_tasks = set()      # 持有删除 task 的引用：裸 create_task 不保引用可能被事件循环 GC，删除凭空消失
 
@@ -1785,6 +1830,61 @@ def title_icon(title):
     """称号图标，缺省空串。"""
     return TITLE_ICONS.get(title, "")
 
+# ---------- 称号加封/撤销（网页后台专用入口：给称号不扣积分，与「商店兑换」解耦） ----------
+def all_titles():
+    """称号库全量（商店称号按原顺序 + 赌神），供网页下拉/批量选择使用。"""
+    return list(SHOP_TITLES.keys()) + [TITLE_GAMBLING_GOD]
+
+
+def grant_title(uid, title, expire_ts=None):
+    """给玩家加封称号（**纯逻辑**：不落盘、不发消息、不碰网络，便于单测）。
+
+    网页后台「称号加封」与群内 /封赌神 共用这一条路径 —— 管理员直接给称号，
+    不扣积分、不经过商店那条「兑换」流程。
+    赌神仍是全局唯一：加封时自动撤销上任。
+    返回 (ok, msg)。
+    """
+    title = str(title or "").strip()
+    if title not in SHOP_TITLES and title != TITLE_GAMBLING_GOD:
+        return False, f"「{title}」不在称号库中"
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return False, "用户 ID 必须是数字"
+    if title == TITLE_GAMBLING_GOD:          # 全局唯一：先撤掉所有旧持有者
+        for u in list(user_titles.keys()):
+            user_titles[u].discard(title)
+            if not user_titles[u]:
+                del user_titles[u]
+    user_titles.setdefault(uid, set()).add(title)
+    if expire_ts:                            # 限时称号：记到期时间戳
+        title_expiry.setdefault(uid, {})[title] = float(expire_ts)
+    else:                                    # 永久：清掉同名限时残留（防串味）
+        title_expiry.get(uid, {}).pop(title, None)
+        if uid in title_expiry and not title_expiry[uid]:
+            del title_expiry[uid]
+    return True, f"已为 {uid} 加封「{title_icon(title)}{title}」"
+
+
+def revoke_title(uid, title):
+    """撤销玩家的某个称号（**纯逻辑**，不落盘）。返回 (ok, msg)。"""
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return False, "用户 ID 必须是数字"
+    title = str(title or "").strip()
+    if title not in (user_titles.get(uid) or set()):
+        return False, f"该玩家没有「{title}」称号"
+    user_titles[uid].discard(title)
+    if not user_titles[uid]:
+        del user_titles[uid]
+    title_expiry.get(uid, {}).pop(title, None)
+    if uid in title_expiry and not title_expiry[uid]:
+        del title_expiry[uid]
+    if title_equipped.get(uid) == title:     # 撤销的正好是佩戴中的 → 取消佩戴，回落默认前缀
+        title_equipped.pop(uid, None)
+    return True, f"已撤销 {uid} 的「{title}」"
+
 # ---------- 昵称缓存（持久化）：群里每条消息/回调直接拿 effective_user 真名，避免 get_chat 失败回退成"玩家{uid}" ----------
 user_names = {}                # user_names[uid] = "真名"（原始串，输出时再 html.escape）
 chat_name_cache = {}           # chat_name_cache[cid] = 群名（入站消息自动缓存，授权列表等无需再调 get_chat）
@@ -2626,18 +2726,33 @@ def schedule_delete_ids(app, cid, ids, seconds):
     if not ids: return
     due = time.time() + int(seconds)
     for mid in ids:
-        _pending_deletes.append([cid, mid, due])
+        # 同一消息重复排程 → 只留最新一条（榜单翻页续期、面板重发都会走到这里，
+        # 不去重会堆出多条重复条目，白挨几次注定失败的删除）
+        keep_q = []
+        for q in _pending_deletes:
+            try:
+                same = int(q[0]) == int(cid) and int(q[1]) == int(mid)
+            except (ValueError, TypeError, IndexError):
+                same = False
+            if not same:
+                keep_q.append(q)
+        keep_q.append([cid, mid, due])
+        _pending_deletes[:] = keep_q
     if len(_pending_deletes) > 5000:
         del _pending_deletes[:-2000]   # 防异常堆积
     async def _del_later():
         await asyncio.sleep(seconds)
         await _flush_deletes(app)
+    _coro = _del_later()
     try:
-        t = asyncio.create_task(_del_later())
+        t = asyncio.create_task(_coro)
         _delete_tasks.add(t)
         t.add_done_callback(_delete_tasks.discard)
     except RuntimeError:
-        pass   # 无事件循环（如网页线程调用）：条目已在队列，由周期兜底/启动重放接管
+        # 无事件循环（如网页线程调用）：条目已在队列，由周期兜底/启动重放接管。
+        # ⚠️ 必须 close()：不然这个协程永远没被 await，Python 会报 RuntimeWarning，
+        #    而且看上去像"排了删除却没执行"——很难查的假故障。
+        _coro.close()
 
 
 def schedule_delete(app, cid, msgs, seconds):
@@ -2777,15 +2892,33 @@ _AUTODEL_SKIP_FRAMES = {
     "_send_message_patched",               # ⚠️ 本补丁自己：栈顶第一帧就是它
     "_autodel_caller_name",                # 本函数自己
 }
+# 补丁包装函数的统一前缀（send_message / send_photo / ... 各有一个包装）。
+# 溯源时必须跳过**所有**包装帧：只写死一个方法名，新加的方法就会漏掉（老 bug 的复发形态）。
+_AUTODEL_PATCH_PREFIX = "_autodel_patched_"
+# 要打补丁的 Bot API 清单。⚠️ 只补 send_message 的话，用 send_photo / send_document 发的
+# 新功能又会「永不删除」—— 这正是 2026-09-11 用户第二次追问「怎么又没删」的根因。
+_AUTODEL_PATCH_METHODS = (
+    "send_message", "send_photo", "send_animation", "send_document", "send_video",
+    "send_voice", "send_audio", "send_video_note", "send_sticker",
+    "copy_message", "forward_message",
+)
 # 已有「显式删除路径」的函数：它们自己管生命周期（各自的 *_DELETE_SECONDS），
 # 不要再叠一层默认删除 —— 否则后台把 REPLY_DELETE_SECONDS 设成 0，也会被 300 秒兜掉。
 _AUTODEL_OWN_FUNCS = {"send_reply", "send_settle", "send_settle_rank"}
+# 带按钮、但**仍要回收**的发送方：榜单是「查询结果」，虽然带翻页/切榜按钮，
+# 却不像牌桌那样需要一直在场 —— 按 RANK_DELETE_SECONDS 回收（有人翻页就续期）。
+_AUTODEL_MARKUP_IGNORE_FUNCS = {"send_rank_page"}
+
+
+def _autodel_skip(name):
+    """这个栈帧名算不算「补丁自己在转发」？（所有补丁包装帧 + 发送原语层）"""
+    return name in _AUTODEL_SKIP_FRAMES or name.startswith(_AUTODEL_PATCH_PREFIX)
 
 
 def _autodel_caller_name(frames=None):
     """取「真正发起这次发送」的函数名（跳过转发层与本补丁自身）。
 
-    ⚠️ `_send_message_patched` 必须在 `_AUTODEL_SKIP_FRAMES` 里：栈顶第一帧就是它自己，
+    ⚠️ 补丁包装帧（`_autodel_patched_*`）必须在跳过名单里：栈顶第一帧就是它自己，
     不跳过的话返回值永远是它 ⇒ `_AUTODEL_KEEP_FUNCS` 白名单**永远匹配不上**
     （2026-09-11 自查发现的真 bug，已加测试锁死）。
 
@@ -2793,7 +2926,7 @@ def _autodel_caller_name(frames=None):
     """
     if frames is not None:
         for nm in frames:
-            if nm not in _AUTODEL_SKIP_FRAMES:
+            if not _autodel_skip(nm):
                 return nm
         return ""
     try:
@@ -2804,7 +2937,7 @@ def _autodel_caller_name(frames=None):
     while f is not None:
         if not own or f.f_code.co_filename == own:
             nm = f.f_code.co_name
-            if nm not in _AUTODEL_SKIP_FRAMES:
+            if not _autodel_skip(nm):
                 return nm
         f = f.f_back
     return ""
@@ -2817,22 +2950,26 @@ def _autodel_default_secs():
         return 0
 
 
-def _autodel_decide(chat_id, has_markup, caller, secs):
+def _rank_delete_secs():
+    """榜单消息回收秒数（0=不删）。榜单是「查询结果」，不该像牌桌一样永久占屏。"""
+    try:
+        return int(sget("RANK_DELETE_SECONDS") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _autodel_decide(chat_id, has_markup, caller, secs, rank_secs=None):
     """纯函数：算出这次发送要不要排入删除、排多少秒（0 = 不删）。
 
     规则（默认删，例外才不删）：
-      · 秒数设置 <= 0（功能关闭）→ 不删
       · 私聊（cid > 0）→ 不删（玩家自己的收件箱）
       · 带按钮（reply_markup）→ 不删（交互面板，删了没法玩）
+        例外：`_AUTODEL_MARKUP_IGNORE_FUNCS` 里的发送方（榜单）带按钮也回收，
+              时长取 rank_secs（RANK_DELETE_SECONDS，0 = 不删）。
       · 调用方在 _AUTODEL_KEEP_FUNCS 白名单 → 不删
       · 调用方在 _AUTODEL_OWN_FUNCS（显式删除路径）→ 不删（自己排程，不重复排）
-      其余一律删。
+      · 其余：秒数设置 <= 0（功能关闭）→ 不删；否则按 secs 删。
     """
-    try:
-        if int(secs or 0) <= 0:
-            return 0
-    except (TypeError, ValueError):
-        return 0
     if chat_id is None:
         return 0
     try:
@@ -2840,44 +2977,69 @@ def _autodel_decide(chat_id, has_markup, caller, secs):
             return 0
     except (TypeError, ValueError):
         return 0
+    if caller in _AUTODEL_MARKUP_IGNORE_FUNCS:
+        try:
+            return max(0, int(rank_secs or 0))
+        except (TypeError, ValueError):
+            return 0
     if has_markup:
         return 0
     if caller in _AUTODEL_KEEP_FUNCS:
         return 0
     if caller in _AUTODEL_OWN_FUNCS:
         return 0
-    return int(secs)
+    try:
+        return max(0, int(secs or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def install_autodelete_default(app):
-    """【默认开启自动删除】给 telegram.Bot.send_message 打补丁：群消息无按钮 ⇒ 自动排删。
+    """【默认开启自动删除】给 telegram.Bot 的每个 send_* 打补丁：群消息默认回收。
 
     幂等（重复调用无副作用）。用**类级**补丁，因为 Bot 定义了 __slots__，无法挂实例属性。
     想临时豁免一次发送：`bot.send_message(..., autodel_keep=True)`。
+
+    ⚠️ 覆盖 `_AUTODEL_PATCH_METHODS` 里的**全部**发送 API，而不是只包 send_message：
+    只包一个的话，用 send_photo / send_document 发的新功能又变成「永不删除」。
     """
     from telegram import Bot as _Bot
     if getattr(_Bot, "_autodel_patched", False):
         return
-    _orig_send = _Bot.send_message
 
-    async def _send_message_patched(self, *args, **kwargs):
-        keep = bool(kwargs.pop("autodel_keep", False))
-        msg = await _orig_send(self, *args, **kwargs)
-        try:
-            if keep or msg is None:
-                return msg
-            markup = kwargs.get("reply_markup") or getattr(msg, "reply_markup", None)
-            secs = _autodel_decide(getattr(msg, "chat_id", None), markup is not None,
-                                   _autodel_caller_name(), _autodel_default_secs())
-            if secs > 0:
-                schedule_delete_ids(app, int(msg.chat_id), msg.message_id, secs)
-        except Exception:
-            logger.exception("默认自动删除排程失败（不影响发送）")
-        return msg
+    def _make_patch(method_name, orig):
+        async def _patched(self, *args, **kwargs):
+            keep = bool(kwargs.pop("autodel_keep", False))
+            res = await orig(self, *args, **kwargs)
+            try:
+                if keep or res is None:
+                    return res
+                msgs = res if isinstance(res, (list, tuple)) else [res]
+                for msg in msgs:
+                    mid = getattr(msg, "message_id", None)
+                    cid = getattr(msg, "chat_id", None)
+                    if mid is None or cid is None:
+                        continue
+                    markup = kwargs.get("reply_markup") or getattr(msg, "reply_markup", None)
+                    secs = _autodel_decide(cid, markup is not None, _autodel_caller_name(),
+                                           _autodel_default_secs(), _rank_delete_secs())
+                    if secs > 0:
+                        schedule_delete_ids(app, int(cid), int(mid), secs)
+            except Exception:
+                logger.exception("默认自动删除排程失败（不影响发送）")
+            return res
+        _patched.__name__ = _AUTODEL_PATCH_PREFIX + method_name
+        return _patched
 
-    _Bot.send_message = _send_message_patched
+    done = []
+    for _m in _AUTODEL_PATCH_METHODS:
+        _orig = getattr(_Bot, _m, None)
+        if callable(_orig):
+            setattr(_Bot, _m, _make_patch(_m, _orig))
+            done.append(_m)
     _Bot._autodel_patched = True
-    logger.info("已启用「默认自动删除」：群内无按钮消息将在 AUTODEL_DEFAULT_SECONDS 秒后回收")
+    logger.info("已启用「默认自动删除」：群里无按钮消息 %s 秒后回收、榜单 %s 秒后回收（已覆盖 %s）",
+                AUTODEL_DEFAULT_SECONDS, _rank_delete_secs(), ",".join(done))
 
 
 def ledger_add(cid, frm, to, amt, typ):
@@ -3248,7 +3410,8 @@ class PokerGame:
             ante = min(_ante, self.chips[uid]); self.chips[uid] -= ante; self.total_bet[uid] += ante; self.pot += ante
             if not self.chips[uid]: self.all_in.add(uid)
         # 排位赛：单局每人投入上限 = 本局落座玩家带入筹码总和 × 百分比（人少上限低，防串通）
-        self.max_total_bet = max(int(sum(self.initial_chips.values()) * SEASON_BET_PERCENT), _ante) if self.season else None
+        _sbp = group_get(self.chat_id, "season_bet_percent", SEASON_BET_PERCENT)   # 精确到本群
+        self.max_total_bet = max(int(sum(self.initial_chips.values()) * float(_sbp or SEASON_BET_PERCENT)), _ante) if self.season else None
         self.deck = [Card.new(rank + suit) for rank in "23456789TJQKA" for suit in "shdc"]
         random.shuffle(self.deck); self.hands = {uid: [self.deck.pop(), self.deck.pop()] for uid in self.players}
         self.dealer_idx = len(self.players) - 1; self.active = self.players.copy()
@@ -3762,15 +3925,31 @@ class HorseRace:
         self.finish_durations = {}
 
     def odds(self):
-        # 赔率 = 真实胜率的公平赔率(1/rate) × 注额压力因子
-        # - 不设上限（用户要求），仅保留 1.05 地板防止「赢了还亏本」
-        # - 注额越多 -> 因子越小 -> 赔率越低（热门马赔得少，标准押注池逻辑）
-        # - 单调约束：胜率越低赔率必须越高，杜绝「低胜率马赔率反而更低」的怪象
+        # 【押注池 parimutuel · 2026-09-11】用户：「赔率不是动态的也不是根据下注金额的」；
+        # 群友：「皮卡这赔率你看对？」「赔率太低啦」「总下注1000分起码950分给赢的人」。
+        # 赔率 = 总池 ÷ 该马注额 —— 完全由下注金额决定（押得越少赔率越高），
+        # 全体押中者合计恰好分完总池，不需要系统补分、也不会大量滚存。
+        #
+        # 旧模型（下列 else 分支）为什么被换掉：1/胜率 × 注额压力因子，再叠三道「压平器」——
+        #   因子夹在 0.4~2.5（注额最多影响 ±2.5 倍）；单调约束（低胜率马赔率被往下拉）；
+        #   同显示胜率分组统一（取组内最低值）。仿真：四匹马显示胜率都是 22% 时，
+        #   押 300 的轿车与押 100 的皮卡赔率**都是 4.29x**——这就是群友质疑的那一幕。
+        n = sget("HORSE_COUNT")
         total = sum(self.total_bets)
-        avg = 1.0 / sget("HORSE_COUNT")
+        if sget("RACE_PARIMUTUEL"):
+            if total <= 0:
+                # 开盘还没人下注：先给「1/胜率」参考赔率（仅供预览，下注后立刻变真池赔率）
+                return [max(1.05, 1.0 / self.rates[i]) for i in range(n)]
+            raw = [total / self.total_bets[i] if self.total_bets[i] > 0 else 0.0
+                   for i in range(n)]          # 无人押注的马 = 没有赔率（0，界面展示为 —）
+            if sget("RACE_ODDS_CAP") > 0:
+                raw = [min(v, sget("RACE_ODDS_CAP")) if v > 0 else v for v in raw]
+            return raw
+        # ---- 旧模型：后台把「押注池赔率」关掉即回退到此 ----
+        avg = 1.0 / n
         raw = []
-        for i in range(sget("HORSE_COUNT")):
-            base = 1.0 / self.rates[i]                       # 自然公平赔率，无封顶
+        for i in range(n):
+            base = 1.0 / self.rates[i]                       # 自然公平赔率
             if total > 0 and self.total_bets[i] > 0:
                 share = self.total_bets[i] / total
                 factor = (avg / share) ** 0.5                # 押注占比越高 -> 因子越小
@@ -3782,14 +3961,14 @@ class HorseRace:
         if sget("RACE_ODDS_CAP") > 0:
             raw = [min(value, sget("RACE_ODDS_CAP")) for value in raw]
         # 单调约束：按胜率升序，确保低胜率马的赔率不低于高胜率马
-        order = sorted(range(sget("HORSE_COUNT")), key=lambda i: self.rates[i])
+        order = sorted(range(n), key=lambda i: self.rates[i])
         for a, b in zip(order, order[1:]):
             if raw[a] < raw[b]:
                 raw[b] = raw[a]
         # 同显示胜率（整数%）的馬，赔率必须完全一致，避免"胜率一样赔率却不同"的困惑。
         # 取组内最低赔率统一，不抬高任一匹，保证庄家不被过度赔付。
         groups = {}
-        for i in range(sget("HORSE_COUNT")):
+        for i in range(n):
             groups.setdefault(round(self.rates[i] * 100), []).append(i)
         for grp in groups.values():
             if len(grp) > 1:
@@ -3830,6 +4009,7 @@ class HorseRace:
         stats = race_daily_stats[self.chat_id]
         total_wins = sum(stats)
         odds = self.odds()
+        pool_total = sum(self.total_bets)
         lines = [
             f"🏁 赛车大赛 {race_id(self.create_time)} 🏁",
             "━" * 14,
@@ -3840,10 +4020,12 @@ class HorseRace:
             "📜 当日胜率:",
             "  " + " | ".join(f"{sget('HORSE_EMOJI')[i]} {stats[i]}胜" for i in range(sget("HORSE_COUNT"))),
             "  " + " | ".join(f"{sget('HORSE_EMOJI')[i]} {stats[i] / total_wins * 100:.0f}%" if total_wins else f"{sget('HORSE_EMOJI')[i]} 0%" for i in range(sget("HORSE_COUNT"))),
-            "📊 投注情况:",
+            "📊 投注情况:" + (f" 总池 {pool_total} 积分" if pool_total else ""),
         ]
         for i, odd in enumerate(odds):
-            lines.append(f"{sget('HORSE_EMOJI')[i]} {sget('HORSE_NAMES')[i]}: 胜率{self.rates[i] * 100:.0f}% | {self.total_bets[i]}积分 | 赔率 {odd:.2f}x")
+            # 押注池下「无人押注的马」没有赔率（0）——显示 — 而不是 0.00x，避免误读成「押了不赔」
+            _odd_txt = f"{odd:.2f}x" if odd > 0 else "—"
+            lines.append(f"{sget('HORSE_EMOJI')[i]} {sget('HORSE_NAMES')[i]}: 胜率{self.rates[i] * 100:.0f}% | {self.total_bets[i]}积分 | 赔率 {_odd_txt}")
         lines.append("━" * 14)
         if self.bets:
             lines.append("📋 玩家下注：")
@@ -3854,7 +4036,10 @@ class HorseRace:
             lines.append("")
         _banner = race_subsidy_banner(self.auto_started)
         if _banner: lines.append(_banner)
-        lines.extend([f"⏰ 距离开赛还有 {minutes} 分 {seconds:02d} 秒", "🔒 开赛后锁盘，赔率随注浮动、下注即锁"])
+        # 押注池的赔率只反映「此刻」的注额分布，开赛后锁盘才定终价 —— 文案要让玩家知道
+        _lock_hint = ("赔率随注实时浮动，以开赛锁盘时为准" if sget("RACE_PARIMUTUEL")
+                      else "赔率随注浮动、下注即锁")
+        lines.extend([f"⏰ 距离开赛还有 {minutes} 分 {seconds:02d} 秒", f"🔒 开赛后锁盘，{_lock_hint}"])
         return "\n".join(lines)
 
     def animation(self):
@@ -4001,8 +4186,14 @@ class HorseRace:
                     race_daily_stats[self.chat_id][winner] += 1
                     race_history[self.chat_id] = (race_history[self.chat_id] + [winner])[-10:]
                 standings = ["🥇", "🥈", "🥉", "🏅"]
-                lines = [f"🏆 赛车大赛 {race_id(self.create_time)} 结果 🏆", "━━━━━━━━━━━━━━━━━"]
-                lines.extend(f"{standings[index]} {sget('HORSE_EMOJI')[horse]} {sget('HORSE_NAMES')[horse]}" for index, horse in enumerate(self.arrivals))
+                lines = [f"🏆 赛车大赛 {race_id(self.create_time)} 结果", "━━━━━━━━━━━━━━━━━"]
+                # 名次合并成一行（2026-09-11 用户：「后面的结算好他妈的长啊文字」）。
+                # 顺带修掉隐藏越界：standings 只有 4 个，HORSE_COUNT 可配到 8 —— 原写法会 IndexError
+                # 把整场拖进「结算异常→退款」。现在第 5 名起退化为「5. 名字」。
+                lines.append(" ".join(
+                    f"{standings[index] if index < len(standings) else f'{index + 1}.'}"
+                    f"{sget('HORSE_EMOJI')[horse]} {sget('HORSE_NAMES')[horse]}"
+                    for index, horse in enumerate(self.arrivals)))
 
                 # 先获取所有玩家名字：避免派彩后因取名字失败触发异常退款，导致已派彩玩家被双重派彩
                 for uid in self.bets:
@@ -4013,7 +4204,10 @@ class HorseRace:
                 wallet = game_chips
                 for uid, bets in self.bets.items():
                     stake = sum(bets.values()); bet_on_winner = bets.get(winner, 0)
-                    bet_odd = self.bet_odds[uid].get(winner, fallback_odd)
+                    # 押注池：同一匹马的所有押中者共用「锁盘时的池赔率」（赔率本就随注额走到锁盘）；
+                    # 旧模型才用「下注瞬间锁定的个人赔率」。这修掉了「面板看到 4.29x、结算只给 2.44x」。
+                    bet_odd = (fallback_odd if sget("RACE_PARIMUTUEL")
+                               else self.bet_odds[uid].get(winner, fallback_odd))
                     payout = int(bet_on_winner * bet_odd)
                     net = payout - stake
                     if self.mode == "official":
@@ -4061,21 +4255,23 @@ class HorseRace:
                     lines.extend(["", "🔄 无人押中，奖池滚入下一期。"])
 
                 if subsidy:
-                    lines.extend(["", f"🎁 系统加奖 {subsidy} 积分（按押中注额分配）："])
+                    # 加奖压成一行（原来是「标题 + 每人一行」，多人时又长又占地方）
+                    _sub_parts = []
                     for _uid, _amt in sorted(subsidy_map.items(), key=lambda x: -x[1]):
                         _nm = self.name_cache.get(_uid)
                         if not _nm:
                             _nm = await get_name(app, _uid); self.name_cache[_uid] = _nm
-                        lines.append(f"　{_nm}：+{_amt}")
+                        _sub_parts.append(f"{_nm}+{_amt}")
+                    lines.append(f"🎁 加奖 {subsidy}：" + "、".join(_sub_parts))
 
-                lines.extend(["", "💰 本局结算："])
+                # 结算逐人一行、只留必需字段（2026-09-11 用户：结算文字太长）。
+                # 原来每行是「名：总投注 N｜命中 N（N.NNx）｜派彩 N｜净 ±N（实收 N，含抽水N）」，40+ 字。
+                lines.append("💰 本局结算")
                 for _, name, stake, bet_on_winner, payout, net, bo in settlements:
-                    r_amt = rake_per.get(_, 0)
-                    r_txt = f"（实收 {net - r_amt}，含抽水{r_amt}）" if r_amt else ""
                     if bet_on_winner > 0:
-                        lines.append(f"{name}：总投注 {stake}｜命中 {bet_on_winner}（{bo:.2f}x）｜派彩 {payout}｜净 {net:+d}{r_txt}")
+                        lines.append(f"{name} 押{stake}→派{payout}（{bo:.2f}x）净{net:+d}")
                     else:
-                        lines.append(f"{name}：总投注 {stake}｜未命中｜净 {net:+d}")
+                        lines.append(f"{name} 净{net:+d}")
 
                 # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
                 _rank_lines = None
@@ -5306,6 +5502,11 @@ RACE_SUBSIDY_AMOUNT = 100     # 每场加奖金额（积分）——押中者按
 RACE_SUBSIDY_MIN_PLAYERS = 2  # 加奖生效的最少下注人数（防单人自押自薅）
 RACE_SUBSIDY_DAILY_CAP = 1000 # 每群每日加奖上限（0=不限），防连续开赛把积分放水
 RACE_SUBSIDY_AUTO_ONLY = 1    # 加奖只给「定时自动开赛」的赛车（2026-09-11 用户要求：个人发起的赛车不派奖）
+RACE_PARIMUTUEL = 1           # 赛车赔率模型（2026-09-11 用户+群友反馈「赔率不是动态的、不是根据下注金额的」）：
+                              #   1 = 押注池（parimutuel）：赔率 = 总池 ÷ 该马注额，押得越少赔率越高，
+                              #       全体押中者合计恰好分完总池 —— 不再需要「系统补分」。
+                              #   0 = 旧模型（1/胜率 × 注额压力因子 + 单调约束 + 同显示胜率分组统一），
+                              #       会把赔率抹平（四匹马赔率全等），仅在需要回退时使用。
 
 
 def race_subsidy_banner(auto_started=True):
@@ -5861,7 +6062,7 @@ async def start_jinhua_turn_timer(game, app):
         # 挂一个看门狗：超时后仍处于 open_pending 则自动开牌结算（settle_jinhua 幂等，重复触发无害）。
         if game.phase == "open_pending":
             async def _open_pending_timeout():
-                await asyncio.sleep(JINHUA_OPEN_PENDING_TIMEOUT)
+                await asyncio.sleep(max(1, int(sget("JINHUA_OPEN_PENDING_TIMEOUT") or JINHUA_OPEN_PENDING_TIMEOUT)))
                 if game.settled or game.phase != "open_pending": return
                 game.last_action = "跟平阶段超时，自动开牌结算"
                 await settle_jinhua(game, app)
@@ -6672,8 +6873,9 @@ async def cmd_season_exchange(update, context):
         text, rows = _season_exchange_panel(cid, uid)
         msg = await safe_send(context.bot, cid, text,
                               reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
-        if msg and MALL_LIST_DELETE_SECONDS > 0:
-            schedule_delete(context.application, cid, msg, MALL_LIST_DELETE_SECONDS)
+        _mls = int(sget("MALL_LIST_DELETE_SECONDS") or 0)   # 读时取值：网页改完立即生效
+        if msg and _mls > 0:
+            schedule_delete(context.application, cid, msg, _mls)
         return
     ok, txt = await _season_exchange_execute(context, cid, uid, int(args[0]))
     await send_reply(update, context, txt)
@@ -7336,6 +7538,13 @@ async def _rank_page_text(app, cid, kind, page):
     return "\n".join(lines), page, pages
 
 
+def _rank_rearm(app, cid, mid):
+    """把榜单消息的回收倒计时重排一次（到期时间刷新为「现在 + RANK_DELETE_SECONDS」）。"""
+    secs = _rank_delete_secs()
+    if secs > 0 and app is not None and mid:
+        schedule_delete_ids(app, cid, mid, secs)
+
+
 def _rank_keyboard(kind, page, pages, kinds):
     """翻页/切换键盘。文案刻意用最短形式——按钮文案会把整条消息撑宽（用户 2026-09-11 截图投诉）。"""
     rows = []
@@ -7352,7 +7561,11 @@ def _rank_keyboard(kind, page, pages, kinds):
 
 
 async def send_rank_page(update, context, kind, page=0):
-    """发出分页榜单（第一条消息）。绝不自动删除，翻页靠原地编辑。"""
+    """发出分页榜单（第一条消息）。
+
+    榜单带翻页/切榜按钮，但**照样会被回收**（RANK_DELETE_SECONDS，默认 300 秒、后台可调 0=不删）：
+    它是「查询结果」而不是牌桌，用户想看再点一次就好。翻页/切榜会重新计时（见 on_rank_page）。
+    """
     cid = update.effective_chat.id
     text, page, pages = await _rank_page_text(context.application, cid, kind, page)
     kb = _rank_keyboard(kind, page, pages, _RANK_GROUPS.get(kind, (kind,)))
@@ -7376,6 +7589,8 @@ async def on_rank_page(update, context):
     text, page, pages = await _rank_page_text(context.application, cid, kind, page)
     kb = _rank_keyboard(kind, page, pages, _RANK_GROUPS.get(kind, (kind,)))
     await safe_edit(context.bot, cid, q.message.message_id, text, reply_markup=kb, parse_mode="HTML")
+    # 有人翻页 → 回收倒计时重新计时（否则刚点开就被删，体验突兀）
+    _rank_rearm(context.application, cid, q.message.message_id)
 
 
 async def cmd_cx(update, context):
@@ -9285,7 +9500,7 @@ async def on_text(update, context):
 
         # 定时刷屏识别：复读机 + 定时器特征（管理员豁免；内容太短不参与统计防误伤闲聊）
         if (sget("ANTISPAM_ENABLED") and is_group_chat(update) and not is_bot_admin(user.id)
-                and len(re.sub(r"\s+", "", text)) >= ANTISPAM_MIN_LEN):
+                and len(re.sub(r"\s+", "", text)) >= sget("ANTISPAM_MIN_LEN")):
             try:
                 _reason = _antispam_check(cid, user.id, text)
                 if _reason:
@@ -9943,7 +10158,7 @@ async def _check_level_drop_on_spend(app, cid, uid, before_balance):
         logger.exception("扣分降级检查失败（已忽略）")
 
 
-async def sync_member_tags(app, cid, limit=TAG_SYNC_MAX, progress=None):
+async def sync_member_tags(app, cid, limit=None, progress=None):
     """把群内「有积分账本 / 有钱包」的成员称号，批量补同步成 Telegram 成员标签。
 
     为什么要批量补：称号→标签只在**升级瞬间**同步（`_check_level_change`），
@@ -9979,7 +10194,10 @@ async def sync_member_tags(app, cid, limit=TAG_SYNC_MAX, progress=None):
         # 群主 + 管理员：平台不让 bot 改他们的标签，提前排除（否则一批必然失败）
         admin_ids = await _tag_group_admins(app, cid)
         res["admins_skipped"] = len(cand & admin_ids)
-        uids = sorted(cand - admin_ids)[:max(1, int(limit or TAG_SYNC_MAX))]
+        # limit 默认 None（**不是** TAG_SYNC_MAX）：默认参数在 def 时求值，写成常量的话
+        # 网页改了「批量同步上限」也不会生效 —— 老 bug 形态，这里现读，改完立即生效。
+        _cap = max(1, int(limit or sget("TAG_SYNC_MAX") or TAG_SYNC_MAX))
+        uids = sorted(cand - admin_ids)[:_cap]
         res["total"] = len(uids)
         gap = TAG_SYNC_GAP
         for i, uid in enumerate(uids):
@@ -10140,8 +10358,8 @@ async def cmd_sync_tags(update, context):
     # 非阻塞：按限速 3.2 秒/人，100 人要 5 分钟 —— 同步等会让这条命令看起来"卡死"。
     # 改成后台跑 + 完成后在群里回报（同网页后台口径）。
     await send_reply(update, context,
-                     f"🏷 已开始在后台同步成员标签（{len(targets)} 个群，上限 {TAG_SYNC_MAX} 人/群）\n"
-                     f"⏳ 按 Telegram 限速约需 {_tag_eta_seconds(TAG_SYNC_MAX) // 60} 分钟内完成，跑完汇报结果。")
+                     f"🏷 已开始在后台同步成员标签（{len(targets)} 个群，上限 {sget('TAG_SYNC_MAX')} 人/群）\n"
+                     f"⏳ 按 Telegram 限速约需 {_tag_eta_seconds(sget('TAG_SYNC_MAX')) // 60} 分钟内完成，跑完汇报结果。")
     _spawn_background(_sync_tags_report(context.application, targets, cid))
 
 
@@ -10712,8 +10930,9 @@ async def cmd_points_redeem(update, context):
             lines.append("")
         msg = await safe_send(context.bot, cid, "\n".join(lines),
                               reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
-        if msg and MALL_LIST_DELETE_SECONDS > 0:
-            schedule_delete(context.application, cid, msg, MALL_LIST_DELETE_SECONDS)
+        _mls = int(sget("MALL_LIST_DELETE_SECONDS") or 0)   # 读时取值：网页改完立即生效
+        if msg and _mls > 0:
+            schedule_delete(context.application, cid, msg, _mls)
         return
     arg = args[0].strip()
     item = None
@@ -10781,7 +11000,7 @@ async def cmd_mall(update, context):
         page = max(1, int(context.args[0]))
     text, rows = _mall_panel(page, items, cid)
     kb = InlineKeyboardMarkup(rows) if rows else None
-    await send_reply(update, context, text, kb=kb, delete_after=MALL_LIST_DELETE_SECONDS)
+    await send_reply(update, context, text, kb=kb, delete_after=int(sget("MALL_LIST_DELETE_SECONDS") or 0))
 
 async def cmd_mall_buy(update, context):
     if not await need_auth(update, context): return
@@ -11005,8 +11224,9 @@ def _lottery_parse_prizes(spec: str):
         out.append({"name": name, "count": n})
     if not out:
         return [], "奖品不能为空"
-    if len(out) > LOTTERY_MAX_PRIZES:
-        return [], f"奖品最多 {LOTTERY_MAX_PRIZES} 档"
+    _max_prizes = int(sget("LOTTERY_MAX_PRIZES") or LOTTERY_MAX_PRIZES)
+    if len(out) > _max_prizes:
+        return [], f"奖品最多 {_max_prizes} 档"
     return out, ""
 
 def _lottery_active(cid):
@@ -11569,7 +11789,9 @@ async def _guess_close(cid, app):
     except Exception:
         logger.exception("竞猜封盘看板刷新异常（已吞并）")
     # 兜底：管理员迟迟不结算/撤销时自动退款，绝不让玩家积分卡在奖池里（重启也捞不回来）
-    if GUESS_AUTO_SETTLE_MINUTES and GUESS_AUTO_SETTLE_MINUTES > 0:
+    # 注：必须用 float 比较而不是 int()——后台字段虽是整数分钟，但 int() 会把
+    #     0.02 这类「亚分钟」值毛成 0，等于把自动撤销静默关掉（测试就是靠它压到 1.2 秒）
+    if float(sget("GUESS_AUTO_SETTLE_MINUTES") or 0) > 0:
         try: background_tasks.add(asyncio.create_task(_guess_auto_settle(cid, app)))
         except Exception: pass
 
@@ -11577,7 +11799,10 @@ async def _guess_close(cid, app):
 async def _guess_auto_settle(cid, app):
     """封盘后超时未处理 → 自动撤销并全额退款（积分卡死兜底）。"""
     try:
-        await asyncio.sleep(max(1, float(GUESS_AUTO_SETTLE_MINUTES) * 60))
+        _mins = float(sget("GUESS_AUTO_SETTLE_MINUTES") or 0)
+        if _mins <= 0:
+            return      # 运行期把「自动撤销」关掉 → 兜底任务直接退出，不再退款
+        await asyncio.sleep(max(1, _mins * 60))
         g = guesses.get(cid)
         if not g or not g.get("locked") or g.get("settled"):
             return      # 已被结算/撤销/重开
@@ -11658,7 +11883,7 @@ async def _guess_do_cancel(app, cid, auto=False):
     guesses.pop(cid, None)
     save_data()
     try:
-        tip = (f"⏳ 竞猜「{g['q']}」封盘后 {GUESS_AUTO_SETTLE_MINUTES} 分钟无人结算，已自动撤销，"
+        tip = (f"⏳ 竞猜「{g['q']}」封盘后 {sget('GUESS_AUTO_SETTLE_MINUTES')} 分钟无人结算，已自动撤销，"
                f"{n} 人的托管注金全额退回。" if auto else
                f"🎯 竞猜「{g['q']}」已撤销，{n} 人的托管注金已全额退回。")
         await send_settle(app, cid, tip)
@@ -14507,6 +14732,8 @@ def start_health_server():
                            "更多 ▾</button><div class='menu'>"
                            + _mb("warn_add", x["uid"], "⚠️ 警告 +1", "#b8860b")
                            + " " + _mb("warn_sub", x["uid"], "⚠️ 警告 −1", "#5b5b76")
+                           + " <a href='/page/members/titg?cid=" + str(sel_cid) + "&uid=" + str(x["uid"]) + "'>"
+                           + "<button type='button' class='pbtn' style='background:#8a6d3b'>🏅 称号</button></a>"
                            + "</div></div>")
                     rows_html += (f"<tr><td><div style='display:flex;align-items:center;gap:9px;min-width:0'>"
                                   f"<span class='av' style='background:{av_bg}'>{av_ch}</span>"
@@ -14569,6 +14796,67 @@ def start_health_server():
                             "<input type='hidden' name='group' value='members/join'>"
                             + _field_rows("members/join") +
                             _savebar() + "</form></div>")
+                elif sub == "titg":
+                    # 🏅 称号加封：管理员从称号库直接挑一个称号给群友（不扣积分、不走商店兑换）
+                    _gsel = int(flt.get("cid") or 0)
+                    _usel = int(flt.get("uid") or 0)
+                    _mem_opts = ""
+                    if _gsel:
+                        _profs = member_profiles.get(_gsel, {})
+                        _seen_m = {}
+                        for _u in (set(_profs) | set(game_chips.get(_gsel, {}))
+                                   | set(member_joined_at.get(_gsel, {}))):
+                            _seen_m[_u] = (user_names.get(_u)
+                                           or (_profs.get(_u) or {}).get("name")
+                                           or f"用户{_u}")
+                        _mem_opts = "".join(
+                            f"<option value='{_u}'{' selected' if _u == _usel else ''}>"
+                            f"{html.escape(str(_n))}（{_u}）</option>"
+                            for _u, _n in sorted(_seen_m.items(), key=lambda x: str(x[1])))
+                    _title_opts = "".join(f"<option value='{t}'>{title_icon(t)}{t}</option>"
+                                          for t in all_titles())
+                    # 该群已持有称号的人（展示层实际前缀；撤销按钮逐个称号一个表单）
+                    _own_rows = ""
+                    if _gsel:
+                        _cands = (set(member_profiles.get(_gsel, {}))
+                                  | set(game_chips.get(_gsel, {}))
+                                  | set(user_titles.keys()))
+                        for _u in sorted(_cands):
+                            _ts = sorted(user_titles.get(_u) or set())
+                            if not _ts:
+                                continue
+                            _nm = html.escape(str(user_names.get(_u) or f"用户{_u}"))
+                            _btns = " ".join(
+                                "<form style='display:inline' method='post' action='/adminops2'>"
+                                "<input type='hidden' name='op' value='titlerevoke'>"
+                                f"<input type='hidden' name='uid' value='{_u}'>"
+                                f"<input type='hidden' name='cid' value='{_gsel}'>"
+                                f"<input type='hidden' name='title' value='{html.escape(t, quote=True)}'>"
+                                f"<button style='margin:0;padding:4px 10px;font-size:12px;background:#c0392b;margin-top:0'>撤销 {html.escape(t)}</button></form>"
+                                for t in _ts)
+                            _own_rows += (f"<tr><td><code>{_u}</code> {_nm}</td>"
+                                          f"<td>{html.escape(chr(32).join(title_icon(t) + t for t in _ts))}</td>"
+                                          f"<td style='white-space:nowrap'>{_btns}</td></tr>")
+                    _mem_sel = ("<select name='uid' required style='flex:1;min-width:190px'>"
+                                f"<option value=''>— 请选择成员 —</option>{_mem_opts}</select>") if _gsel else \
+                               "<div class='sub' style='flex:1'>先在上面选好群，成员下拉会自动带出该群玩家</div>"
+                    body = (f"<h1>{gicon} 称号加封</h1>"
+                            "<div class='sub'>管理员直接把称号加封给群友：<b>不扣积分、不走商店那条路</b>，加封后立即出现在聊天里的名字前缀。赌神仍全局唯一（封新自动撤旧）。称号库里 <b>" + str(len(all_titles())) + "</b> 个称号全部可选。</div>"
+                            f"{msg}<div class='card'><h3>① 选择群组</h3>"
+                            "<form method='get' action='/page/members/titg' style='display:flex;gap:10px;align-items:end;flex-wrap:wrap'>"
+                            f"<div style='flex:1;min-width:200px'><div class='sub'>群</div><select name='cid' required>{_group_options(selected=_gsel)}</select></div>"
+                            "<button type='submit' style='margin-top:0'>🔍 载入成员</button></form></div>"
+                            "<div class='card' style='margin-top:18px'><h3>② 加封称号</h3>"
+                            "<form method='post' action='/adminops2' style='display:flex;gap:10px;align-items:end;flex-wrap:wrap'>"
+                            "<input type='hidden' name='op' value='titlegrant'>"
+                            f"<input type='hidden' name='cid' value='{_gsel}'>"
+                            f"<div style='flex:2;min-width:200px'><div class='sub'>成员</div>{_mem_sel}</div>"
+                            f"<div style='flex:2;min-width:200px'><div class='sub'>称号</div><select name='title' required>{_title_opts}</select></div>"
+                            "<button type='submit' style='margin-top:0'>🏅 加封</button></form></div>"
+                            "<div class='card' style='margin-top:18px'><h3>🏆 该群已持有称号</h3>"
+                            "<table class='tbl'><tr><th>成员</th><th>称号</th><th>操作</th></tr>"
+                            + (_own_rows or "<tr><td colspan='3'>该群暂无成员持有称号</td></tr>")
+                            + "</table></div>")
                 else:
                     body = (f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}"
                             + _members_body("records" if sub == "records" else "ops", pgs=flt))
@@ -14727,11 +15015,15 @@ def start_health_server():
                         "<textarea name='tg_menu' rows='14' style='width:100%;font-family:inherit'>" + html.escape(menu_txt) + "</textarea>" +
                         _savebar("保存全部命令设置") + "</form></div>")
             elif gkey == "security":
-                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码</div>{msg}"
-                        "<form method='post' action='/save'>"
+                # 原来这里只渲染密码输入框，从不渲染 _field_rows("security")
+                # ⇒ 分到 security 组的开关（登录二次验证）永远是「后台看不到」的黑洞。
+                body = (f"<h1>{gicon} {gname}</h1><div class='sub'>修改后台登录密码 · 登录二次验证</div>{msg}"
+                        "<div class='card'><form method='post' action='/save'>"
                         "<input type='hidden' name='group' value='security'>"
-                        "<label>新密码（至少4位）<input type='password' name='new_password'></label>"
-                        "<button type='submit'>💾 保存密码</button></form>")
+                        + _field_rows("security") +
+                        "<label>新密码（至少 4 位；留空 = 不修改）"
+                        "<input type='password' name='new_password'></label>"
+                        "<button type='submit'>💾 保存</button></form></div>")
 # 群组抽奖独立组（从积分系统移出，无子页）：必须在 elif sub: 之前拦截
             elif gkey == "lottery":
                 sname = gname  # 顶层分支：组名直接取参数（原 elif sub: 内由子页表推导）
@@ -15321,21 +15613,24 @@ def start_health_server():
                         mp = dict(MULTI_OPTIONS.get(key, []))
                         return ("、".join(mp.get(v.strip(), v.strip()) for v in str(val or "").split(",") if v.strip())
                                 or "未勾选任何规则（全部放行）")
-                    _K_RECYCLE = {"panel_delete_seconds", "points_delete_seconds", "reply_delete_seconds",
-                                  "settle_delete_seconds", "race_notice_delete_seconds"}
-                    _K_ANTISPAM = {"antispam_enabled", "antispam_repeat_n", "antispam_window", "antispam_timer_n",
-                                   "antispam_timer_tol", "antispam_mute_seconds", "antispam_mute_escalate",
-                                   "antispam_notice_seconds"}
-                    _K_TEXT = {"autodel_text_rules", "autodel_long_len", "autodel_text_seconds"}
-                    _K_MEDIA = {"autodel_media_types", "autodel_media_seconds"}
-                    _on_rec = any(globals().get(g) for g in ("PANEL_DELETE_SECONDS", "POINTS_DELETE_SECONDS",
-                                                             "REPLY_DELETE_SECONDS", "SETTLE_DELETE_SECONDS",
-                                                             "RACE_NOTICE_DELETE_SECONDS"))
-                    _sum_rec = (" · ".join(t for t, g in (("面板", "PANEL_DELETE_SECONDS"), ("命令", "POINTS_DELETE_SECONDS"),
-                                                           ("回复", "REPLY_DELETE_SECONDS"), ("结算", "SETTLE_DELETE_SECONDS"),
-                                                           ("赛车提示", "RACE_NOTICE_DELETE_SECONDS")) if globals().get(g)
+                    # 键集合统一放模块级（AUTODEL_TAB_*）：页面用哪几个、测试就校验哪几个，
+                    # 避免「新字段忘了加进弹窗 ⇒ 后台看不见」这种静默漏接线（见常量处注释）
+                    _K_RECYCLE = AUTODEL_TAB_RECYCLE
+                    _K_ANTISPAM = AUTODEL_TAB_ANTISPAM
+                    _K_TEXT = AUTODEL_TAB_TEXT
+                    _K_MEDIA = AUTODEL_TAB_MEDIA
+                    # 摘要必须列全回收项：漏掉「其他默认消息/榜单」= 管理员以为这两项没生效
+                    _on_rec = any(globals().get(g) for g in ("PANEL_DELETE_SECONDS", "AUTODEL_DEFAULT_SECONDS",
+                                                             "POINTS_DELETE_SECONDS", "REPLY_DELETE_SECONDS",
+                                                             "SETTLE_DELETE_SECONDS", "RACE_NOTICE_DELETE_SECONDS",
+                                                             "RANK_DELETE_SECONDS"))
+                    _sum_rec = (" · ".join(t for t, g in (("面板", "PANEL_DELETE_SECONDS"), ("其他默认", "AUTODEL_DEFAULT_SECONDS"),
+                                                          ("命令", "POINTS_DELETE_SECONDS"), ("回复", "REPLY_DELETE_SECONDS"),
+                                                          ("结算", "SETTLE_DELETE_SECONDS"), ("赛车提示", "RACE_NOTICE_DELETE_SECONDS"),
+                                                          ("榜单", "RANK_DELETE_SECONDS")) if globals().get(g)
                                 ) + " 后删除") if _on_rec else "全部为 0（不自动删除）"
                     _sum_anti = (f"复读 {sget('ANTISPAM_REPEAT_N')} 条/{sget('ANTISPAM_WINDOW')}s 内 · 定时器特征 {sget('ANTISPAM_TIMER_N')} 条"
+                                 f" · 最短 {sget('ANTISPAM_MIN_LEN')} 字"
                                  + (f" · 禁言 {sget('ANTISPAM_MUTE_SECONDS')}s" if sget("ANTISPAM_MUTE_SECONDS") else " · 只删不禁")) \
                         if sget("ANTISPAM_ENABLED") else "开关关闭"
                     _rows_g = (_guard_row("消息自动回收", _on_rec, _sum_rec, "md_recycle")
@@ -15348,7 +15643,9 @@ def start_health_server():
                                  "<div class='sub'>点「✏️ 编辑」调整对应防护；弹窗内保存立即生效，只影响该防护的参数</div>"
                                  "<table class='tbl'><tr><th>防护项</th><th>状态 / 摘要</th><th style='width:90px'>操作</th></tr>"
                                  + _rows_g + "</table></div>")
-                    _modals = (_guard_modal("md_recycle", "消息自动回收", "游戏卡片/下注面板、命令、查询回复、结算消息、赛车提示的自动删除（秒，0=不删）",
+                    _modals = (_guard_modal("md_recycle", "消息自动回收",
+                                            "游戏卡片/下注面板、命令、查询回复、结算消息、赛车提示、"
+                                            "其他默认消息、榜单的自动删除（秒，0=不删；牌桌等带按钮的交互面板不在此列）",
                                             "autodel", _K_RECYCLE)
                                + _guard_modal("md_antispam", "刷屏识别", "复读机与定时脚本特征识别（管理员豁免）",
                                               "autodel", _K_ANTISPAM)
@@ -15357,8 +15654,7 @@ def start_health_server():
                                + _guard_modal("md_mediarule", "媒体与系统类规则", "勾选即删；未勾选的类型一律放行",
                                               "autodel", _K_MEDIA))
                 if gkey == "mod":
-                    _SENS_KEYS = {"sensitive_enabled", "sensitive_words", "sensitive_action",
-                                  "sensitive_mute_seconds", "link_whitelist_enabled", "link_whitelist"}
+                    _SENS_KEYS = MOD_MODAL_KEYS
                     _sens_on = bool(sget("SENSITIVE_ENABLED") or sget("LINK_WHITELIST_ENABLED"))
                     _act_cn = ("删除", "删除+禁言", "删除+踢出")
                     _sens_sum = (f"敏感词 {len(sget('SENSITIVE_WORDS'))} 个 · 命中处理 {_act_cn[sget('SENSITIVE_ACTION')] if sget('SENSITIVE_ACTION') in (0, 1, 2) else sget('SENSITIVE_ACTION')}"
@@ -15469,10 +15765,7 @@ def start_health_server():
                 if gkey != "autodel":
                     _field_keys = None
                     if gkey == "mod":   # 敏感词已移入防护弹窗，主表单剔除（含其分节标题）
-                        _field_keys = ({f[0] for f in SETTINGS_FIELDS if f[6] == "mod"}
-                                       - {"sensitive_enabled", "sensitive_words", "sensitive_action",
-                                          "sensitive_mute_seconds", "link_whitelist_enabled", "link_whitelist",
-                                          "sep_mod_word"})
+                        _field_keys = {f[0] for f in SETTINGS_FIELDS if f[6] == "mod"} - MOD_MODAL_KEYS
                     # 主表单也声明 _fields：被剔除的键（如敏感词已移入弹窗）不进「补 0」名单，
                     # 否则用户只改个验证方式就把敏感词总开关静默清零（2026-09-09 报障真凶）
                     _form_fields = (f"<input type='hidden' name='_fields' value=\""
@@ -15701,6 +15994,11 @@ def start_health_server():
                     invite_records.pop(key, None)
                     save_data()
                     self._redirect("/page/invite/records?note=" + quote("🗑 已删除记录 " + key)); return
+                # 旧链接兼容：称号加封 2026-09-11 从「系统管理→管理员中心」搬到
+                # 「群组设置→群组管理」（给群友发称号，入口就该跟成员名单在一起）
+                if path == "/page/admin/titg":
+                    _lq = urlparse(self.path).query
+                    self._redirect("/page/members/titg" + (("?" + _lq) if _lq else "")); return
                 m = re.fullmatch(r"/page/([a-z]+)(?:/([a-z0-9_]+))?", path)
                 if m and m.group(1) in {g for g, _n, _i in SETTINGS_GROUPS}:
                     if m.group(1) == "dashboard":   # 群体总览是定制页（统计卡+排序），无通用表单，别落空壳
@@ -15910,11 +16208,16 @@ def start_health_server():
                 if path == "/adminops2":
                     op = form.get("op", [""])[0]
                     sub_map = {"authadd": "auth", "authdel": "auth", "black": "blacklist",
-                               "unblack": "blacklist", "godgrant": "god", "godrevoke": "god", "seasonpts": "seasonpts"}
-                    def _back(note="", err=""):
+                               "unblack": "blacklist", "godgrant": "god", "godrevoke": "god", "seasonpts": "seasonpts",
+                               "titlegrant": "titg", "titlerevoke": "titg"}
+                    def _back(note="", err="", extra=""):
                         sub = sub_map.get(op, "auth")
-                        q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
-                        self._redirect(f"/page/admin/{sub}" + q)
+                        # 称号加封挂在「群组设置→群组管理」下，回跳别再把用户扔到管理员中心
+                        _base = "/page/members/titg" if sub == "titg" else f"/page/admin/{sub}"
+                        q = ("note=" + quote(note)) if note else ("err=" + quote(err) if err else "")
+                        if extra:   # 加封/撤销后回到同一个群+同一个成员，少点几下
+                            q = (extra + "&" + q) if q else extra
+                        self._redirect(_base + ("?" + q if q else ""))
                     try:
                         cid_ = int(form["cid"][0]) if form.get("cid") else None
                         uid_ = int(form["uid"][0]) if form.get("uid") else None
@@ -15965,6 +16268,20 @@ def start_health_server():
                         if title_equipped.get(uid_) == TITLE_GAMBLING_GOD: title_equipped.pop(uid_, None)
                         if uid_ in user_titles and not user_titles[uid_]: del user_titles[uid_]
                         save_data(); _back(note=f"🔻 已撤销 {uid_} 的赌神称号")
+                    elif op in ("titlegrant", "titlerevoke") and uid_ is not None:
+                        t_ = form.get("title", [""])[0]
+                        _fx = "&".join(x for x in (f"cid={cid_}" if cid_ else "",
+                                                   f"uid={uid_}" if uid_ else "") if x)
+                        _okk, _tmsg = (grant_title(uid_, t_) if op == "titlegrant"
+                                       else revoke_title(uid_, t_))
+                        if not _okk:
+                            _back(err=_tmsg, extra=_fx); return
+                        save_data()
+                        admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid_ or 0,
+                                           "admin": "网页后台",
+                                           "action": "加封称号" if op == "titlegrant" else "撤销称号",
+                                           "target": f"{uid_}:{t_}"})
+                        _back(note=_tmsg, extra=_fx)
                     elif op == "seasonpts" and cid_ and uid_ and amt is not None:
                         if not season_active and uid_ not in season_points.get(cid_, {}):
                             _back(err="该玩家不在当前赛季，且赛季未激活"); return
@@ -16032,7 +16349,7 @@ def start_health_server():
                                            "admin": "网页后台", "action": "同步成员标签",
                                            "target": str(cid_)})
                         save_data()
-                        _mb(note=f"🏷 已在后台开始同步群 {cid_} 的成员标签（最多 {TAG_SYNC_MAX} 人），完成后会私聊通知管理员")
+                        _mb(note=f"🏷 已在后台开始同步群 {cid_} 的成员标签（最多 {sget('TAG_SYNC_MAX')} 人），完成后会私聊通知管理员")
                     elif op == "wl_add" and cid_ and uid_:
                         whitelist.setdefault(cid_, set()).add(uid_); save_data()
                         admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid_,
@@ -16267,19 +16584,30 @@ def start_health_server():
                         self._redirect("/"); return
                     group = form.get("group", [""])[0]
                     if group == "security":
+                        # security 组字段（登录二次验证）与改密分开处理：
+                        # 密码留空 = 不改凭据，只改开关（以前这里只认 new_password，开关上不了线）
+                        _sec_cfg = {}
+                        for _k, _g, _l, _ft, _lo, _hi, _grp in SETTINGS_FIELDS:
+                            if _grp != "security":
+                                continue
+                            if _ft == "bool":
+                                _sec_cfg[_k] = "1" if _k in form else "0"   # 复选框不勾 = 表单里没这个键
+                            elif _k in form:
+                                _sec_cfg[_k] = form[_k][0]
                         _np = (form.get("new_password", [""])[0] or "").strip()
-                        if len(_np) < 4:   # 此前不足 4 位被 save_settings 静默跳过，却仍提示"已保存"
-                            self._redirect("/page/security?err=" + quote("密码至少 4 位，未做任何修改")); return
-                        save_settings({}, _np)
-                        # 改密后作废其他会话，只保留当前这个（旧会话继续可用等于白改）
-                        try:
-                            _mm = re.search(r"wb_session=([^;\s]+)", self.headers.get("Cookie") or "")
-                            _cur = _mm.group(1) if _mm else ""
-                            with sess_lock:
-                                for _s in [s for s in list(sessions) if s != _cur]:
-                                    sessions.pop(_s, None)
-                        except Exception:
-                            pass
+                        if _np and len(_np) < 4:   # 此前不足 4 位被 save_settings 静默跳过，却仍提示"已保存"
+                            self._redirect("/page/security?err=" + quote("密码至少 4 位（其余改动已保存）")); return
+                        save_settings(_sec_cfg, _np)
+                        if _np:
+                            # 改密后作废其他会话，只保留当前这个（旧会话继续可用等于白改）
+                            try:
+                                _mm = re.search(r"wb_session=([^;\s]+)", self.headers.get("Cookie") or "")
+                                _cur = _mm.group(1) if _mm else ""
+                                with sess_lock:
+                                    for _s in [s for s in list(sessions) if s != _cur]:
+                                        sessions.pop(_s, None)
+                            except Exception:
+                                pass
                         self._redirect("/page/security?saved=1"); return
                     valid_keys = _cross_keys(group) or {k for k, _g, _l, _t, _lo, _hi, grp in SETTINGS_FIELDS if grp == group}
                     # _fields：弹窗表单声明本次只提交这些键 → bool 补 0 / multi 清空只作用于声明的键，

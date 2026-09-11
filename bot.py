@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-2200"
+BOT_VERSION = "2026-09-11-2330"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -297,6 +297,7 @@ SETTINGS_FIELDS = [
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
     ("race_parimutuel",         "RACE_PARIMUTUEL",         "押注池赔率(1=赔率=总池÷该马注额,押得少赔率高,派彩合计=总池;0=旧模型按胜率)", "bool", 0, 1, "race"),
+    ("race_rake_percent",       "RACE_RAKE_PERCENT",       "赛车抽水比例(%·按派彩抽,钱不销毁而是滚进底池下期发;0=不抽)", "int", 0, 50, "race"),
     ("race_enabled",            "RACE_ENABLED",            "赛车开关",                  "bool",  0,   1,       "race"),
     ("race_subsidy_enabled",    "RACE_SUBSIDY_ENABLED",    "赛车系统加奖开关(每场给奖池加钱拉人气)", "bool", 0, 1, "race"),
     ("race_subsidy_amount",     "RACE_SUBSIDY_AMOUNT",     "赛车系统加奖金额(每场,押中者按注额分)", "int", 0, 100000, "race"),
@@ -2623,6 +2624,37 @@ async def safe_edit(bot, cid, msg_id, text, **kwargs):
     return None
 
 
+async def safe_edit_ok(bot, cid, msg_id, text, **kwargs):
+    """编辑消息并**明确区分成功/失败**：True=画面已是最新，False=真失败（必须重发）。
+
+    与 `safe_edit` 的差别只有一个，但对「自愈」是决定性的：Telegram 的
+    `Message is not modified` 被算作**成功**（说明正文+键盘都已经是对的，无需动作），
+    而 `safe_edit` 把所有失败都吞成 None，调用方无法判断「要不要重发」——
+    2026-09-11 群友「德州卡了」就是死在这里：编辑失败后画面永远停在旧状态。
+    """
+    if not msg_id: return False
+    kwargs.setdefault("parse_mode", "HTML")
+    hit_retry_after = False
+    for _ in range(2):
+        try:
+            await bot.edit_message_text(chat_id=cid, message_id=msg_id, text=text, **kwargs)
+            return True
+        except BadRequest as exc:
+            low = str(exc).lower()
+            if "message is not modified" in low: return True
+            if "parse entities" in low and kwargs.get("parse_mode"):
+                kwargs.pop("parse_mode"); continue
+            logger.warning("编辑消息失败（将重发）: %s", exc); return False
+        except RetryAfter as exc:
+            hit_retry_after = True
+            await asyncio.sleep(min(exc.retry_after, 5))
+        except TelegramError:
+            logger.exception("编辑消息失败（将重发）"); return False
+    # 退避重试后仍被限流：**不要**删消息重发 —— 发送配额比编辑更贵，重发只会火上浇油。
+    # 当作「这轮先算了」，看门狗 20 秒内会再来渲染一次，画面自己会追上。
+    return hit_retry_after
+
+
 async def safe_send_photo(bot, cid, photo, caption, **kwargs):   # wiring-ok: 未被调用的带退避发图包装（待清理）
     for attempt in range(2):
         try: return await bot.send_photo(chat_id=cid, photo=photo, caption=caption, **kwargs)
@@ -3049,7 +3081,11 @@ def ledger_add(cid, frm, to, amt, typ):
 
 
 def calc_rake(nets):
-    """计算抽水（纯计算不扣款）：对赢家净赢按 RAKE_PERCENT% 抽成。返回 (总抽水, {uid: 金额})。"""
+    """计算抽水（纯计算不扣款）：对赢家净赢抽成。返回 (总抽水, {uid: 金额})。
+
+    ⚠️ 别给本函数加「按派彩抽」的档位：赛车用的是**另一个口径**（见 `race_rake_split`），
+    两种口径的基数不同（净赢 vs 派彩），塞进一个函数只会让两边都看不懂。
+    """
     if not sget("RAKE_ENABLED") or sget("RAKE_PERCENT") <= 0:
         return 0, {}
     rake_total, rake_per = 0, {}
@@ -3064,6 +3100,31 @@ def calc_rake(nets):
         rake_per[uid] = amt
         rake_total += amt
     return rake_total, rake_per
+
+
+def race_rake_split(payouts, percent=None):
+    """赛车抽水（纯计算不扣款），返回 (总抽水, {uid: 金额})。
+
+    口径 = 群友原话（2026-09-11 21:50）：**「反正就是投注总数，全部赔给押中的人，然后抽5%」**
+    ⇒ 基数 = **派彩**（不是净赢）。总池 1000 就抽 50、押中者合计到手 950 —— 正是群友要的
+    「1000 起码给 950」。抽出来的钱**不销毁**，进底池由下一期的押中者瓜分（见 settle()），
+    这样群里每一分都在转，谁都不当貔貅。
+    """
+    if not sget("RAKE_ENABLED"):
+        return 0, {}
+    pct = sget("RACE_RAKE_PERCENT") if percent is None else int(percent or 0)
+    if pct <= 0:
+        return 0, {}
+    total, per = 0, {}
+    for uid, payout in (payouts or {}).items():
+        if not isinstance(uid, int) or uid <= 0 or payout <= 0:
+            continue
+        amt = int(payout * pct / 100)
+        if amt <= 0:
+            continue
+        per[uid] = amt
+        total += amt
+    return total, per
 
 
 async def commit_rake(app, cid, rake_per, label):
@@ -3348,6 +3409,9 @@ class PokerGame:
         self.pot = self.current_bet = self.actor_idx = self.dealer_idx = 0
         self.game_msg_id = self.action_msg_id = None
         self.turn_task = self.auto_task = self.wait_task = None
+        # 本回合倒计时「是什么时候挂上去的」：看门狗据此判断牌局是不是真的没人管了
+        # （刚渲染完的那个瞬间计时器还没建好，不能误判成冻结，见 _poker_watchdog_tick）
+        self.turn_started_at = 0.0
         self.evaluator, self.settled, self.showdown_order = Evaluator(), False, []
         self.max_total_bet = None  # 排位赛单局每人投入上限（仅 season，start 时按总筹码×百分比算）
         self.start_date = now_bj().strftime("%Y-%m-%d")  # 开局业务日，用于排位赛跨午夜补重置判断
@@ -3446,6 +3510,28 @@ class PokerGame:
         if not self.active or self.actor_idx >= len(self.active): return None
         uid = self.active[self.actor_idx]
         return uid if uid not in self.folded and uid not in self.all_in and uid not in self.acted else None
+
+    def recover_actor(self):
+        """自愈：非摊牌阶段却定位不到行动者时，重新找一位能行动的人。
+
+        正常流程下 `current()` 不该返回 None（`_next` 返回 None ⟺ `_round_done()`），
+        但并发/异常可能把棋盘留在「没人能行动、也没进摊牌」的脏状态 —— 这时**没有超时任务**
+        也**没有按钮**，牌局就永久冻结（2026-09-11 群友「这是卡了？」「也没自动弃牌」）。
+        这里按「未弃牌且未全下」重新定位；先要求「本轮没行动过」（规则正确），
+        实在不行放宽到「本轮已行动过」（宁可让他多行动一次，也不能让全群死等）。
+        返回 None 表示确实没人能行动，调用方应进摊牌结算。
+        """
+        if not self.active: return None
+        for relax in (False, True):
+            for idx, uid in enumerate(self.active):
+                if uid in self.folded or uid in self.all_in: continue
+                if not relax and uid in self.acted: continue
+                self.actor_idx = idx
+                # 放宽这一档必须把「已行动」标记撤掉，否则 current() 仍会判定他没得行动
+                # （current() 也会看 acted）——自愈就会变成一次空转。
+                if relax: self.acted.discard(uid)
+                return uid
+        return None
 
     def _next(self, start):
         for offset in range(len(self.active)):
@@ -3681,27 +3767,48 @@ def poker_buttons(game, uid):
 
 
 async def update_poker_table(game, app):
-    # 游戏开始后：把等待房消息直接编辑成牌桌（不删除；操作按钮在行动消息里）
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, await poker_table_text(game, app), reply_markup=None, parse_mode="HTML")
+    # 游戏开始后：把等待房消息直接编辑成牌桌（不删除）。
+    # ⚠️ 这里**故意不传 reply_markup**：以前传的是 `reply_markup=None`（显式摘掉键盘），
+    # 于是每回合先「摘按钮」再「装按钮」两次编辑，中间那次失败就把全群的按钮抹掉 ——
+    # 玩家点不了弃牌，看起来就是「卡了」（2026-09-11）。不传 = 保持现有键盘不动。
+    await safe_edit(app.bot, game.chat_id, game.game_msg_id, await poker_table_text(game, app), parse_mode="HTML")
+
+
+async def render_poker_table(game, app):
+    """把牌桌（正文 + 当前行动者按钮）渲染到 game_msg_id，**不动回合计时器**。
+
+    为什么单独抽出来：牌桌是全群唯一的权威画面，必须**自愈**。
+    原地编辑失败（消息被删 / 不可编辑 / 限流用尽）时删旧发新并接管 game_msg_id，
+    否则画面永远停在旧状态：牌桌还写着「当前行动：你」、按钮还是你的，
+    你点弃牌只得到「还没轮到你」——群友看到的就是「卡了」「我放弃不了牌」。
+    """
+    text = await poker_table_text(game, app)
+    uid = game.current()
+    kb = poker_buttons(game, uid) if uid is not None else None
+    if game.game_msg_id and await safe_edit_ok(app.bot, game.chat_id, game.game_msg_id, text,
+                                               reply_markup=kb) is True:
+        return
+    if game.game_msg_id:
+        await safe_delete(app.bot, game.chat_id, game.game_msg_id)   # 死消息清掉，别留成第二条牌桌
+    msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb)
+    if msg: game.game_msg_id = msg.message_id
 
 
 async def start_turn_timer(game, app):
     game.cancel_timer()
+    if game.phase == "waiting": return   # 等待房没有回合，别被强制推进到结算
     uid = game.current()
     if uid is None:
-        if game.phase == "showdown": await settle_poker(game, app)
-        return
-    # 行动提示 + 操作按钮直接原地编辑唯一权威牌桌（game_msg_id），不再额外发一条带按钮的
-    # action_msg_id 消息——否则"静态牌桌"与"行动消息"各渲染一次行动行，群友看到的就是"有2行"。
-    # 与 21点(原地编辑)/炸金花·大话骰(删旧发新)一致：全群始终只有这一条牌桌。
-    text = await poker_table_text(game, app)
-    if game.game_msg_id:
-        await safe_edit(app.bot, game.chat_id, game.game_msg_id, text,
-                        reply_markup=poker_buttons(game, uid), parse_mode="HTML")
-    else:
-        msg = await safe_send(app.bot, game.chat_id, text,
-                              reply_markup=poker_buttons(game, uid), parse_mode="HTML")
-        if msg: game.game_msg_id = msg.message_id
+        # 自愈（2026-09-11 群友「德州卡了」）：绝不能「非摊牌 + 没人能行动」地静默 return ——
+        # 那等于既没有按钮也没有超时任务，这一局就永久冻死（start_turn_timer 第一行已经把
+        # 旧计时器 cancel 掉了）。要么找回一位行动者，要么直接进摊牌结算。
+        uid = game.recover_actor()
+        if uid is None:
+            game.phase = "showdown"
+            await settle_poker(game, app)
+            return
+    await render_poker_table(game, app)
+    game.turn_started_at = time.time()
 
     # 真实超时任务：无需跟注自动过牌，否则自动弃牌，防止牌局卡死
     async def timeout_action():
@@ -3940,6 +4047,10 @@ class HorseRace:
             if total <= 0:
                 # 开盘还没人下注：先给「1/胜率」参考赔率（仅供预览，下注后立刻变真池赔率）
                 return [max(1.05, 1.0 / self.rates[i]) for i in range(n)]
+            # 赔付池 = 本期总注 + 滚存底池（2026-09-11 群友：「不要让赛车成为貔貅，只进不出的游戏
+            # 很快就没人玩了」）。底池**必须并进来**才算真的发得出去 —— 否则「无人押中」的整池和
+            # 抽水都会永久冻死在这个字段里（parimutuel 下赔率只认注额，原本一分都不会用到底池）。
+            total += max(0, self.jackpot)
             raw = [total / self.total_bets[i] if self.total_bets[i] > 0 else 0.0
                    for i in range(n)]          # 无人押注的马 = 没有赔率（0，界面展示为 —）
             if sget("RACE_ODDS_CAP") > 0:
@@ -4020,7 +4131,8 @@ class HorseRace:
             "📜 当日胜率:",
             "  " + " | ".join(f"{sget('HORSE_EMOJI')[i]} {stats[i]}胜" for i in range(sget("HORSE_COUNT"))),
             "  " + " | ".join(f"{sget('HORSE_EMOJI')[i]} {stats[i] / total_wins * 100:.0f}%" if total_wins else f"{sget('HORSE_EMOJI')[i]} 0%" for i in range(sget("HORSE_COUNT"))),
-            "📊 投注情况:" + (f" 总池 {pool_total} 积分" if pool_total else ""),
+            "📊 投注情况:" + (f" 总池 {pool_total} 积分" if pool_total else "")
+            + (f" ｜🎰 底池 {self.jackpot}（押中者瓜分）" if self.jackpot else ""),
         ]
         for i, odd in enumerate(odds):
             # 押注池下「无人押注的马」没有赔率（0）——显示 — 而不是 0.00x，避免误读成「押了不赔」
@@ -4213,8 +4325,12 @@ class HorseRace:
                     if self.mode == "official":
                         race_profit_by_date[date][self.chat_id][uid] += net
                     settlements.append((uid, self.name_cache[uid], stake, bet_on_winner, payout, net, bet_odd))
-                # 抽水先算（官方模式），结算行直接带「实收」
-                rake_per = calc_rake({s[0]: s[5] for s in settlements})[1] if self.mode == "official" else {}
+                # 抽水先算（官方模式），结算行直接带「实收」。
+                # 口径 = 群友原话：「投注总数，全部赔给押中的人，然后抽 5%」⇒ **按派彩抽**
+                # （总池 1000 就抽 50、押中者合计到手 950），不是按「净赢」抽。
+                # 这 5% 不销毁 —— 进底池，下一期由押中者按注额比例瓜分（见下面 race_jackpot 那行）。
+                rake_per = (race_rake_split({s[0]: s[4] for s in settlements})[1]
+                            if self.mode == "official" else {})
                 # 系统加奖（2026-09-11 用户要求）：先判定额度，再按押中者注额比例拆分。
                 # 无人押中 → 拆不出人 → 不发、也不消耗当日额度。
                 subsidy = race_subsidy_for(self.chat_id, date, len(self.bets), self.auto_started)
@@ -4245,14 +4361,18 @@ class HorseRace:
                             _earn_add(self.chat_id, uid, _gain)
                             await _check_level_change(app, self.chat_id, uid, _oe, _earn_get(self.chat_id, uid))
 
+                # 底池进出（2026-09-11 群友：「不要让赛车成为貔貅，只进不出的游戏很快就没人玩了」）：
+                #   进 = 本期抽水 + 无人押中时的整池 + 赔率封顶没派完的部分；
+                #   出 = 下一期并入赔付池（见 odds()），由押中者按注额比例瓜分。
+                # 修的是真 bug：改押注池之前这行是 old 模型的「补充赔付」逻辑，改池之后
+                # total_payout ≡ available_pool ⇒ 这个字段**既不进也不出**，成了个死数字；
+                # 而「无人押中」时整池被它吞掉、永不发放 —— 就是群友说的貔貅。
                 available_pool = self.jackpot + self.pool
-                supplement = max(0, total_payout - available_pool)
+                _rake_total = sum(rake_per.values()) if rake_per else 0
                 if self.mode == "official":
-                    race_jackpot[self.chat_id] = max(0, available_pool - total_payout)
-                if supplement:
-                    lines.extend(["", f"⚠️ 奖池不足，系统补充 {supplement} 积分"])
-                elif not total_payout:
-                    lines.extend(["", "🔄 无人押中，奖池滚入下一期。"])
+                    race_jackpot[self.chat_id] = max(0, available_pool - total_payout) + _rake_total
+                if not total_payout:
+                    lines.extend(["", f"🔄 无人押中，{available_pool} 分全部滚入底池（下一期押中者瓜分）。"])
 
                 if subsidy:
                     # 加奖压成一行（原来是「标题 + 每人一行」，多人时又长又占地方）
@@ -4266,7 +4386,15 @@ class HorseRace:
 
                 # 结算逐人一行、只留必需字段（2026-09-11 用户：结算文字太长）。
                 # 原来每行是「名：总投注 N｜命中 N（N.NNx）｜派彩 N｜净 ±N（实收 N，含抽水N）」，40+ 字。
-                lines.append("💰 本局结算")
+                # 标题顺带带「总池/抽水/底池」（群友质疑「总下注1000 到底给赢家多少」）——
+                # 把池子和抽水摆在标题里一眼能算，**不额外占一行**（`→底池` 表意：这 5% 没销毁、
+                # 下一期还发给押中的人）；无抽水（个人局/未开启）时退回纯标题。
+                if self.pool and _rake_total:
+                    lines.append(f"💰 本局结算（总池 {self.pool} · 抽水 {_rake_total}→底池）")
+                elif self.jackpot + self.pool:
+                    lines.append(f"💰 本局结算（总池 {self.pool + self.jackpot}）")
+                else:
+                    lines.append("💰 本局结算")
                 for _, name, stake, bet_on_winner, payout, net, bo in settlements:
                     if bet_on_winner > 0:
                         lines.append(f"{name} 押{stake}→派{payout}（{bo:.2f}x）净{net:+d}")
@@ -5507,6 +5635,16 @@ RACE_PARIMUTUEL = 1           # 赛车赔率模型（2026-09-11 用户+群友反
                               #       全体押中者合计恰好分完总池 —— 不再需要「系统补分」。
                               #   0 = 旧模型（1/胜率 × 注额压力因子 + 单调约束 + 同显示胜率分组统一），
                               #       会把赔率抹平（四匹马赔率全等），仅在需要回退时使用。
+RACE_RAKE_PERCENT = 5         # 赛车抽水比例（%）。口径 = 群友原话（2026-09-11 21:50）：
+                              #   「反正就是投注总数，全部赔给押中的人，然后抽5%」
+                              #   ⇒ 基数 = **派彩**：总池 1000 就抽 50、押中者合计到手 950。
+                              #   （不是按「净赢」抽 —— 那个口径只在重仓独中时才抽得到钱，不是群友要的。）
+                              # ⚠️ 抽出来的钱**不销毁**：进底池（race_jackpot），下一期并入赔付池、
+                              #   由押中者按注额比例瓜分。否则「抽水 + 无人押中的整池」会永久冻死，
+                              #   就是群友骂的「貔貅，只进不出」（见 settle() 与 odds()）。
+                              # 0 = 赛车不抽水。全局 RAKE_PERCENT（10%）仍只管别的游戏。
+                              # 为什么赛车要单独一档：别的游戏是「对赌」（钱从输家到赢家，抽水是正常回收），
+                              #   赛车是**押注池**（钱本来就是玩家自己的池子），抽多了就是白拿群友的分。
 
 
 def race_subsidy_banner(auto_started=True):
@@ -8117,7 +8255,14 @@ async def on_button(update, context):
                     await q.answer("游戏开始"); await update_poker_table(game, context.application); await start_turn_timer(game, context.application)
                 else: await q.answer("无法执行此操作", show_alert=True)
                 return
-            if uid != game.current(): await q.answer("还没轮到你", show_alert=True); return
+            if uid != game.current():
+                # 点的是**旧牌桌**（画面没跟上，群里看着就是「卡了」）：不能只丢一句
+                # 「还没轮到你」让人干瞪眼 —— 顺手把全群画面拉回正确状态。
+                # 只重绘、**不动计时器**，否则连点旧按钮就能无限重置别人的倒计时。
+                await q.answer("⏰ 已不是你行动，牌桌已刷新", show_alert=True)
+                try: await render_poker_table(game, context.application)
+                except Exception: logger.exception("重绘牌桌失败（已吞并）")
+                return
             action = {"texas_fold":"fold", "texas_check":"check", "texas_call":"call", "texas_allin":"allin"}.get(data); extra = 0
             if data == "texas_raise_half": action, extra = "raise", max(game.min_raise, game.pot // 2)
             elif data == "texas_raise_pot": action, extra = "raise", max(game.min_raise, game.pot)
@@ -10053,8 +10198,14 @@ def _tag_err_hint(exc):
         return "等级名含 emoji 或超过 16 字（Telegram 不允许）→ 改成纯文字等级名"
     if "supergroup" in txt or "channel chats only" in txt:
         return "该群类型不支持成员标签（仅群/超级群可用）"
-    if "participant not found" in txt or "user not found" in txt:
-        return "对方已不在群里"
+    # 对方已不在群：候选名单是本地账本 `total_earned ∪ game_chips`，**退群/被移出的人仍在账本里**
+    # ⇒ 会被当成候选去改标签，Telegram 回 400 `USER_NOT_PARTICIPANT`
+    # （user is not a participant of the chat）。
+    # 2026-09-11 生产实测（用户截图）：旧版只认 "participant not found"/"user not found"，
+    # 认不出 `USER_NOT_PARTICIPANT` ⇒ 英文原文漏进同步报告；而且 `_tag_is_expected_skip`
+    # 靠「对方已不在群」前缀识别，认不出英文 ⇒ 被算成「❌ 失败 1 人」，白白吓人。
+    if "participant" in txt or "user not found" in txt:
+        return "对方已不在群里（已退群或被移出，标签改不了属正常）"
     if "chat not found" in txt:
         return "群不存在或 bot 不在该群"
     return str(exc)[:120]
@@ -11511,6 +11662,42 @@ async def lottery_scheduler(app):
         except Exception:
             logger.exception("lottery_scheduler 本轮异常（已吞并继续）")
         await asyncio.sleep(5)
+
+POKER_WATCHDOG_SECONDS = 20   # 德州看门狗巡检间隔（秒）
+
+async def _poker_watchdog_tick(app):
+    """德州看门狗单轮：把「还在打、却没人管」的牌局救回来。
+
+    两种死法（都是 2026-09-11 群友「这是卡了？」「也没自动弃牌」的形态）：
+      ① 非摊牌阶段但回合计时器没了 → 重挂（重挂时会顺带重绘牌桌，画面也一起自愈）；
+      ② 停在 showdown 却从没结算（settle 中途异常）→ 补一次结算（settle_poker 幂等）。
+    只碰这两种；`sget` 出来的正常牌局一动不动，绝不重置玩家的倒计时。
+    """
+    now = time.time()
+    for cid, game in list(active_poker_games.items()):
+        try:
+            if game.settled or game.phase == "waiting": continue
+            if game.phase == "showdown":
+                await settle_poker(game, app)          # 幂等：settled 已置位会自动返回
+                continue
+            task = game.turn_task
+            if task is not None and not task.done(): continue
+            # 刚渲染完的那一小段窗口里计时器尚未建成 → 让子弹飞一会儿，别误判成冻结
+            if now - float(getattr(game, "turn_started_at", 0) or 0) < 10: continue
+            logger.warning("德州看门狗：群 %s 无回合计时器，重挂（phase=%s）", cid, game.phase)
+            await start_turn_timer(game, app)
+        except Exception:
+            logger.exception("德州看门狗处理群 %s 异常（已吞并）", cid)
+
+
+async def poker_watchdog(app):
+    """德州牌局看门狗（每 20 秒）。全部异常吞并，绝不影响其他功能。"""
+    while True:
+        try:
+            await _poker_watchdog_tick(app)
+        except Exception:
+            logger.exception("poker_watchdog 本轮异常（已吞并继续）")
+        await asyncio.sleep(POKER_WATCHDOG_SECONDS)
 
 async def cmd_weblogin(update, context):
     """后台一键登录（管理员）：校验身份后私聊发一次性登录链接，点开即进后台，免密码免验证码。
@@ -13403,6 +13590,7 @@ async def post_init(app):
         asyncio.create_task(hourly_race_scheduler(app)),
         asyncio.create_task(admin_report_scheduler(app)),
         asyncio.create_task(lottery_scheduler(app)),
+        asyncio.create_task(poker_watchdog(app)),
         asyncio.create_task(data_save_worker())
     })
     background_tasks.add(asyncio.create_task(_warm_group_names(app)))   # 群名预热：网页/推送不再显示裸群ID

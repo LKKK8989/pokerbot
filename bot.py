@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1130"
+BOT_VERSION = "2026-09-11-1251"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -246,7 +246,9 @@ SETTINGS_FIELDS = [
     ("dice_ante",               "DICE_ANTE",               "底注(开局一次性扣进奖池)",  "int",   1,   100000,  "dice"),
     ("dice_dice_count",        "DICE_DICE_COUNT",         "每人骰子数",                "int",   1,   10,      "dice"),
     ("dice_wild_one",          "DICE_WILD_ONE",           "1万能牌开关(关=无万能局,首手可叫1)", "bool", 0, 1, "dice"),
-    ("dice_straight_zero",     "DICE_STRAIGHT_ZERO",      "顺子算0个(5颗连号12345/23456整手不计点数)", "bool", 0, 1, "dice"),
+    ("dice_straight_zero",     "DICE_STRAIGHT_ZERO",      "顺子算0个(0关/1仅两人局/2所有人数;含1补位的假顺)", "int", 0, 2, "dice"),
+    ("dice_leopard_bonus",     "DICE_LEOPARD_BONUS",      "豹子加成(0关/1仅两人局/2所有人数;纯豹+2花豹+1)", "int", 0, 2, "dice"),
+    ("dice_drop_dice",         "DICE_DROP_DICE",          "掉骰子多轮制(0关=任何人数都一把定胜负;1开=三人以上掉骰)", "bool", 0, 1, "dice"),
     ("dice_think_seconds",     "DICE_THINK_SECONDS",      "叫牌思考秒数(超时自动开骰)", "int",   10,  600,     "dice"),
     ("dice_max_players",       "DICE_MAX_PLAYERS",        "单桌最多人数",              "int",   2,   20,      "dice"),
     ("dice_enabled",           "DICE_ENABLED",            "大话骰开关",                "bool",  0,   1,       "dice"),
@@ -264,6 +266,7 @@ SETTINGS_FIELDS = [
     ("race_subsidy_amount",     "RACE_SUBSIDY_AMOUNT",     "赛车系统加奖金额(每场,押中者按注额分)", "int", 0, 100000, "race"),
     ("race_subsidy_min_players","RACE_SUBSIDY_MIN_PLAYERS","加奖生效最少下注人数(防单人薅)", "int", 1, 50, "race"),
     ("race_subsidy_daily_cap",  "RACE_SUBSIDY_DAILY_CAP",  "加奖每日上限(每群,0=不限)", "int", 0, 10000000, "race"),
+    ("race_subsidy_auto_only",  "RACE_SUBSIDY_AUTO_ONLY",  "加奖仅限自动开赛(个人发起的赛车不派奖)", "bool", 0, 1, "race"),
     ("race_admin_only",         "RACE_ADMIN_ONLY",         "赛车仅管理员开局",          "bool",  0,   1,       "race"),
     ("rake_enabled",            "RAKE_ENABLED",            "游戏抽水开关(官方模式结算)", "bool",  0,   1,       "rake"),
     ("rake_percent",            "RAKE_PERCENT",            "抽水比例(%·赢家净赢抽成)",  "int",   0,   50,      "rake"),
@@ -286,8 +289,8 @@ SETTINGS_FIELDS = [
     ("leaderboard_enabled",     "LEADERBOARD_ENABLED",     "德州日榜推送开关",          "bool",  0,   1,       "schedule"),
     ("race_hourly_minute",      "RACE_HOURLY_MINUTE",      "赛车每小时自动开赛(第几分钟)", "int", 0, 59,    "schedule"),
     ("race_auto_enabled",       "RACE_AUTO_ENABLED",       "赛车自动开赛开关(仍受时段限制)", "bool", 0, 1,    "schedule"),
-    ("race_hourly_start",       "RACE_HOURLY_START",       "自动开赛时段-从几点(含)",   "int",   0,   23,      "schedule"),
-    ("race_hourly_end",         "RACE_HOURLY_END",         "自动开赛时段-到几点(含·填得比起点小=跨午夜档，如起18填2=18点到次日2点)", "int",   0,   23,      "schedule"),
+    ("race_hourly_start",       "RACE_HOURLY_START",       "自动开赛时段·开始(填小时0-23)",   "int",   0,   23,      "schedule"),
+    ("race_hourly_end",         "RACE_HOURLY_END",         "自动开赛时段·结束(填小时0-23；比“开始”小=通宵到第二天。例：开始18+结束2=每天18点到次日凌晨2点多)", "int",   0,   23,      "schedule"),
     ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,改间隔重启后生效)", "int", 1, 168,   "schedule"),
     ("backup_enabled",          "BACKUP_ENABLED",          "自动备份开关(保存即时生效)", "bool",  0,   1,       "schedule"),
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
@@ -2140,8 +2143,8 @@ def load_data():
                 except (ValueError, TypeError):
                     continue
         # 待删消息队列恢复：重启/重部署后由 restore_pending_deletes 重放，游戏面板不再永久残留
-        _pending_deletes[:] = [q for q in (data.get("pending_deletes") or [])
-                               if isinstance(q, (list, tuple)) and len(q) == 3]
+        _pending_deletes[:] = [list(q) for q in (data.get("pending_deletes") or [])
+                               if isinstance(q, (list, tuple)) and len(q) in (3, 4)]
         global announce_last_date
         announce_last_date = str(data.get("announce_last_date", "") or "")   # 重启同天不重发公告
         invite_debug.clear()
@@ -2499,20 +2502,56 @@ async def safe_send_photo(bot, cid, photo, caption, **kwargs):
 
 
 async def safe_delete(bot, cid, msg_id):
-    if msg_id:
-        try: await bot.delete_message(chat_id=cid, message_id=msg_id)
-        except TelegramError: pass
+    """删除消息；**遇限流必须重试**，返回 True=已删（或本来就没有），False=这次没删掉。
+
+    2026-09-11 用户报「消息都不自动删除」的两个元凶之一就在这里：
+    旧版 `except TelegramError: pass` 把 429（RetryAfter 是 TelegramError 子类）**静默吞掉**，
+    而 `_flush_deletes` 随后又无条件把该条目清出队列 → 这条消息**永远删不掉了**。
+    现在：429 退避重试最多 3 次；失败返回 False 由调用方（_flush_deletes）重新入队。
+    """
+    if not msg_id:
+        return True
+    for attempt in range(3):
+        try:
+            await bot.delete_message(chat_id=cid, message_id=msg_id)
+            return True
+        except RetryAfter as exc:
+            if attempt == 2:
+                return False
+            await asyncio.sleep(min(getattr(exc, "retry_after", 1) + 0.5, 25))
+        except TelegramError as exc:
+            msg = str(exc).lower()
+            # 「消息不存在 / 已被删」= 目的已达成，算成功，别反复重排
+            for _ok in ("message to delete not found", "message can't be deleted",
+                        "message identifier is not specified", "message is not found"):
+                if _ok in msg:
+                    return True
+            logger.warning("删除消息失败 cid=%s mid=%s: %s", cid, msg_id, exc)
+            return False
+        except Exception:
+            return False
+    return False
 
 
 async def _flush_deletes(app):
-    """删除队列里所有已到期消息；未到期的留在队列等下一轮。"""
+    """删除队列里所有已到期消息；**删失败的重新入队**（最多重试 5 次），不再静默丢弃。
+
+    旧版无条件 `_pending_deletes[:] = [未到期]`，把删失败的条目一并清出 → 消息永久残留。
+    """
     now = time.time()
     due = [q for q in _pending_deletes if q[2] <= now]
     if not due:
         return
-    for cid, mid, _t in due:
-        await safe_delete(app.bot, cid, mid)
-    _pending_deletes[:] = [q for q in _pending_deletes if q[2] > now]
+    retry = []
+    for q in due:
+        try:
+            cid, mid = int(q[0]), int(q[1])
+        except (ValueError, TypeError, IndexError):
+            continue
+        tries = int(q[3]) if len(q) > 3 else 0
+        if not await safe_delete(app.bot, cid, mid) and tries + 1 < 5:
+            retry.append([cid, mid, now + 120, tries + 1])   # 2 分钟后再试
+    _pending_deletes[:] = [q for q in _pending_deletes if q[2] > now] + retry
 
 
 def restore_pending_deletes(app):
@@ -2521,10 +2560,10 @@ def restore_pending_deletes(app):
         return
     now = time.time()
     old, _pending_deletes[:] = list(_pending_deletes), []
-    for cid, mid, due in old:
+    for q in old:
         try:
-            cid, mid = int(cid), int(mid)
-        except (ValueError, TypeError):
+            cid, mid, due = int(q[0]), int(q[1]), float(q[2])
+        except (ValueError, TypeError, IndexError):
             continue
         if now - due > 86400:
             continue
@@ -2610,12 +2649,20 @@ async def send_reply(update, context, text, kb=None, parse_mode=None, delete_aft
         kwargs["parse_mode"] = parse_mode
     if kb is not None:
         kwargs["reply_markup"] = kb
+    target = getattr(update, "message", None)
+    if target is None:
+        # 按钮触发（CallbackQuery）没有可回复的消息 → 发到群里，**同样走 REPLY_DELETE_SECONDS**。
+        # 2026-09-11 补：此前按钮触发的查询（如「排位榜」）直接 safe_send_long，永不回收。
+        msg = await safe_send_long(context.application.bot, update.effective_chat.id, text, **kwargs)
+        if msg and secs > 0:
+            schedule_delete(context.application, update.effective_chat.id, msg, secs)
+        return msg
     try:
-        reply = await update.message.reply_text(text, **kwargs)
+        reply = await target.reply_text(text, **kwargs)
     except BadRequest as exc:
         if "parse entities" in str(exc).lower() and kwargs.get("parse_mode"):
             kwargs.pop("parse_mode")  # 昵称含 < 等导致解析炸 → 纯文本重发
-            reply = await update.message.reply_text(text, **kwargs)
+            reply = await target.reply_text(text, **kwargs)
         else:
             raise
     if reply and secs > 0:
@@ -2630,11 +2677,14 @@ def card_str(card):
 
 
 async def action_notice(cid, app, uid, desc):
+    """游戏内「下注/加注/比牌」等即时提示：发一条、10 秒后删。
+
+    **必须走 schedule_delete_ids**（持 task 引用 + 队列持久化 + 60s 兜底）——
+    旧版裸 `asyncio.create_task(delete_later())` 不保存引用，任务可能在跑完前被事件循环 GC，
+    「说好 10 秒删」的提示就永远留在群里（2026-09-11 用户报「消息都不自动删除」的元凶之一）。
+    """
     message = await safe_send(app.bot, cid, f"🎲 {await get_name(app, uid)} {desc}")
-    if message:
-        async def delete_later():
-            await asyncio.sleep(10); await safe_delete(app.bot, cid, message.message_id)
-        asyncio.create_task(delete_later())
+    schedule_delete_ids(app, cid, message.message_id if message else None, 10)
 
 
 def schedule_notice_delete(app, cid, message, kind="panel"):
@@ -2760,7 +2810,7 @@ async def emergency_if_needed(cid, uid, app, wallet=None, poker=None):
     _earn_add(cid, uid, sget("EMERGENCY_CHIPS"))   # 归零赠送属于「白给分」，计入累计获得
     daily_emergency_used[cid][uid] = used + 1; save_data()
     remaining = sget("EMERGENCY_MAX_USES") - daily_emergency_used[cid][uid]
-    await safe_send(app.bot, cid, f"🆘 {await get_name(app, uid)} 积分归零，已赠送 {sget('EMERGENCY_CHIPS')} 应急积分（今日已补充 {daily_emergency_used[cid][uid]}/{sget('EMERGENCY_MAX_USES')} 次，剩余 {remaining} 次）。")
+    schedule_notice_delete(app, cid, await safe_send(app.bot, cid, f"🆘 {await get_name(app, uid)} 积分归零，已赠送 {sget('EMERGENCY_CHIPS')} 应急积分（今日已补充 {daily_emergency_used[cid][uid]}/{sget('EMERGENCY_MAX_USES')} 次，剩余 {remaining} 次）。"))
     return True
 
 
@@ -3027,9 +3077,25 @@ class PokerGame:
         self.deck = [Card.new(rank + suit) for rank in "23456789TJQKA" for suit in "shdc"]
         random.shuffle(self.deck); self.hands = {uid: [self.deck.pop(), self.deck.pop()] for uid in self.players}
         self.dealer_idx = len(self.players) - 1; self.active = self.players.copy()
-        self._blind(self.players[(self.dealer_idx + 1) % len(self.players)], self.small_blind_value)
-        bb = (self.dealer_idx + 2) % len(self.players); self._blind(self.players[bb], self.big_blind_value)
-        self.current_bet, self.phase, self.actor_idx = max(self.round_bets.values()), "preflop", (bb + 1) % len(self.active)
+        # 盲注位（2026-09-11 按官方规则核对修正）：
+        #   3 人及以上：小盲 = 庄家左边第一位、大盲 = 庄家左边第二位；
+        #   **单挑（2 人）：按钮位本身就是小盲**，另一位是大盲。
+        #   原实现两人时「大盲」落在庄家自己身上（既当按钮又下大盲），
+        #   且翻牌后从大盲位先动 —— 与官方「单挑翻牌后大盲（非按钮）先动」相反。
+        _n = len(self.players)
+        if _n == 2:
+            sb_uid, bb_uid = self.players[self.dealer_idx], self.players[(self.dealer_idx + 1) % _n]
+        else:
+            sb_uid = self.players[(self.dealer_idx + 1) % _n]
+            bb_uid = self.players[(self.dealer_idx + 2) % _n]
+        self._blind(sb_uid, self.small_blind_value)
+        self._blind(bb_uid, self.big_blind_value)
+        # 跟注基准（2026-09-11 修正）：**短全下的盲注不降低跟注额**——
+        # 大盲筹码不足时，其他人仍需按完整大盲跟注；原实现取 max(round_bets)
+        # 会低于大盲值，导致全场少跟注。盲注为 0 时行为不变。
+        self.current_bet = max(self.big_blind_value, max(self.round_bets.values()))
+        self.phase = "preflop"
+        self.actor_idx = (self.players.index(bb_uid) + 1) % len(self.active)
         if self._next(self.actor_idx) is None: self.phase = "showdown"
         return True
 
@@ -3432,7 +3498,7 @@ async def settle_poker(game, app):
                 if len(recent_poker_reveals[game.chat_id]) > 5:
                     recent_poker_reveals[game.chat_id] = recent_poker_reveals[game.chat_id][-5:]
         if delivered is None:
-            await safe_send(app.bot, game.chat_id, "⚠️ 德州已完成结算，但详细结算消息发送失败。")
+            schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, "⚠️ 德州已完成结算，但详细结算消息发送失败。"), kind="settle")
     except Exception:
         logger.exception("德州结算异常")
     finally:
@@ -3480,9 +3546,11 @@ async def handle_texas_reveal(cid, uid, q, context):
 
 # ==================== 赛车 ====================
 class HorseRace:
-    def __init__(self, cid, owner, jackpot, mode=None):
+    def __init__(self, cid, owner, jackpot, mode=None, auto=False):
         self.chat_id, self.owner_id, self.jackpot = cid, owner, jackpot
         self.mode = mode or current_game_mode()
+        # 开赛来源：True=定时自动开赛（可享系统加奖）；False=群友/管理员手动发起（不派奖，2026-09-11 用户要求）
+        self.auto_started = bool(auto)
         self.bets, self.total_bets, self.pool = defaultdict(dict), [0] * sget("HORSE_COUNT"), 0
         self.phase, self.create_time, self.positions, self.arrivals = "betting", time.time(), [0.0] * sget("HORSE_COUNT"), []
         self.display_positions = [0] * sget("HORSE_COUNT")  # 显示格（=节奏曲线进度的整数部分，严格跟随真实进度）
@@ -3592,7 +3660,7 @@ class HorseRace:
                 self.name_cache[uid] = name
                 lines.append(f"{name}: " + " ".join(f"{sget('HORSE_EMOJI')[h]}{amount}" for h, amount in bets.items()))
             lines.append("")
-        _banner = race_subsidy_banner()
+        _banner = race_subsidy_banner(self.auto_started)
         if _banner: lines.append(_banner)
         lines.extend([f"⏰ 距离开赛还有 {minutes} 分 {seconds:02d} 秒", "🔒 开赛后无法投注", "💡 赔率随下注实时浮动，下注瞬间锁定"])
         return "\n".join(lines)
@@ -3763,7 +3831,7 @@ class HorseRace:
                 rake_per = calc_rake({s[0]: s[5] for s in settlements})[1] if self.mode == "official" else {}
                 # 系统加奖（2026-09-11 用户要求）：先判定额度，再按押中者注额比例拆分。
                 # 无人押中 → 拆不出人 → 不发、也不消耗当日额度。
-                subsidy = race_subsidy_for(self.chat_id, date, len(self.bets))
+                subsidy = race_subsidy_for(self.chat_id, date, len(self.bets), self.auto_started)
                 subsidy_map = race_subsidy_split(subsidy, self.bets, winner) if subsidy else {}
                 if not subsidy_map: subsidy = 0
                 # 阶段二：统一改写钱包（此处仅 dict 操作，不会抛异常，payouts_applied 必定置位）
@@ -3837,16 +3905,16 @@ class HorseRace:
                     schedule_delete(app, self.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
 
                 if delivered is None:
-                    await safe_send(app.bot, self.chat_id, "⚠️ 赛车已完成结算，但详细结果消息发送失败。积分与当日盈亏已保存，可使用 /cx 查看排行榜。")
+                    schedule_notice_delete(app, self.chat_id, await safe_send(app.bot, self.chat_id, "⚠️ 赛车已完成结算，但详细结果消息发送失败。积分与当日盈亏已保存，可使用 /cx 查看排行榜。"), kind="settle")
             except Exception:
                 logger.exception("赛车结算异常，群 %s", self.chat_id)
                 # 仅在尚未派彩时退款，避免已派彩玩家被双重派彩
                 if not payouts_applied:
                     self.refund_all()   # 退款与清 pending 必须同生共死，否则重启会再退一次
                     if self.mode == "official": race_jackpot[self.chat_id] = self.jackpot
-                    await safe_send(app.bot, self.chat_id, "⚠️ 赛车结算异常，本局已退款以保护玩家积分。")
+                    schedule_notice_delete(app, self.chat_id, await safe_send(app.bot, self.chat_id, "⚠️ 赛车结算异常，本局已退款以保护玩家积分。"), kind="settle")
                 else:
-                    await safe_send(app.bot, self.chat_id, "⚠️ 赛车结算显示异常，派彩已保存，可使用 /cx 查看排行榜。")
+                    schedule_notice_delete(app, self.chat_id, await safe_send(app.bot, self.chat_id, "⚠️ 赛车结算显示异常，派彩已保存，可使用 /cx 查看排行榜。"), kind="settle")
                 save_data()
             finally:
                 await safe_delete(app.bot, self.chat_id, self.animation_msg_id)
@@ -4165,9 +4233,9 @@ async def update_blackjack_ui(game, app):
                 wallet = game_chips
                 for uid in game.players:
                     wallet[game.chat_id][uid] += game.bets[uid]
-                await safe_send(app.bot, game.chat_id, "⚠️ 21点结算异常，本局已退款，积分不受影响。")
+                schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, "⚠️ 21点结算异常，本局已退款，积分不受影响。"), kind="settle")
             else:
-                await safe_send(app.bot, game.chat_id, "⚠️ 21点已结算，但由于 HTML 渲染问题无法显示详细战报。积分已保存。")
+                schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, "⚠️ 21点已结算，但由于 HTML 渲染问题无法显示详细战报。积分已保存。"), kind="settle")
         finally:
             active_blackjack_games.pop(game.chat_id, None)
             save_data()
@@ -4236,9 +4304,11 @@ async def cmd_21(update, context):
 DICE_ANTE = 200           # 底注（开局一次性扣进奖池，弃局作废）
 DICE_DICE_COUNT = 5       # 每人骰子数
 DICE_WILD_ONE = 1         # 1万能牌开关（关=无万能局：1 就是普通点数，首手可叫1）
-DICE_STRAIGHT_ZERO = 1    # 顺子算0个开关（开=5颗连号12345/23456整手不计点数，2026-09-11 用户规则）
+DICE_STRAIGHT_ZERO = 1    # 顺子算0个（0=关 / 1=仅两人局 / 2=所有人数；含“假顺”=用万能1补位凑成）
+DICE_LEOPARD_BONUS = 1    # 豹子加成（0=关 / 1=仅两人局 / 2=所有人数）：纯豹+2、花豹+1（2026-09-11 群友口径）
+DICE_DROP_DICE = 0        # 掉骰子多轮制（0=关：任何人数都一把定胜负、一局即结算；1=开：三人以上才掉骰）
 DICE_THINK_SECONDS = 60   # 叫牌思考秒数（超时自动开骰/最小叫牌，防卡死）
-DICE_MAX_PLAYERS = 8      # 单桌最多人数
+DICE_MAX_PLAYERS = 10     # 单桌最多人数（2026-09-11 群友要求：最多 10 个人）
 DICE_ENABLED, DICE_ADMIN_ONLY = 1, 0
 
 active_dice_games = {}
@@ -4246,16 +4316,79 @@ active_dice_games = {}
 _CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 
 
-def _dice_is_straight(hand):
+def _dice_is_straight(hand, wild=True):
     """一手骰是否「顺子」：恰好 5 颗且连号 —— 12345 或 23456。
 
     2026-09-11 用户报障补的规则（原话：「23456不是顺子吗 顺子不是算0个吗」）：
     顺子这手**整手算 0 个**，不参与任何点数统计（开骰计数 + 亮盅展示都要体现）。
+    万能开时还认「**假顺**」（2026-09-11 群友口径，张瑾一：12456 在两人局算顺子）：
+    1 当替身补上空位，只要 5 颗能排成 12345 / 23456 就算 —— 如 12456（1→3）、13456（1→2）。
     掉骰制下只有满 5 颗才可能成顺（4 颗/6 颗一律不算）。
     """
     if len(hand) != 5: return False
     s = sorted(hand)
-    return s == [1, 2, 3, 4, 5] or s == [2, 3, 4, 5, 6]
+    for target in ([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]):
+        if s == target: return True          # 真顺（天然连号）
+    if not wild: return False
+    ones = hand.count(1)
+    if ones == 0: return False
+    rest = sorted(d for d in hand if d != 1)
+    for target in ([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]):
+        pool = list(target)
+        for d in rest:
+            if d in pool: pool.remove(d)
+            else: pool = None; break
+        if pool is not None: return True     # 剩下的空位正好由 ones 个万能 1 补齐
+    return False
+
+
+def _dice_rule_on(setting_name, n_players):
+    """规则生效范围开关：0=关；1=仅两人局；2=所有人数（2026-09-11 群友口径：默认只两人局）。"""
+    try:
+        lv = int(sget(setting_name) or 0)
+    except (TypeError, ValueError):
+        lv = 1
+    if lv <= 0: return False
+    return True if lv >= 2 else n_players <= 2
+
+
+def _dice_duel_mode(game=None, n_players=None):
+    """本局是否「一把定胜负」：默认任何人数都一把定胜负（掉骰子多轮制关闭）；
+    掉骰开关打开时退回旧行为——三人以上掉骰多轮、只有两人局一把定胜负。
+
+    写成模块级函数是为了兼容只提供 players 的轻量测试桩（不依赖 DiceGame.duel）。
+    """
+    if not sget("DICE_DROP_DICE"): return True
+    if n_players is None:
+        n_players = len(getattr(game, "players", None) or [])
+    return n_players <= 2
+
+
+def _dice_leopard_kind(hand, wild=True):
+    """豹子牌型：'纯豹'（5 颗点数完全相同）/ '花豹'（带万能 1、其余同点）/ None。"""
+    if len(hand) != 5: return None
+    if len(set(hand)) == 1: return "纯豹"
+    if not wild: return None
+    others = set(d for d in hand if d != 1)
+    if len(others) == 1 and 1 in hand: return "花豹"
+    return None
+
+
+def _dice_leopard_bonus(hand, face, wild=True):
+    """豹子加成（2026-09-11 用户口径）：返回该手在叫 face 时的**额外颗数**。
+
+    - **纯豹（真豹子）**：5 颗点数完全相同 → 该点数 +2（如 5 个 4 算 7）
+    - **花豹（假豹子）**：带 1 且其余同点 → 该点数 +1（如 2 个 1 + 3 个 6 算 6）
+    加成只作用于豹子自己的点数；「5 个 1」是纯豹且对**任意点数**都成立
+    （它本身就是 5 个万能 1，叫什么都算 7 个）。
+    """
+    kind = _dice_leopard_kind(hand, wild)
+    if not kind: return 0
+    if kind == "纯豹":
+        f = hand[0]
+        return 2 if (f == 1 and wild) or f == face else 0
+    others = set(d for d in hand if d != 1)
+    return 1 if others.pop() == face else 0
 
 
 def parse_dice_bid(text):
@@ -4423,30 +4556,42 @@ class DiceGame:
     def resolve_open(self, opener):
         """返回 (实际数量, 输家, 纯点数个数, 万能1个数)。
         被叫点是 2~6 且万能开：该点数 + 全部1 都计入；被叫点是 1：只数 1 本身。
-        **顺子整手算 0 个**（DICE_STRAIGHT_ZERO 开）：12345/23456 这手不参与任何计数
-        ——2026-09-11 用户报障，此前把顺子里的点数照算，导致结算反了。
+        两条规则按人数生效（默认**只两人局**，2026-09-11 群友口径「多人的没有顺子，没有豹子」）：
+        - **顺子整手算 0 个**（DICE_STRAIGHT_ZERO，含 1 补位的假顺）
+          ——2026-09-11 用户报障，此前把顺子里的点数照算，导致结算反了。
+        - **豹子加成**（DICE_LEOPARD_BONUS）：纯豹 +2、花豹 +1。
         实际 ≥ 叫的 → 开骰者输；实际 < 叫的 → 被开者输（无平局）。"""
         count, face, bidder = self.bid
         wild = sget("DICE_WILD_ONE")
-        zero_straight = sget("DICE_STRAIGHT_ZERO")
-        faces = []
+        _n = len(self.players)
+        straight_on = _dice_rule_on("DICE_STRAIGHT_ZERO", _n)
+        leopard_on = _dice_rule_on("DICE_LEOPARD_BONUS", _n)
+        n_face = n_one = _bonus = 0
         for u in self.alive():
-            if zero_straight and _dice_is_straight(self.hands[u]):
+            hand = self.hands[u]
+            if straight_on and _dice_is_straight(hand, wild):
                 continue          # 顺子整手作废，一颗都不算
-            faces.extend(self.hands[u])
-        n_face = sum(1 for d in faces if d == face)
-        n_one = sum(1 for d in faces if d == 1) if (wild and face != 1) else 0
-        actual = n_face + n_one
+            n_face += sum(1 for d in hand if d == face)
+            if wild and face != 1:
+                n_one += sum(1 for d in hand if d == 1)
+            if leopard_on:
+                _bonus += _dice_leopard_bonus(hand, face, wild)
+        actual = n_face + n_one + _bonus
         loser = opener if actual >= count else bidder
         return actual, loser, n_face, n_one
+
+    def duel(self):
+        """本局是否「一把定胜负」（默认任何人数都一把定胜负，见 _dice_duel_mode）。"""
+        return _dice_duel_mode(n_players=len(self.players))
 
     def apply_loss(self, loser):
         """输家掉一颗骰子；归零出局；幸存者重摇、输家先叫；只剩 1 人 → 终局。
 
-        **两人局一把定胜负**（2026-09-11 用户要求）：只有 2 人时不玩掉骰多轮，
-        输家直接出局、立即结算——两人轮流掉骰要打十来回合，太磨人。
+        **一把定胜负**（2026-09-11 群友要求「不用少一颗」「一局结束就结算」）：
+        输家直接出局、**本局立即结算**，不玩掉骰多轮（三人以上同样生效）；
+        奖池由其余存活者平分（见 settle_dice），两人局即退化成「幸存者通吃」。
         """
-        if len(self.players) <= 2:
+        if self.duel():
             self.dice[loser] = 0
             self.out.add(loser)
             eliminated = True
@@ -4456,7 +4601,7 @@ class DiceGame:
             if eliminated: self.out.add(loser)
         self.bid = None
         self.starter_uid = loser if loser not in self.out else self._next_alive_after(loser)
-        if len(self.alive()) <= 1:
+        if self.duel() or len(self.alive()) <= 1:
             self.phase = "showdown"
             self.actor = None
         else:
@@ -4487,13 +4632,15 @@ def dice_min_raise(game):
 
 async def dice_waiting_text(game, app):
     players = [f"{i}. {await get_name(app, uid)}" for i, uid in enumerate(game.players, 1)]
-    # 规则随人数变化：两人局一把定胜负（2026-09-11 用户要求），三人及以上才玩掉骰子多轮
-    rule = ("两人局：一把定胜负，开骰即结算。" if len(game.players) <= 2
+    _n = len(game.players)
+    # 一把定胜负是默认（2026-09-11 群友要求：不用少一颗、一局结束就结算）
+    rule = ("一把定胜负，开骰即结算（奖池由其余人平分）。" if _dice_duel_mode(game)
             else "输家掉一颗骰子，掉光出局。")
-    # 顺子规则（2026-09-11 用户规则）：12345/23456 一手整手算 0 个
-    straight_rule = "顺子（12345 / 23456）一手全算 0 个。" if sget("DICE_STRAIGHT_ZERO") else ""
     wild_rule = "1 是万能牌。" if sget("DICE_WILD_ONE") else ""
-    extra = (wild_rule + straight_rule)
+    # 顺子/豹子默认只两人局生效（群友口径：多人的没有顺子，没有豹子）
+    straight_rule = "顺子（含 1 补位的假顺）一手全算 0 个。" if _dice_rule_on("DICE_STRAIGHT_ZERO", _n) else ""
+    leopard_rule = "豹子加成：纯豹 +2、花豹 +1。" if _dice_rule_on("DICE_LEOPARD_BONUS", _n) else ""
+    extra = (wild_rule + straight_rule + leopard_rule)
     return (f"🎲 新一局大话骰（吹牛）\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players)
             + f"\n\n每人 {sget('DICE_DICE_COUNT')} 颗骰子偷看自己的，轮流叫「X个Y」越叫越大，开骰掀盅，{rule}\n"
             + (extra + "\n" if extra else "")
@@ -4545,7 +4692,11 @@ def dice_buttons(game, uid):
 
 async def dice_table_text(game, app):
     wild = sget("DICE_WILD_ONE")
-    _rules = ("｜1=万能" if wild else "｜无万能局") + ("｜顺子=0" if sget("DICE_STRAIGHT_ZERO") else "")
+    _n = len(game.players)
+    _rules = ("｜1=万能" if wild else "｜无万能局")
+    if _dice_rule_on("DICE_STRAIGHT_ZERO", _n): _rules += "｜顺子=0"
+    if _dice_rule_on("DICE_LEOPARD_BONUS", _n): _rules += "｜豹子+2/+1"
+    if _dice_duel_mode(game): _rules += "｜一把定胜负"
     lines = [f"🎲 大话骰（吹牛）｜第 {game.hand_no} 手",
              f"💰 奖池 {game.pot}｜底注 {sget('DICE_ANTE')}｜在场骰子 {game.total_dice()} 颗" + _rules]
     if game.last_action:
@@ -4623,18 +4774,28 @@ async def _dice_resolve_and_continue(game, app, opener):
     opener_name = await get_name(app, opener)
     loser_name = await get_name(app, loser)
     lines = [f"🎯 开骰！（{opener_name} 开 {bidder_name} 的 {bc}个{bf}）", "亮盅："]
-    _zero_str = sget("DICE_STRAIGHT_ZERO")
+    wild = sget("DICE_WILD_ONE")
+    _n = len(game.players)
+    _straight_on = _dice_rule_on("DICE_STRAIGHT_ZERO", _n)
+    _leopard_on = _dice_rule_on("DICE_LEOPARD_BONUS", _n)
+    _bonus_total = 0
     for u in game.alive():
         _hand = " ".join(map(str, game.hands[u]))
-        if _zero_str and _dice_is_straight(game.hands[u]):
+        if _straight_on and _dice_is_straight(game.hands[u], wild):
             _hand += "（顺子·算0个）"
+        elif _leopard_on:
+            _lb = _dice_leopard_bonus(game.hands[u], bf, wild)
+            if _lb:
+                _hand += f"（{_dice_leopard_kind(game.hands[u], wild)}·{bf}点+{_lb}）"
+                _bonus_total += _lb
         lines.append(f"　{await get_name(app, u)}：{_hand}")
-    wild = sget("DICE_WILD_ONE")
     if wild and bf != 1:
         calc = f"{bf}点×{n_face} + 万能1×{n_one} = "
     else:
         calc = ""
-    _duel = len(game.players) <= 2      # 两人局：一把定胜负，输家直接出局
+    if _bonus_total:
+        calc += f"豹子+{_bonus_total} → "
+    _duel = _dice_duel_mode(game)      # 一把定胜负：输家直接出局、本局立即结算
     _pen = "输" if _duel else "掉一颗骰子"
     tail = f"{calc}实际 {actual} 个 ≥ 叫 {bc} 个 → {bidder_name} 没吹，{loser_name}（开骰者）{_pen}" \
         if loser is opener else \
@@ -4662,9 +4823,12 @@ async def settle_dice(game, app):
     game.settled = True; game.cancel_timer(); game.cancel_wait()
     try:
         async with user_wallet_locks([u for u in game.players if u >= 0]):
-            winner = game.alive()[0] if game.alive() else None
-            if winner:
-                game.chips[winner] += game.pot
+            survivors = game.alive()
+            if survivors:
+                # 一把定胜负时可能有多人存活 → 奖池平分（余数给靠前的，总额严格等于奖池）
+                _base, _rest = divmod(game.pot, len(survivors))
+                for _i, uid in enumerate(survivors):
+                    game.chips[uid] += _base + (1 if _i < _rest else 0)
             else:
                 # 极端兜底（理论不可达）：无人存活 → 底注原路退回，禁止积分凭空消失
                 for uid in game.players:
@@ -4674,8 +4838,12 @@ async def settle_dice(game, app):
         save_data(); await asyncio.to_thread(force_save_now)
         names = {uid: await get_name(app, uid) for uid in game.players}
         lines = ["🎲 <b>大话骰结算</b>", "━━━━━━━━━━━━━━━━━", ""]
-        if winner:
-            lines.append(f"🏆 幸存者：{names.get(winner)}｜通吃奖池 {game.pot}")
+        if survivors:
+            if len(survivors) == 1:
+                lines.append(f"🏆 幸存者：{names.get(survivors[0])}｜通吃奖池 {game.pot}")
+            else:
+                lines.append(f"🏆 幸存者 {len(survivors)} 人平分奖池 {game.pot}（每人 {game.pot // len(survivors)}）")
+                lines.append("　" + "、".join(names.get(u, "") for u in survivors))
         else:
             lines.append("🏆 本局无人存活，底注已原路退回")
         lines.append("")
@@ -4704,9 +4872,10 @@ async def settle_dice(game, app):
                     _oe = _earn_get(game.chat_id, uid)
                     _earn_add(game.chat_id, uid, _gain)
                     await _check_level_change(app, game.chat_id, uid, _oe, _earn_get(game.chat_id, uid))
-            if winner and _nets.get(winner, 0) > 0:
-                await broadcast_big_win(app, game.chat_id, winner, "🎲 大话骰", _nets[winner],
-                                        f"🎲 终局剩骰：{game.dice.get(winner, 0)} 颗")
+            _top = max(survivors, key=lambda u: _nets.get(u, 0)) if survivors else None
+            if _top is not None and _nets.get(_top, 0) > 0:
+                await broadcast_big_win(app, game.chat_id, _top, "🎲 大话骰", _nets[_top],
+                                        f"🎲 终局剩骰：{game.dice.get(_top, 0)} 颗")
         await safe_delete(app.bot, game.chat_id, game.game_msg_id)
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
         if sget("SETTLE_DELETE_SECONDS") > 0:
@@ -4725,7 +4894,8 @@ async def refund_dice(game, app, notice):
     game.cancel_timer(); game.cancel_wait(); game.phase = "cancelled"
     if active_dice_games.get(game.chat_id) is game: active_dice_games.pop(game.chat_id, None)
     await safe_delete(app.bot, game.chat_id, game.game_msg_id)
-    await safe_send(app.bot, game.chat_id, notice)
+    # 解散提示挂自动回收：此前是裸 safe_send，「房间已解散」永久堆在群里
+    schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, notice))
     save_data()
 
 
@@ -4747,8 +4917,8 @@ async def _dice_notify_dropped(game, app):
     """开局时因底注不足被剔除的玩家，群里明确告知（避免「我怎么没在局里」的困惑）。"""
     if not game.dropped: return
     _names = "、".join([await get_name(app, u) for u in game.dropped])
-    await safe_send(app.bot, game.chat_id,
-                    f"⚠️ {_names} 积分不足 {sget('DICE_ANTE')} 底注，本局未参与（余额可先签到/兑换）。")
+    schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id,
+                    f"⚠️ {_names} 积分不足 {sget('DICE_ANTE')} 底注，本局未参与（余额可先签到/兑换）。"))
 
 
 async def cmd_dice(update, context):
@@ -4900,20 +5070,23 @@ RACE_SUBSIDY_ENABLED = 1      # 系统加奖开关
 RACE_SUBSIDY_AMOUNT = 100     # 每场加奖金额（积分）——押中者按注额比例分，无人押中则不发、不计额度
 RACE_SUBSIDY_MIN_PLAYERS = 2  # 加奖生效的最少下注人数（防单人自押自薅）
 RACE_SUBSIDY_DAILY_CAP = 1000 # 每群每日加奖上限（0=不限），防连续开赛把积分放水
+RACE_SUBSIDY_AUTO_ONLY = 1    # 加奖只给「定时自动开赛」的赛车（2026-09-11 用户要求：个人发起的赛车不派奖）
 
 
-def race_subsidy_banner():
-    """赛车面板上的加奖预告（开关关 / 金额 0 → 空串，不显示多余行）。"""
+def race_subsidy_banner(auto_started=True):
+    """赛车面板上的加奖预告（开关关 / 金额 0 / 个人发起 → 空串，不显示多余行）。"""
     if not sget("RACE_SUBSIDY_ENABLED"): return ""
+    if sget("RACE_SUBSIDY_AUTO_ONLY") and not auto_started: return ""
     amt = max(0, int(sget("RACE_SUBSIDY_AMOUNT")))
     if amt <= 0: return ""
     n = max(1, int(sget("RACE_SUBSIDY_MIN_PLAYERS")))
     return f"🎁 本场系统加奖 {amt} 积分（押中者按注额分，需 ≥{n} 人下注）"
 
 
-def race_subsidy_for(cid, date, n_bettors):
-    """本场可发的加奖金额（0 = 不发）。四道闸：开关 → 金额 → 人数门槛 → 当日上限。"""
+def race_subsidy_for(cid, date, n_bettors, auto_started=True):
+    """本场可发的加奖金额（0 = 不发）。五道闸：开关 → 来源 → 金额 → 人数门槛 → 当日上限。"""
     if not sget("RACE_SUBSIDY_ENABLED"): return 0
+    if sget("RACE_SUBSIDY_AUTO_ONLY") and not auto_started: return 0   # 个人发起的赛车不派奖
     amt = max(0, int(sget("RACE_SUBSIDY_AMOUNT")))
     if amt <= 0: return 0
     if n_bettors < max(1, int(sget("RACE_SUBSIDY_MIN_PLAYERS"))): return 0
@@ -5539,7 +5712,7 @@ async def settle_jinhua(game, app):
         if sget("SETTLE_DELETE_SECONDS") > 0:
             schedule_delete(app, game.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
         if delivered is None:
-            await safe_send(app.bot, game.chat_id, "⚠️ 炸金花已完成结算，但详细结算消息发送失败。")
+            schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, "⚠️ 炸金花已完成结算，但详细结算消息发送失败。"), kind="settle")
     except Exception:
         logger.exception("炸金花结算异常")
     finally:
@@ -5571,7 +5744,8 @@ async def refund_jinhua(game, app, notice):
     if active_jinhua_games.get(game.chat_id) is game:
         active_jinhua_games.pop(game.chat_id, None)
     await safe_delete(app.bot, game.chat_id, game.game_msg_id)
-    await safe_send(app.bot, game.chat_id, notice)
+    # 解散提示挂自动回收：此前是裸 safe_send，「已终止」永久堆在群里
+    schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, notice))
     save_data()
 
 
@@ -5749,7 +5923,7 @@ async def season_settle(app, manual=False):
     for g in list(active_poker_games.values()):
         if getattr(g, "season", False) and getattr(g, "phase", "waiting") != "waiting" and g.chat_id in season_points:
             try:
-                await safe_send(app.bot, g.chat_id, "⏰ 赛季已结束，本手牌结算不计入排位排名（仍正常派奖）。")
+                schedule_notice_delete(app, g.chat_id, await safe_send(app.bot, g.chat_id, "⏰ 赛季已结束，本手牌结算不计入排位排名（仍正常派奖）。"))
             except Exception:
                 pass
     season_active = False
@@ -5943,7 +6117,7 @@ async def cmd_season_rank(update, context):
     if not season_active:
         await send_reply(update, context, "⚠️ 当前无进行中的赛季排位赛。"); return
     lines = await season_standings_lines(context.application, cid, uid=uid)
-    await safe_send_long(context.bot, cid, "\n".join(lines))
+    await send_reply(update, context, "\n".join(lines))
 
 
 async def cmd_god(update, context):
@@ -5970,10 +6144,10 @@ async def cmd_god(update, context):
         lines.append("📜 历届荣誉墙：暂无记录")
     text = "\n".join(lines)
     try:
-        await safe_send_long(context.bot, update.effective_chat.id, text, parse_mode="HTML")
+        await send_reply(update, context, text)
     except Exception:
         # 历史称号含 < & 等特殊字符导致 HTML 渲染失败时，降级为纯文本发送，避免命令“失效无响应”
-        await safe_send_long(context.bot, update.effective_chat.id, text)
+        await send_reply(update, context, text, parse_mode=None)
 
 
 async def cmd_god_grant(update, context):
@@ -6029,7 +6203,7 @@ async def cmd_shop(update, context):
         lines.append(f"• {title_icon(t)}<b>{html.escape(t)}</b>：{cfg['price']} {cur}｜{dur}")
     lines.append("")
     lines.append("💡 用 /兑换 称号名 购买；/我的称号 查看，/佩戴 切换亮出的称号。")
-    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
+    await send_reply(update, context, "\n".join(lines))
 
 
 async def cmd_redeem(update, context):
@@ -6099,7 +6273,7 @@ async def cmd_my_titles(update, context):
                 lines.append(f"• {title_icon(t)}{html.escape(t)}（永久）{mark}")
     lines.append("")
     lines.append("💡 用 /佩戴 称号名 切换亮出的称号；不佩戴则默认显示最贵的。")
-    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
+    await send_reply(update, context, "\n".join(lines))
 
 
 async def cmd_equip(update, context):
@@ -6249,7 +6423,6 @@ async def cmd_season_exchange(update, context):
 
 async def cmd_season_help(update, context):
     if not await need_auth(update, context): return
-    cid = update.effective_chat.id
     text = (
         "🏆 <b>德州排位赛使用说明</b>\n\n"
         "<b>报名 / 开局</b>\n"
@@ -6278,7 +6451,7 @@ async def cmd_season_help(update, context):
         "💡 以上「排位」命令均可换「赛季」前缀，含义完全相同，如 /赛季榜 /赛季报名 /赛季开赛 /赛季结束。\n"
         "⚠️ 群里若中文命令无反应，多为 BotFather 隐私模式拦截，发 /setprivacy → Disable 即可。"
     )
-    await safe_send_long(context.bot, cid, text, parse_mode="HTML")
+    await send_reply(update, context, text)
 
 
 async def cmd_season_play(update, context):
@@ -6883,7 +7056,7 @@ async def cmd_auth_list(update, context):
             except Exception as e:
                 logger.warning("授权列表取群名失败 cid=%s: %s", cid, e)
         lines.append(f"• {title}（{cid}）" if title else f"• {cid}（群名未知，bot 可能已不在该群）")
-    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines))
+    await send_reply(update, context, "\n".join(lines))
 
 async def cmd_ban(update, context):
     """管理员拉黑玩家（禁止使用机器人）。支持 /拉黑 用户ID 或 回复玩家消息 /拉黑"""
@@ -6944,7 +7117,7 @@ async def cmd_banlist(update, context):
     lines = [f"📋 <b>黑名单（共 {len(BLACKLISTED_USERS)} 人）</b>", "━"*14]
     for uid in sorted(BLACKLISTED_USERS):
         lines.append(f"• {await get_name(context.application, uid)}（{uid}）")
-    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
+    await send_reply(update, context, "\n".join(lines))
 
 async def cmd_list_all(update, context):
     """管理员一键查看：管理员 / 授权群 / 黑名单 三合一总览。"""
@@ -6990,7 +7163,7 @@ async def cmd_list_all(update, context):
         for uid in sorted(BLACKLISTED_USERS):
             lines.append(f"  • {await get_name(app, uid)}（{uid}）")
 
-    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
+    await send_reply(update, context, "\n".join(lines))
 
 async def cmd_addadmin(update, context):
     if not is_bot_admin(update.effective_user.id):
@@ -7033,7 +7206,7 @@ async def cmd_admin_list(update, context):
             lines.append(f"  • {await get_name(context.application, uid)}（{uid}）")
     else:
         lines.append("（暂无动态添加的管理员）")
-    await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
+    await send_reply(update, context, "\n".join(lines))
 
 async def cmd_autosm(update, context):
     if not await need_auth(update, context): return
@@ -7315,7 +7488,7 @@ async def on_button(update, context):
                 if not season_active:
                     await q.answer("当前无进行中的赛季", show_alert=True); return
                 lines = await season_standings_lines(context.application, cid, uid=uid)
-                await safe_send_long(context.bot, cid, "\n".join(lines))
+                await send_reply(update, context, "\n".join(lines))
                 await q.answer("已发送排位榜"); return
             await q.answer("未知操作", show_alert=True); return
         if data.startswith("texas_"):
@@ -7423,9 +7596,13 @@ async def on_button(update, context):
                 if uid in game.out:
                     await q.answer("你已出局，没有骰子了", show_alert=True); return
                 ds = " ".join(map(str, game.hands[uid]))
-                # 顺子要当场告诉玩家「这手算 0 个」，否则他会照着自己骰子叫，开骰必翻车
-                if sget("DICE_STRAIGHT_ZERO") and _dice_is_straight(game.hands[uid]):
+                # 顺子/豹子要当场告诉玩家，否则他会照着自己骰子叫，开骰必翻车
+                _dn, _dw = len(game.players), sget("DICE_WILD_ONE")
+                if _dice_rule_on("DICE_STRAIGHT_ZERO", _dn) and _dice_is_straight(game.hands[uid], _dw):
                     ds += "（顺子·本手算0个，别照它叫牌）"
+                elif _dice_rule_on("DICE_LEOPARD_BONUS", _dn):
+                    _lk = _dice_leopard_kind(game.hands[uid], _dw)
+                    if _lk: ds += f"（{_lk}·叫本点数算 +{2 if _lk == '纯豹' else 1}）"
                 bid_txt = f"{game.bid[0]}个{game.bid[1]}" if game.bid else "待开叫（你是先叫方）"
                 # 2026-09-11 用户要求：直接弹窗，不走私聊（弹窗只有点击者本人可见，不泄露骰子）
                 await q.answer(f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}", show_alert=True)
@@ -8167,13 +8344,9 @@ async def _forcesub_enforce(update, context):
                                                   reply_markup=InlineKeyboardMarkup(_rows))
             _fsub_ok_cache[cid][f"warned:{user.id}"] = now
             if sget("FORCE_SUB_WARN_SECONDS") > 0:
-                async def _del_warn():
-                    await asyncio.sleep(sget("FORCE_SUB_WARN_SECONDS"))
-                    try:
-                        await context.bot.delete_message(chat_id=cid, message_id=sent.message_id)
-                    except Exception:
-                        pass
-                asyncio.create_task(_del_warn())
+                # 走统一队列：持 task 引用 + 持久化 + 60s 兜底，裸 create_task 会被 GC 导致永不删除
+                schedule_delete_ids(context.application, cid, sent.message_id,
+                                    int(sget("FORCE_SUB_WARN_SECONDS")))
         except Exception:
             logger.exception("强制订阅提示发送失败 cid=%s（已吞并）", cid)
     return True
@@ -9434,7 +9607,7 @@ async def cmd_sign_rank(update, context):
     lines = ["📅 连续签到排行", "━" * 14]
     for i, (uid, s) in enumerate(sorted(users, key=lambda x: (-x[1], x[0]))[:20], 1):
         lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：连续 {s} 天")
-    await safe_send_long(context.bot, cid, "\n".join(lines))
+    await send_reply(update, context, "\n".join(lines))
 
 async def cmd_my_points(update, context):
     if not await need_auth(update, context): return
@@ -9449,13 +9622,7 @@ async def cmd_my_points(update, context):
     msg = _fmt_tpl("query_msg_tpl", name=await get_name(context.application, uid),
                    balance=balance, level_line=lv_line, signed=signed, streak=streak, today_chat=today_chat)
     reply = await send_reply(update, context, msg)
-    if sget("POINTS_DELETE_SECONDS") > 0 and is_group_chat(update):
-        async def _del():
-            await asyncio.sleep(sget("POINTS_DELETE_SECONDS"))
-            await safe_delete(context.bot, cid, update.message.message_id)
-        asyncio.create_task(_del())
-    if sget("REPLY_DELETE_SECONDS") > 0 and is_group_chat(update):
-        schedule_delete(context.application, cid, reply, sget("REPLY_DELETE_SECONDS"))
+    return reply
 
 async def cmd_points_rank(update, context):
     if not await need_auth(update, context): return
@@ -10869,7 +11036,7 @@ async def cmd_buy_points(update, context):
                 lines.append(f"{i}. {p.get('name', '?')}　¥{p.get('cny', 0)} = {p.get('points', 0)} 积分")
             lines.append("")
             lines.append("💡 发「充值 套餐名」或「充值 数量」提交申请，管理员确认后到账。")
-            await safe_send_long(context.bot, update.effective_chat.id, "\n".join(lines)); return
+            await send_reply(update, context, "\n".join(lines)); return
         await send_reply(update, context, f"用法：充值 数量（{sget('BUY_MIN')} ~ {sget('BUY_MAX')}）\n提交申请后联系管理员转账，管理员确认后积分自动到账。"); return
     pkg_arg = args[0].strip()
     amount = int(pkg_arg) if pkg_arg.isdigit() else None
@@ -11071,7 +11238,7 @@ async def cmd_whitelist(update, context):
     for i, u in enumerate(sorted(users), 1):
         lines.append(f"{i}. {user_names.get(u, u)}（{u}）")
     lines.append("💡 白名单成员免疫禁言/群封；「加白」「删白」管理。")
-    await safe_send_long(context.bot, cid, "\n".join(lines))
+    await send_reply(update, context, "\n".join(lines))
 
 async def cmd_whitelist_add(update, context):
     if not await need_auth(update, context): return
@@ -11119,7 +11286,7 @@ async def cmd_adminlist_tg(update, context):
     for a in sorted(admins, key=lambda x: (x.status != "creator", x.user.id)):
         mark = "👑" if a.status == "creator" else "⚙️"
         lines.append(f"{mark} {a.user.first_name or ''}（{a.user.id}）")
-    await safe_send_long(context.bot, cid, "\n".join(lines))
+    await send_reply(update, context, "\n".join(lines))
 
 # ---------- 邀请系统：专属链接追踪进群、合格结算、排行 ----------
 # 记录状态语义（2026-09-08 改造，替代 audit 审核层 + 前置死字段）：
@@ -11978,7 +12145,7 @@ async def _auto_race_tick(app, now):
         try:
             mode = current_game_mode()
             jackpot = race_jackpot.get(cid, 0) if mode == "official" else 0
-            race = HorseRace(cid, ADMIN_USER_ID, jackpot, mode); active_horse_races[cid] = race
+            race = HorseRace(cid, ADMIN_USER_ID, jackpot, mode, auto=True); active_horse_races[cid] = race
             msg = await safe_send(app.bot, cid, await race.view(app), reply_markup=race.buttons())
             if not msg:
                 race_skip_stats[cid]["safe_send返回None"] += 1

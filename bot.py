@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-0905"
+BOT_VERSION = "2026-09-11-1050"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -4391,10 +4391,19 @@ class DiceGame:
         return actual, loser, n_face, n_one
 
     def apply_loss(self, loser):
-        """输家掉一颗骰子；归零出局；幸存者重摇、输家先叫；只剩 1 人 → 终局。"""
-        self.dice[loser] = max(0, self.dice[loser] - 1)
-        eliminated = self.dice[loser] <= 0
-        if eliminated: self.out.add(loser)
+        """输家掉一颗骰子；归零出局；幸存者重摇、输家先叫；只剩 1 人 → 终局。
+
+        **两人局一把定胜负**（2026-09-11 用户要求）：只有 2 人时不玩掉骰多轮，
+        输家直接出局、立即结算——两人轮流掉骰要打十来回合，太磨人。
+        """
+        if len(self.players) <= 2:
+            self.dice[loser] = 0
+            self.out.add(loser)
+            eliminated = True
+        else:
+            self.dice[loser] = max(0, self.dice[loser] - 1)
+            eliminated = self.dice[loser] <= 0
+            if eliminated: self.out.add(loser)
         self.bid = None
         self.starter_uid = loser if loser not in self.out else self._next_alive_after(loser)
         if len(self.alive()) <= 1:
@@ -4428,14 +4437,31 @@ def dice_min_raise(game):
 
 async def dice_waiting_text(game, app):
     players = [f"{i}. {await get_name(app, uid)}" for i, uid in enumerate(game.players, 1)]
+    # 规则随人数变化：两人局一把定胜负（2026-09-11 用户要求），三人及以上才玩掉骰子多轮
+    rule = ("两人局：一把定胜负，开骰即结算。" if len(game.players) <= 2
+            else "输家掉一颗骰子，掉光出局。")
     return (f"🎲 新一局大话骰（吹牛）\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players)
-            + f"\n\n每人 {sget('DICE_DICE_COUNT')} 颗骰子偷看自己的，轮流叫「X个Y」越叫越大，开骰掀盅，输家掉一颗，掉光出局。\n"
+            + f"\n\n每人 {sget('DICE_DICE_COUNT')} 颗骰子偷看自己的，轮流叫「X个Y」越叫越大，开骰掀盅，{rule}\n"
             + f"⏰ 满 2 人后 {sget('ROOM_WAIT_TIMEOUT')} 秒自动开局，不足 2 人自动解散。底注 {sget('DICE_ANTE')}。")
 
 
 async def update_dice_waiting(game, app):
     await safe_edit(app.bot, game.chat_id, game.game_msg_id, await dice_waiting_text(game, app),
                     reply_markup=dice_buttons(game, game.owner_id))
+
+
+async def _dice_del_bid_msg(context, cid, message):
+    """删掉玩家发在群里的叫牌/开骰文本，保持群聊清爽（2026-09-11 用户要求）。
+
+    bot 非管理员 / 无删除权限时删不掉 → 静默失败，绝不影响牌局主流程。
+    """
+    try:
+        await message.delete()
+    except Exception:
+        try:
+            await context.bot.delete_message(cid, message.message_id)
+        except Exception:
+            pass
 
 
 def dice_buttons(game, uid):
@@ -4452,7 +4478,7 @@ def dice_buttons(game, uid):
     row1 = [InlineKeyboardButton("🎲 看牌", callback_data="dice_see")]
     # 无合法加码（数量点数双顶满）时隐藏「加码」，避免用户点了才被拒
     if dice_min_raise(game):
-        row1.append(InlineKeyboardButton("➕ 加码", callback_data="dice_raise"))
+        row1.append(InlineKeyboardButton("➕ 加一个", callback_data="dice_raise"))
     rows = [row1]
     row2 = []
     if game.bid:
@@ -4485,14 +4511,15 @@ async def dice_table_text(game, app):
             lines.append("　　💀 已出局")
         else:
             lines.append(f"　　🎲{game.dice[uid]}颗 🟢 余{game.chips[uid]}")
-    lines.append("💡 群里打「6个3」叫牌｜「➕ 加码」懒得算｜「🎯 开骰」掀盅｜点「🎲 看牌」私聊看牌")
+    lines.append("💡 群里打「6个3」叫牌｜「➕ 加一个」懒得算｜「🎯 开骰」掀盅｜点「🎲 看牌」弹窗看骰")
     return "\n".join(lines)
 
 
 async def show_dice_action(game, app):
     cur = game.actor if game.phase == "playing" else None
+    # 牌桌统一删旧发新（见 _sync_jinhua_msg），始终顶到群最底部；
+    # 行动提示已并入牌桌文本（见 dice_table_text），此处不再追加第二句
     if cur:
-        # 行动提示已并入牌桌文本（见 dice_table_text），此处不再追加第二句
         await _sync_jinhua_msg(game, app, await dice_table_text(game, app), dice_buttons(game, cur))
     else:
         await _sync_jinhua_msg(game, app, await dice_table_text(game, app), dice_buttons(game, game.owner_id))
@@ -4547,13 +4574,16 @@ async def _dice_resolve_and_continue(game, app, opener):
         calc = f"{bf}点×{n_face} + 万能1×{n_one} = "
     else:
         calc = ""
-    tail = f"{calc}实际 {actual} 个 ≥ 叫 {bc} 个 → {bidder_name} 没吹，{loser_name}（开骰者）掉一颗骰子" \
+    _duel = len(game.players) <= 2      # 两人局：一把定胜负，输家直接出局
+    _pen = "输" if _duel else "掉一颗骰子"
+    tail = f"{calc}实际 {actual} 个 ≥ 叫 {bc} 个 → {bidder_name} 没吹，{loser_name}（开骰者）{_pen}" \
         if loser is opener else \
-        f"{calc}实际 {actual} 个 < 叫 {bc} 个 → {bidder_name} 吹牛实锤，掉一颗骰子"
+        f"{calc}实际 {actual} 个 < 叫 {bc} 个 → {bidder_name} 吹牛实锤，{_pen}"
     elim = game.apply_loss(loser)
     if game.phase == "showdown":
+        _end = "本局结束！" if _duel else f"{loser_name} 出局！"
         schedule_notice_delete(app, game.chat_id,
-                               await safe_send(app.bot, game.chat_id, f"{tail}，{loser_name} 出局！"))
+                               await safe_send(app.bot, game.chat_id, f"{tail}，{_end}"))
         await settle_dice(game, app)
         return
     nxt_name = await get_name(app, game.starter_uid)
@@ -5198,18 +5228,16 @@ def jinhua_buttons(game, uid):
 
 
 async def _sync_jinhua_msg(game, app, text, kb):
-    """渲染唯一权威牌桌消息：删旧发新，让牌桌永远停在群最新位置（不被聊天顶上去），全群始终只有这一条。
+    """渲染唯一权威牌桌消息：**删旧发新**，全群始终只有这一条，且永远停在群最底部。
 
-    流程：先发新消息（更新 game_msg_id）再删旧消息，避免牌桌短暂消失；发送失败则回退原地编辑兜底。
+    2026-09-11 用户明确：炸金花与大话骰**统一删旧发新**。
+    （早前「原地编辑」的注释把「群友反馈乱跳」归因成删旧发新——**那是误记**：
+    用户当时的抱怨是界面文本与按钮乱，跟发消息方式无关。）
+    原地编辑位置不动，会被后来的聊天顶上去，群友就看不到轮到谁了。
     加锁避免快速连续操作（连点/超时与点击并发）时出现两条牌桌。
     """
     async with game._render_lock:
         old_id = game.game_msg_id
-        # 群反馈：每次删旧发新牌桌乱跳难操作 → 优先原地编辑（按钮位置稳定），失败才重发兜底
-        if old_id:
-            edited = await safe_edit(app.bot, game.chat_id, old_id, text, reply_markup=kb, parse_mode="HTML")
-            if edited is not None:
-                return
         msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb, parse_mode="HTML")
         if msg:
             game.game_msg_id = msg.message_id
@@ -7264,14 +7292,8 @@ async def on_button(update, context):
                     await q.answer("你已出局，没有骰子了", show_alert=True); return
                 ds = " ".join(map(str, game.hands[uid]))
                 bid_txt = f"{game.bid[0]}个{game.bid[1]}" if game.bid else "待开叫（你是先叫方）"
-                _view = f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}"
-                # 私聊优先；但玩家从未和 bot 私聊过时 Telegram 会拒发（历史上表现为「点按钮没反应」）
-                # → 发不出去就退化成单击弹窗（弹窗只有点击者本人可见，不泄露骰子）
-                _pm = await safe_send(context.bot, uid, _view)
-                if _pm is None:
-                    await q.answer(_view, show_alert=True)
-                else:
-                    await q.answer("已私聊发你 🎲")
+                # 2026-09-11 用户要求：直接弹窗，不走私聊（弹窗只有点击者本人可见，不泄露骰子）
+                await q.answer(f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}", show_alert=True)
                 return
             if data == "dice_raise":
                 if uid != game.actor or game.phase != "playing":
@@ -8755,6 +8777,7 @@ async def on_text(update, context):
                     ok, _d = _dg.action(user.id, "open")
                     if ok:
                         _dg.last_action = f"{await get_name(context.application, user.id)} 开骰"
+                        await _dice_del_bid_msg(context, cid, message)   # 删掉玩家发的「开骰」文本
                         await _dice_resolve_and_continue(_dg, context.application, user.id)
                         return
                 elif user.id in _dg.players and not _dg.bid:
@@ -8772,6 +8795,7 @@ async def on_text(update, context):
                     if not ok:
                         await send_reply(update, context, f"❌ {desc}"); return
                     _dg.last_action = f"{await get_name(context.application, user.id)} 叫 {_bid[0]}个{_bid[1]}"
+                    await _dice_del_bid_msg(context, cid, message)   # 删掉玩家发的叫牌文本，保持群聊清爽
                     await start_dice_turn_timer(_dg, context.application)
                     return
     except Exception:
@@ -12148,7 +12172,7 @@ CMD_ALIASES = {
     "德州": cmd_dz, "德州扑克": cmd_dz,
     "赛车": cmd_sm, "sc": cmd_sm, "赛马": cmd_sm,
     "21点": cmd_21, "二十一点": cmd_21,
-    "结束": cmd_end,
+    "结束": cmd_end, "终止": cmd_end, "结束游戏": cmd_end, "终止游戏": cmd_end, "终止比赛": cmd_end,
     "加积分": cmd_add, "加分": cmd_add,
     "盈亏": cmd_cx, "查询": cmd_cx,
     "排行": cmd_ph, "排行榜": cmd_ph, "积分榜": cmd_ph, "积分": cmd_ph,

@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1050"
+BOT_VERSION = "2026-09-11-1130"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -246,6 +246,7 @@ SETTINGS_FIELDS = [
     ("dice_ante",               "DICE_ANTE",               "底注(开局一次性扣进奖池)",  "int",   1,   100000,  "dice"),
     ("dice_dice_count",        "DICE_DICE_COUNT",         "每人骰子数",                "int",   1,   10,      "dice"),
     ("dice_wild_one",          "DICE_WILD_ONE",           "1万能牌开关(关=无万能局,首手可叫1)", "bool", 0, 1, "dice"),
+    ("dice_straight_zero",     "DICE_STRAIGHT_ZERO",      "顺子算0个(5颗连号12345/23456整手不计点数)", "bool", 0, 1, "dice"),
     ("dice_think_seconds",     "DICE_THINK_SECONDS",      "叫牌思考秒数(超时自动开骰)", "int",   10,  600,     "dice"),
     ("dice_max_players",       "DICE_MAX_PLAYERS",        "单桌最多人数",              "int",   2,   20,      "dice"),
     ("dice_enabled",           "DICE_ENABLED",            "大话骰开关",                "bool",  0,   1,       "dice"),
@@ -259,6 +260,10 @@ SETTINGS_FIELDS = [
     ("fixed_bet_amounts",       "FIXED_BET_AMOUNTS",       "下注按钮金额(逗号分隔)",    "bets",  0,   0,       "race"),
     ("race_odds_cap",           "RACE_ODDS_CAP",           "赔率上限(倍,0=无上限)",     "float", 0,   100,     "race"),
     ("race_enabled",            "RACE_ENABLED",            "赛车开关",                  "bool",  0,   1,       "race"),
+    ("race_subsidy_enabled",    "RACE_SUBSIDY_ENABLED",    "赛车系统加奖开关(每场给奖池加钱拉人气)", "bool", 0, 1, "race"),
+    ("race_subsidy_amount",     "RACE_SUBSIDY_AMOUNT",     "赛车系统加奖金额(每场,押中者按注额分)", "int", 0, 100000, "race"),
+    ("race_subsidy_min_players","RACE_SUBSIDY_MIN_PLAYERS","加奖生效最少下注人数(防单人薅)", "int", 1, 50, "race"),
+    ("race_subsidy_daily_cap",  "RACE_SUBSIDY_DAILY_CAP",  "加奖每日上限(每群,0=不限)", "int", 0, 10000000, "race"),
     ("race_admin_only",         "RACE_ADMIN_ONLY",         "赛车仅管理员开局",          "bool",  0,   1,       "race"),
     ("rake_enabled",            "RAKE_ENABLED",            "游戏抽水开关(官方模式结算)", "bool",  0,   1,       "rake"),
     ("rake_percent",            "RAKE_PERCENT",            "抽水比例(%·赢家净赢抽成)",  "int",   0,   50,      "rake"),
@@ -282,7 +287,7 @@ SETTINGS_FIELDS = [
     ("race_hourly_minute",      "RACE_HOURLY_MINUTE",      "赛车每小时自动开赛(第几分钟)", "int", 0, 59,    "schedule"),
     ("race_auto_enabled",       "RACE_AUTO_ENABLED",       "赛车自动开赛开关(仍受时段限制)", "bool", 0, 1,    "schedule"),
     ("race_hourly_start",       "RACE_HOURLY_START",       "自动开赛时段-从几点(含)",   "int",   0,   23,      "schedule"),
-    ("race_hourly_end",         "RACE_HOURLY_END",         "自动开赛时段-到几点(含)",   "int",   0,   23,      "schedule"),
+    ("race_hourly_end",         "RACE_HOURLY_END",         "自动开赛时段-到几点(含·填得比起点小=跨午夜档，如起18填2=18点到次日2点)", "int",   0,   23,      "schedule"),
     ("backup_interval_hours",   "BACKUP_INTERVAL_HOURS",   "自动备份间隔(小时,改间隔重启后生效)", "int", 1, 168,   "schedule"),
     ("backup_enabled",          "BACKUP_ENABLED",          "自动备份开关(保存即时生效)", "bool",  0,   1,       "schedule"),
     ("admin_report_time",       "ADMIN_REPORT_TIME",       "经营日报推送时间(时:分,私聊管理员)", "short", 0, 0, "schedule"),
@@ -1642,6 +1647,8 @@ race_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 blackjack_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 jinhua_profit_by_date = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 race_jackpot = defaultdict(int)
+# 赛车系统加奖已发额：race_subsidy_by_day[日期][群] += 金额（用于「每日上限」判定，2026-09-11 用户要求）
+race_subsidy_by_day = defaultdict(lambda: defaultdict(int))
 hourly_race_enabled = defaultdict(lambda: False)
 # 各调度任务的"作用对象"（网页可配）：每日重置/德州日榜=作用群；备份/日报=接收私聊的管理员
 daily_reset_groups = set()    # 默认全授权群，启动时懒填
@@ -1829,6 +1836,7 @@ def force_save_now():
                 "blackjack_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in blackjack_profit_by_date.items()},
                 "jinhua_profit_by_date": {date: {str(cid): dict(users) for cid, users in chats.items()} for date, chats in jinhua_profit_by_date.items()},
                 "authorized_groups": list(AUTHORIZED_GROUPS),
+                "race_subsidy_by_day": {date: {str(cid): amount for cid, amount in chats.items()} for date, chats in race_subsidy_by_day.items()},
                 "bot_admins": list(BOT_ADMINS),
                 "blacklist": list(BLACKLISTED_USERS),
                 "race_jackpot": {str(cid): value for cid, value in race_jackpot.items()},
@@ -2179,6 +2187,8 @@ def load_data():
         BOT_ADMINS.update(int(x) for x in data.get("bot_admins", []))
         BLACKLISTED_USERS.update(int(x) for x in data.get("blacklist", []))
         for cid, value in data.get("race_jackpot", {}).items(): race_jackpot[int(cid)] = int(value)
+        for date, chats in data.get("race_subsidy_by_day", {}).items():
+            for cid, amount in chats.items(): race_subsidy_by_day[date][int(cid)] = int(amount)
         for cid, value in data.get("hourly_race_enabled", {}).items(): hourly_race_enabled[int(cid)] = bool(value)
         for cid, value in data.get("race_history", {}).items(): race_history[int(cid)] = list(value)[-10:]
         for cid, value in data.get("blackjack_history", {}).items(): blackjack_history[int(cid)] = list(value)[-10:]
@@ -3582,6 +3592,8 @@ class HorseRace:
                 self.name_cache[uid] = name
                 lines.append(f"{name}: " + " ".join(f"{sget('HORSE_EMOJI')[h]}{amount}" for h, amount in bets.items()))
             lines.append("")
+        _banner = race_subsidy_banner()
+        if _banner: lines.append(_banner)
         lines.extend([f"⏰ 距离开赛还有 {minutes} 分 {seconds:02d} 秒", "🔒 开赛后无法投注", "💡 赔率随下注实时浮动，下注瞬间锁定"])
         return "\n".join(lines)
 
@@ -3749,9 +3761,17 @@ class HorseRace:
                     settlements.append((uid, self.name_cache[uid], stake, bet_on_winner, payout, net, bet_odd))
                 # 抽水先算（官方模式），结算行直接带「实收」
                 rake_per = calc_rake({s[0]: s[5] for s in settlements})[1] if self.mode == "official" else {}
+                # 系统加奖（2026-09-11 用户要求）：先判定额度，再按押中者注额比例拆分。
+                # 无人押中 → 拆不出人 → 不发、也不消耗当日额度。
+                subsidy = race_subsidy_for(self.chat_id, date, len(self.bets))
+                subsidy_map = race_subsidy_split(subsidy, self.bets, winner) if subsidy else {}
+                if not subsidy_map: subsidy = 0
                 # 阶段二：统一改写钱包（此处仅 dict 操作，不会抛异常，payouts_applied 必定置位）
                 for uid, _, _, _, payout, _, _ in settlements:
-                    wallet[self.chat_id][uid] += payout; total_payout += payout
+                    wallet[self.chat_id][uid] += payout + subsidy_map.get(uid, 0); total_payout += payout
+                if subsidy: race_subsidy_by_day[date][self.chat_id] += subsidy
+                if len(race_subsidy_by_day) > 3:      # 只留最近 3 天，别让按日容器无限膨胀
+                    for _d in sorted(race_subsidy_by_day.keys())[:-3]: race_subsidy_by_day.pop(_d, None)
                 payouts_applied = True
 
                 # 大奖战报：押中独赢且净赢超阈值 → 广播其他授权群
@@ -3764,8 +3784,8 @@ class HorseRace:
                     # 累计参与局数（归零门槛）+ 赢分计入累计获得 + 升级通知
                     for uid, _nm, _stake, _bow, _pay, _net, _odd in settlements:
                         games_played[self.chat_id][uid] += 1
-                        # 实际到手 = 净赢 - 本局抽水（抽水已在上面扣除）
-                        _gain = _net - int(rake_per.get(uid, 0) or 0)
+                        # 实际到手 = 净赢 - 本局抽水（抽水已在上面扣除）+ 系统加奖（真产出，计入累计获得）
+                        _gain = _net - int(rake_per.get(uid, 0) or 0) + subsidy_map.get(uid, 0)
                         if _gain > 0:
                             _oe = _earn_get(self.chat_id, uid)
                             _earn_add(self.chat_id, uid, _gain)
@@ -3779,6 +3799,14 @@ class HorseRace:
                     lines.extend(["", f"⚠️ 奖池不足，系统补充 {supplement} 积分"])
                 elif not total_payout:
                     lines.extend(["", "🔄 无人押中，奖池滚入下一期。"])
+
+                if subsidy:
+                    lines.extend(["", f"🎁 系统加奖 {subsidy} 积分（按押中注额分配）："])
+                    for _uid, _amt in sorted(subsidy_map.items(), key=lambda x: -x[1]):
+                        _nm = self.name_cache.get(_uid)
+                        if not _nm:
+                            _nm = await get_name(app, _uid); self.name_cache[_uid] = _nm
+                        lines.append(f"　{_nm}：+{_amt}")
 
                 lines.extend(["", "💰 本局结算："])
                 for _, name, stake, bet_on_winner, payout, net, bo in settlements:
@@ -4208,6 +4236,7 @@ async def cmd_21(update, context):
 DICE_ANTE = 200           # 底注（开局一次性扣进奖池，弃局作废）
 DICE_DICE_COUNT = 5       # 每人骰子数
 DICE_WILD_ONE = 1         # 1万能牌开关（关=无万能局：1 就是普通点数，首手可叫1）
+DICE_STRAIGHT_ZERO = 1    # 顺子算0个开关（开=5颗连号12345/23456整手不计点数，2026-09-11 用户规则）
 DICE_THINK_SECONDS = 60   # 叫牌思考秒数（超时自动开骰/最小叫牌，防卡死）
 DICE_MAX_PLAYERS = 8      # 单桌最多人数
 DICE_ENABLED, DICE_ADMIN_ONLY = 1, 0
@@ -4215,6 +4244,19 @@ DICE_ENABLED, DICE_ADMIN_ONLY = 1, 0
 active_dice_games = {}
 
 _CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _dice_is_straight(hand):
+    """一手骰是否「顺子」：恰好 5 颗且连号 —— 12345 或 23456。
+
+    2026-09-11 用户报障补的规则（原话：「23456不是顺子吗 顺子不是算0个吗」）：
+    顺子这手**整手算 0 个**，不参与任何点数统计（开骰计数 + 亮盅展示都要体现）。
+    掉骰制下只有满 5 颗才可能成顺（4 颗/6 颗一律不算）。
+    """
+    if len(hand) != 5: return False
+    s = sorted(hand)
+    return s == [1, 2, 3, 4, 5] or s == [2, 3, 4, 5, 6]
+
 
 def parse_dice_bid(text):
     """把群友的叫牌文本解析成 (数量, 点数)。不是叫牌返回 None。
@@ -4381,11 +4423,19 @@ class DiceGame:
     def resolve_open(self, opener):
         """返回 (实际数量, 输家, 纯点数个数, 万能1个数)。
         被叫点是 2~6 且万能开：该点数 + 全部1 都计入；被叫点是 1：只数 1 本身。
+        **顺子整手算 0 个**（DICE_STRAIGHT_ZERO 开）：12345/23456 这手不参与任何计数
+        ——2026-09-11 用户报障，此前把顺子里的点数照算，导致结算反了。
         实际 ≥ 叫的 → 开骰者输；实际 < 叫的 → 被开者输（无平局）。"""
         count, face, bidder = self.bid
         wild = sget("DICE_WILD_ONE")
-        n_face = sum(1 for u in self.alive() for d in self.hands[u] if d == face)
-        n_one = sum(1 for u in self.alive() for d in self.hands[u] if d == 1) if (wild and face != 1) else 0
+        zero_straight = sget("DICE_STRAIGHT_ZERO")
+        faces = []
+        for u in self.alive():
+            if zero_straight and _dice_is_straight(self.hands[u]):
+                continue          # 顺子整手作废，一颗都不算
+            faces.extend(self.hands[u])
+        n_face = sum(1 for d in faces if d == face)
+        n_one = sum(1 for d in faces if d == 1) if (wild and face != 1) else 0
         actual = n_face + n_one
         loser = opener if actual >= count else bidder
         return actual, loser, n_face, n_one
@@ -4440,8 +4490,13 @@ async def dice_waiting_text(game, app):
     # 规则随人数变化：两人局一把定胜负（2026-09-11 用户要求），三人及以上才玩掉骰子多轮
     rule = ("两人局：一把定胜负，开骰即结算。" if len(game.players) <= 2
             else "输家掉一颗骰子，掉光出局。")
+    # 顺子规则（2026-09-11 用户规则）：12345/23456 一手整手算 0 个
+    straight_rule = "顺子（12345 / 23456）一手全算 0 个。" if sget("DICE_STRAIGHT_ZERO") else ""
+    wild_rule = "1 是万能牌。" if sget("DICE_WILD_ONE") else ""
+    extra = (wild_rule + straight_rule)
     return (f"🎲 新一局大话骰（吹牛）\n发起人：{await get_name(app, game.owner_id)}\n\n已加入：\n" + "\n".join(players)
             + f"\n\n每人 {sget('DICE_DICE_COUNT')} 颗骰子偷看自己的，轮流叫「X个Y」越叫越大，开骰掀盅，{rule}\n"
+            + (extra + "\n" if extra else "")
             + f"⏰ 满 2 人后 {sget('ROOM_WAIT_TIMEOUT')} 秒自动开局，不足 2 人自动解散。底注 {sget('DICE_ANTE')}。")
 
 
@@ -4490,8 +4545,9 @@ def dice_buttons(game, uid):
 
 async def dice_table_text(game, app):
     wild = sget("DICE_WILD_ONE")
+    _rules = ("｜1=万能" if wild else "｜无万能局") + ("｜顺子=0" if sget("DICE_STRAIGHT_ZERO") else "")
     lines = [f"🎲 大话骰（吹牛）｜第 {game.hand_no} 手",
-             f"💰 奖池 {game.pot}｜底注 {sget('DICE_ANTE')}｜在场骰子 {game.total_dice()} 颗" + ("｜1=万能" if wild else "｜无万能局")]
+             f"💰 奖池 {game.pot}｜底注 {sget('DICE_ANTE')}｜在场骰子 {game.total_dice()} 颗" + _rules]
     if game.last_action:
         lines.append(f"🔔 上一手：{game.last_action}")
     if game.bid:
@@ -4567,8 +4623,12 @@ async def _dice_resolve_and_continue(game, app, opener):
     opener_name = await get_name(app, opener)
     loser_name = await get_name(app, loser)
     lines = [f"🎯 开骰！（{opener_name} 开 {bidder_name} 的 {bc}个{bf}）", "亮盅："]
+    _zero_str = sget("DICE_STRAIGHT_ZERO")
     for u in game.alive():
-        lines.append(f"　{await get_name(app, u)}：{' '.join(map(str, game.hands[u]))}")
+        _hand = " ".join(map(str, game.hands[u]))
+        if _zero_str and _dice_is_straight(game.hands[u]):
+            _hand += "（顺子·算0个）"
+        lines.append(f"　{await get_name(app, u)}：{_hand}")
     wild = sget("DICE_WILD_ONE")
     if wild and bf != 1:
         calc = f"{bf}点×{n_face} + 万能1×{n_one} = "
@@ -4582,8 +4642,11 @@ async def _dice_resolve_and_continue(game, app, opener):
     elim = game.apply_loss(loser)
     if game.phase == "showdown":
         _end = "本局结束！" if _duel else f"{loser_name} 出局！"
+        # 终局必须亮盅：此前两人局只发判定句、不发牌面，群友无法核对「谁该输」
+        # （2026-09-11 用户报障的现场就是这种「只看到一句结论、看不到骰子」）
         schedule_notice_delete(app, game.chat_id,
-                               await safe_send(app.bot, game.chat_id, f"{tail}，{_end}"))
+                               await safe_send(app.bot, game.chat_id,
+                                               "\n".join(lines + [f"{tail}，{_end}"])))
         await settle_dice(game, app)
         return
     nxt_name = await get_name(app, game.starter_uid)
@@ -4805,7 +4868,76 @@ RACE_AUTO_ENABLED = 1        # 赛车自动开赛总开关（仍受时段/分钟
 RACE_HOURLY_START = 0        # 自动开赛时段-起始点(几点,含)，如 9 = 9点起才开赛
 ADMIN_REPORT_TIME = "09:00"  # 经营日报推送时刻（私聊管理员）
 ADMIN_REPORT_ENABLED = 1     # 经营日报推送开关
-RACE_HOURLY_END = 23         # 自动开赛时段-结束点(几点,含)，如 22 = 22点那场仍开；起始>结束=全天不开
+RACE_HOURLY_END = 23         # 自动开赛时段-结束点(几点,含)，如 22 = 22点那场仍开；
+                             # 起始>结束 = **跨午夜档**（如 18→2 = 18:00 到次日 02:59），2026-09-11 用户要求
+
+
+def _race_hour_in_window(start, end, hour):
+    """自动开赛时段判定（**支持跨午夜**，2026-09-11 用户报障）。
+
+    群友要的档期是「18 点到凌晨 2 点」，旧实现是 `start <= h <= end`，
+    起始大于结束直接恒 False → 跨夜档**根本设不出来**。
+    现行语义：start <= end = 普通档（同日区间）；start > end = 跨夜档。
+    例：18→2 命中 18/19/.../23/0/1/2，不命中 3~17。
+    """
+    start = max(0, min(23, int(start)))
+    end = max(0, min(23, int(end)))
+    hour = int(hour) % 24
+    if start <= end:
+        return start <= hour <= end
+    return hour >= start or hour <= end
+
+
+def _race_window_text(start, end):
+    """时段的可读文案；跨夜档在终点前加「次日」（后台状态卡/页面提示共用）。"""
+    start = max(0, min(23, int(start)))
+    end = max(0, min(23, int(end)))
+    return f"{start:02d}:00–{'次日' if start > end else ''}{end:02d}:59"
+
+
+# ---------- 赛车系统加奖（2026-09-11 用户要求：群友嫌赛车没人玩，加个"白拿"钩子） ----------
+RACE_SUBSIDY_ENABLED = 1      # 系统加奖开关
+RACE_SUBSIDY_AMOUNT = 100     # 每场加奖金额（积分）——押中者按注额比例分，无人押中则不发、不计额度
+RACE_SUBSIDY_MIN_PLAYERS = 2  # 加奖生效的最少下注人数（防单人自押自薅）
+RACE_SUBSIDY_DAILY_CAP = 1000 # 每群每日加奖上限（0=不限），防连续开赛把积分放水
+
+
+def race_subsidy_banner():
+    """赛车面板上的加奖预告（开关关 / 金额 0 → 空串，不显示多余行）。"""
+    if not sget("RACE_SUBSIDY_ENABLED"): return ""
+    amt = max(0, int(sget("RACE_SUBSIDY_AMOUNT")))
+    if amt <= 0: return ""
+    n = max(1, int(sget("RACE_SUBSIDY_MIN_PLAYERS")))
+    return f"🎁 本场系统加奖 {amt} 积分（押中者按注额分，需 ≥{n} 人下注）"
+
+
+def race_subsidy_for(cid, date, n_bettors):
+    """本场可发的加奖金额（0 = 不发）。四道闸：开关 → 金额 → 人数门槛 → 当日上限。"""
+    if not sget("RACE_SUBSIDY_ENABLED"): return 0
+    amt = max(0, int(sget("RACE_SUBSIDY_AMOUNT")))
+    if amt <= 0: return 0
+    if n_bettors < max(1, int(sget("RACE_SUBSIDY_MIN_PLAYERS"))): return 0
+    cap = max(0, int(sget("RACE_SUBSIDY_DAILY_CAP")))
+    if cap and race_subsidy_by_day[date][cid] + amt > cap: return 0
+    return amt
+
+
+def race_subsidy_split(subsidy, bets, winner):
+    """加奖按「押中者的注额比例」拆分，返回 {uid: 金额}。
+    整数除法余数补给押注最多的那个人 —— 总额严格等于 subsidy，不许凭空多出/少了积分。"""
+    if subsidy <= 0: return {}
+    winners = [(uid, bets[uid].get(winner, 0)) for uid in bets if bets[uid].get(winner, 0) > 0]
+    if not winners: return {}          # 无人押中 → 不发（额度也不消耗），避免白送钱给庄家
+    tot = sum(b for _, b in winners)
+    alloc, used = {}, 0
+    for uid, b in winners:
+        share = subsidy * b // tot
+        alloc[uid] = share; used += share
+    rest = subsidy - used
+    if rest:
+        top = max(winners, key=lambda x: x[1])[0]
+        alloc[top] = alloc.get(top, 0) + rest
+    return alloc
 INHERIT_DAILY_LIMIT = 0      # 每人每日转赠总额上限（0=不限，防小号互刷）
 MALL_MIN_AGE_DAYS = 0        # 商城兑换门槛：与机器人首次互动满 N 天（0=不限）
 MALL_MIN_ACTIVE_DAYS = 0     # 商城兑换门槛：有游戏盈亏记录的天数 ≥N（0=不限）
@@ -7291,6 +7423,9 @@ async def on_button(update, context):
                 if uid in game.out:
                     await q.answer("你已出局，没有骰子了", show_alert=True); return
                 ds = " ".join(map(str, game.hands[uid]))
+                # 顺子要当场告诉玩家「这手算 0 个」，否则他会照着自己骰子叫，开骰必翻车
+                if sget("DICE_STRAIGHT_ZERO") and _dice_is_straight(game.hands[uid]):
+                    ds += "（顺子·本手算0个，别照它叫牌）"
                 bid_txt = f"{game.bid[0]}个{game.bid[1]}" if game.bid else "待开叫（你是先叫方）"
                 # 2026-09-11 用户要求：直接弹窗，不走私聊（弹窗只有点击者本人可见，不泄露骰子）
                 await q.answer(f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}", show_alert=True)
@@ -11833,7 +11968,7 @@ async def _auto_race_tick(app, now):
     网页总开关打开也不会发车——bug 已修）"""
     if not (sget("RACE_AUTO_ENABLED") and sget("RACE_ENABLED")
             and now.minute == max(0, min(59, sget("RACE_HOURLY_MINUTE")))
-            and max(0, min(23, sget("RACE_HOURLY_START"))) <= now.hour <= max(0, min(23, sget("RACE_HOURLY_END")))):
+            and _race_hour_in_window(sget("RACE_HOURLY_START"), sget("RACE_HOURLY_END"), now.hour)):
         return
     for cid in list(AUTHORIZED_GROUPS):
         if not hourly_race_enabled.get(cid, True):
@@ -11884,7 +12019,7 @@ async def cmd_schedule_status(update, context):
     lines = ["<b>🕐 定时任务状态</b>", ""]
 
     # 1) 整点赛车
-    lines.append(f"<b>1️⃣ 整点自动赛车</b>　总开关：{'✅ 开' if sget('RACE_AUTO_ENABLED') and sget('RACE_ENABLED') else '❌ 关'}　时段：{sget('RACE_HOURLY_START'):02d}:00–{sget('RACE_HOURLY_END'):02d}:59　开赛分钟：{sget('RACE_HOURLY_MINUTE'):02d} 分")
+    lines.append(f"<b>1️⃣ 整点自动赛车</b>　总开关：{'✅ 开' if sget('RACE_AUTO_ENABLED') and sget('RACE_ENABLED') else '❌ 关'}　时段：{_race_window_text(sget('RACE_HOURLY_START'), sget('RACE_HOURLY_END'))}　开赛分钟：{sget('RACE_HOURLY_MINUTE'):02d} 分")
     if AUTHORIZED_GROUPS:
         for cid in sorted(AUTHORIZED_GROUPS):
             on = "✅" if hourly_race_enabled.get(cid, True) else "⏸"

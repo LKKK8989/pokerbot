@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1645"
+BOT_VERSION = "2026-09-11-1810"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -27,6 +27,7 @@ import random
 import re
 import secrets
 import shutil
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -302,6 +303,7 @@ SETTINGS_FIELDS = [
     ("announce_text",           "ANNOUNCE_TEXT",           "公告内容(支持 {date}=当天日期)", "text", 0, 0,   "schedule"),
     ("sep_ad_botmsg",           None,                       "① 机器人自身消息自动回收(秒,0=不删)", "sep", 0, 0, "autodel"),
     ("panel_delete_seconds",    "PANEL_DELETE_SECONDS",    "游戏卡片/下注面板删除(秒,0=不删)", "int", 0, 86400, "autodel"),
+    ("autodel_default_seconds", "AUTODEL_DEFAULT_SECONDS", "其他消息默认删除(秒,0=关；群里新发的无按钮消息都按这个回收)", "int", 0, 86400, "autodel"),
     ("points_delete_seconds",   "POINTS_DELETE_SECONDS",   "你发的命令消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("reply_delete_seconds",    "REPLY_DELETE_SECONDS",    "查询类回复删除(秒,0=不删)", "int", 0, 86400, "autodel"),
     ("settle_delete_seconds",   "SETTLE_DELETE_SECONDS",   "游戏结算消息删除(秒,0=不删)", "int", 0, 86400, "autodel"),
@@ -753,9 +755,18 @@ POINTS_DELETE_SECONDS = 30
 REPLY_DELETE_SECONDS = 30   # 查询类命令的 bot 回复自动删除（0=不删）
 SETTLE_DELETE_SECONDS = 600 # 游戏结算消息自动删除（0=不删）
 PANEL_DELETE_SECONDS = 300 # 游戏卡片/下注面板：本局结束后自动删除（0=不删）
+AUTODEL_DEFAULT_SECONDS = 300  # 「默认自动删除」：群里**无按钮**消息一律按此回收（0=关，见 install_autodelete_default）
 RACE_NOTICE_DELETE_SECONDS = 60  # 赛车倒计时提示自动删除（0=不删）
 _pending_deletes = []      # 待删消息队列 [[cid, mid, 到期时间戳], ...]：随 bot_data 持久化，重启后重放，重部署不再残留消息
 _delete_tasks = set()      # 持有删除 task 的引用：裸 create_task 不保引用可能被事件循环 GC，删除凭空消失
+
+# ── 玩家行序号对齐（2026-09-11 用户第 3 次投诉「1. 2. 3. 没对齐」后定死） ─────────────
+# 根因：👉 是 emoji，在 Telegram 里实测约 1.3em 宽；而旧的 3 个半角空格只有约 0.75em，
+#       ⇒ 行动者行的 `3.` 被推到右边，与 `1.`/`2.` 不同列。
+# 正解：非行动者补位用「全角空格(U+3000) + 2 个半角空格」≈ 1.56em，与「👉 + 半角空格」≈ 1.58em 等宽。
+# ⚠️ 四个游戏（德州/21点/金花/大话骰）玩家行**必须**用这两个常量，别再手写空格。
+PLAYER_MARK = "👉 "        # 行动者：emoji + 1 半角空格
+PLAYER_PAD = "　  "        # 非行动者：全角空格 + 2 半角空格（视觉等宽于 PLAYER_MARK）
 WEB_OTP_ENABLED = False  # 一键登录(/后台)为主，密码直登为备用；验证码步骤默认关闭（要开改这里）
 WEB_BASE_URL = ""  # 后台公网地址（如 https://xxx.northflank.app），/后台 一键登录链接用；不配则该功能不可用
 # ---------- 群组抽奖 ----------
@@ -2738,6 +2749,137 @@ def schedule_notice_delete(app, cid, message, kind="panel"):
         schedule_delete(app, cid, message, secs)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 自动删除：从「opt-in」改成「opt-out」（2026-09-11 用户第 N 次追问后根治）
+#
+# 【用户的问题】「为什么新加的东西永远不会自动删除？是代码的问题还是我的问题？」
+# 【答案】是**代码的架构问题**。旧设计里「删除」是**白名单**：
+#   只有走 send_reply / send_settle / schedule_notice_delete 的消息才会被排入删除队列；
+#   任何一处直接 `bot.send_message(...)` / `safe_send(...)` 的新功能，**默认就是永不删除**。
+#   于是每加一个新功能，只要作者（我）忘了手写一行 schedule_delete，消息就永久留在群里。
+#   —— 这不是用户设置错了，是「默认不删」这个默认值错了。
+#
+# 【根治】把默认值反过来：**群消息 + 没有按钮 ⇒ 默认排入删除**。
+#   · 有按钮 = 交互面板（牌桌/下注/翻页/抢红包），删了就没法玩 ⇒ 永不默认删；
+#   · 私聊（cid > 0）= 玩家自己的收件箱 ⇒ 不删；
+#   · 需要长期保留的无按钮消息，在 _AUTODEL_KEEP_FUNCS 里登记函数名即可豁免；
+#   · 时长由后台「通用与应急 → 其他消息默认删除(秒)」控制，0 = 关闭这套默认（回到旧行为）。
+#   ⇒ 以后**新增**的任何群消息，默认就会被回收，不需要我再记得写删除。
+# ══════════════════════════════════════════════════════════════════════════════
+# 豁免名单：这些函数发的**无按钮群消息**必须长期存在（如德州牌桌本体）
+_AUTODEL_KEEP_FUNCS = {
+    "safe_send", "safe_send_long",        # 发送原语本身
+    "on_text",                            # 刷新牌桌：德州牌桌正文无按钮但必须常驻
+    "run", "_push_animation_frame",       # 赛马动画帧：比赛期间要一直能编辑
+}
+_AUTODEL_SKIP_FRAMES = {
+    "safe_send", "safe_send_long",         # 发送原语（转发层，不算调用方）
+    "_send_message_patched",               # ⚠️ 本补丁自己：栈顶第一帧就是它
+    "_autodel_caller_name",                # 本函数自己
+}
+# 已有「显式删除路径」的函数：它们自己管生命周期（各自的 *_DELETE_SECONDS），
+# 不要再叠一层默认删除 —— 否则后台把 REPLY_DELETE_SECONDS 设成 0，也会被 300 秒兜掉。
+_AUTODEL_OWN_FUNCS = {"send_reply", "send_settle", "send_settle_rank"}
+
+
+def _autodel_caller_name(frames=None):
+    """取「真正发起这次发送」的函数名（跳过转发层与本补丁自身）。
+
+    ⚠️ `_send_message_patched` 必须在 `_AUTODEL_SKIP_FRAMES` 里：栈顶第一帧就是它自己，
+    不跳过的话返回值永远是它 ⇒ `_AUTODEL_KEEP_FUNCS` 白名单**永远匹配不上**
+    （2026-09-11 自查发现的真 bug，已加测试锁死）。
+
+    frames 仅供测试传「函数名列表」模拟调用链；默认走真实栈帧。
+    """
+    if frames is not None:
+        for nm in frames:
+            if nm not in _AUTODEL_SKIP_FRAMES:
+                return nm
+        return ""
+    try:
+        f = sys._getframe(1)
+    except Exception:
+        return ""
+    own = globals().get("__file__", "")
+    while f is not None:
+        if not own or f.f_code.co_filename == own:
+            nm = f.f_code.co_name
+            if nm not in _AUTODEL_SKIP_FRAMES:
+                return nm
+        f = f.f_back
+    return ""
+
+
+def _autodel_default_secs():
+    try:
+        return int(sget("AUTODEL_DEFAULT_SECONDS") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _autodel_decide(chat_id, has_markup, caller, secs):
+    """纯函数：算出这次发送要不要排入删除、排多少秒（0 = 不删）。
+
+    规则（默认删，例外才不删）：
+      · 秒数设置 <= 0（功能关闭）→ 不删
+      · 私聊（cid > 0）→ 不删（玩家自己的收件箱）
+      · 带按钮（reply_markup）→ 不删（交互面板，删了没法玩）
+      · 调用方在 _AUTODEL_KEEP_FUNCS 白名单 → 不删
+      · 调用方在 _AUTODEL_OWN_FUNCS（显式删除路径）→ 不删（自己排程，不重复排）
+      其余一律删。
+    """
+    try:
+        if int(secs or 0) <= 0:
+            return 0
+    except (TypeError, ValueError):
+        return 0
+    if chat_id is None:
+        return 0
+    try:
+        if int(chat_id) >= 0:
+            return 0
+    except (TypeError, ValueError):
+        return 0
+    if has_markup:
+        return 0
+    if caller in _AUTODEL_KEEP_FUNCS:
+        return 0
+    if caller in _AUTODEL_OWN_FUNCS:
+        return 0
+    return int(secs)
+
+
+def install_autodelete_default(app):
+    """【默认开启自动删除】给 telegram.Bot.send_message 打补丁：群消息无按钮 ⇒ 自动排删。
+
+    幂等（重复调用无副作用）。用**类级**补丁，因为 Bot 定义了 __slots__，无法挂实例属性。
+    想临时豁免一次发送：`bot.send_message(..., autodel_keep=True)`。
+    """
+    from telegram import Bot as _Bot
+    if getattr(_Bot, "_autodel_patched", False):
+        return
+    _orig_send = _Bot.send_message
+
+    async def _send_message_patched(self, *args, **kwargs):
+        keep = bool(kwargs.pop("autodel_keep", False))
+        msg = await _orig_send(self, *args, **kwargs)
+        try:
+            if keep or msg is None:
+                return msg
+            markup = kwargs.get("reply_markup") or getattr(msg, "reply_markup", None)
+            secs = _autodel_decide(getattr(msg, "chat_id", None), markup is not None,
+                                   _autodel_caller_name(), _autodel_default_secs())
+            if secs > 0:
+                schedule_delete_ids(app, int(msg.chat_id), msg.message_id, secs)
+        except Exception:
+            logger.exception("默认自动删除排程失败（不影响发送）")
+        return msg
+
+    _Bot.send_message = _send_message_patched
+    _Bot._autodel_patched = True
+    logger.info("已启用「默认自动删除」：群内无按钮消息将在 AUTODEL_DEFAULT_SECONDS 秒后回收")
+
+
 def ledger_add(cid, frm, to, amt, typ):
     """资金流台账：红包领取/转赠等人对人转移逐笔记账（防小号审查用，留 5000 条）。"""
     ledger.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid, "frm": frm, "to": to, "amt": amt, "typ": typ})
@@ -3331,16 +3473,14 @@ async def poker_table_text(game, app):
         _need = max(0, game.current_bet - game.round_bets[current])
         _cur_name = await get_name(app, current)
         lines.append(f"⏳ 当前行动：{_cur_name}｜需跟：{_need}")
-    # 玩家行两段式（2026-09-10 用户报「文本不对齐」）：名字长短不定，把 状态/投/余 挪到第二行
-    # 统一格式后天然左对齐；名字再长也不挤压后面的字段。
-    # 2026-09-11 用户要求：👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
+    # 玩家行**单行**（2026-09-11 用户要求：与炸金花一致，压成一行）
+    #   `1. Hank 🟢 在局｜投100｜余2400`
+    # 👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
     for index, uid in enumerate(game.players, 1):
         status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
-        mark = "👉 " if uid == current else "   "
-        lines.append(f"{mark}{index}. {await get_name(app, uid)}")
-        lines.append(f"　　{status}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
-    if _cur_name is not None:   # 牌桌底部：超时提示单独一行（原样第 ② 句）
-        lines.append("")
+        mark = PLAYER_MARK if uid == current else PLAYER_PAD
+        lines.append(f"{mark}{index}. {await get_name(app, uid)} {status}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
+    if _cur_name is not None:   # ⏰ 紧贴玩家列表（用户要求「靠近玩家」，不再空一行丢在底部）
         lines.append(f"⏰ <b>{_cur_name}</b> 请在 {game.turn_timeout} 秒内行动。")
     return "\n".join(lines)
 
@@ -4006,6 +4146,17 @@ class HorseRace:
 # ---------- 权限与命令 ----------
 def is_auth(cid): return cid in AUTHORIZED_GROUPS
 def is_bot_admin(uid): return uid in BOT_ADMINS
+
+
+def _admin_notify_ids():
+    """后台通知收件人：ADMIN_USER_ID + 全部 BOT_ADMINS（去重、过滤无效 0）。
+
+    ⚠️ 必须放在**模块级**：网页后台作用域里原本有个同名的嵌套函数，
+    模块级代码（如定时/后台任务）调不到它（pyflakes: undefined name）。
+    """
+    ids = {ADMIN_USER_ID}
+    ids.update(BOT_ADMINS)
+    return sorted(i for i in ids if i)
 async def need_auth(update, context=None):
     # 授权只针对「群聊」：私聊没有群组概念，不应被「群组未授权」拦截。
     # 私聊里真正受限的游戏/管理命令，各自还有 require_group_chat / is_bot_admin 兜底。
@@ -4067,7 +4218,7 @@ async def cmd_help(update, context):
     if not await need_auth(update, context): return
     text = "🎮 娱乐机器人功能帮助\n\n🎲 发起游戏：\n/开始 或 /help - 查看本帮助\n/德州 - 发起德州扑克（统一积分）\n/赛车 - 发起赛车\n/21点 - 发起21点\n/炸金花 - 发起炸金花（闷牌偷鸡）\n/大话骰 - 发起大话骰（吹牛骰盅，掉骰子制）\n\n💰 积分系统：\n/签到 - 每日签到领积分\n/我的积分 - 积分/等级/签到状态\n/积分排行 - 积分排行榜\n/积分商城 - 用积分换好物\n红包 总数 份数 - 发积分红包（如：红包 1000 5）\n转赠 数量 - 把积分转给群里成员（回复消息用）\n充值 数量 - 申请购买积分（管理员确认到账）\n\n🎟️ 邀请有礼：\n/link - 领取本群专属邀请链接\n今日邀请排行 / 本月邀请排行 / 总邀请排行 - 查看邀请榜\n\n📊 数据查询：\n/盈亏 - 当日盈亏榜\n/排行 - 总积分榜\n流水 - 查自己的积分来源明细（红包/抽水/邀请奖励等；回复他人消息查对方仅限管理员）\n/结束 - 终止当前游戏\n\n🏪 称号商店：\n/商店 - 查看可兑换称号\n/兑换 称号名 - 用积分换称号"
     if is_bot_admin(update.effective_user.id):
-        text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
+        text += "\n\n🔧 管理命令（仅管理员）：\n/授权 - 授权当前群使用\n取消授权 - 取消群授权\n/授权列表 - 查看已授权群\n/加管理员 /减管理员 /管理员列表\n/加积分(负数即减) /赛季分\n/拉黑 /解黑 /黑名单 - 封禁违规玩家\n/列表 - 管理总览(管理员/授权群/黑名单三合一)\n/备份 /恢复\n/同步标签 - 把「积分称号」补同步成 Telegram 成员标签（老玩家标签缺失时用；加「全部」=所有授权群）\n💡 快捷加减分：在群里回复某玩家的消息，然后发「/add 数量」即可给他加/减分（负数即减），不用输ID"
     await send_reply(update, context, text)
 
 # ---------- 21点 界面与逻辑 ----------
@@ -4144,7 +4295,7 @@ async def update_blackjack_ui(game, app):
         lines.append("")
         # 👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
         for i, uid in enumerate(game.players, 1):
-            mark = "👉 " if uid == curr_uid else "   "
+            mark = PLAYER_MARK if uid == curr_uid else PLAYER_PAD
             lines.append(f"{mark}{i}. {await get_name(app, uid)} {game.get_card_str(game.hands[uid])} ({game.get_score(game.hands[uid])})")
         text = "\n".join(lines)
 
@@ -4749,19 +4900,23 @@ def dice_buttons(game, uid):
 
 
 async def dice_table_text(game, app):
-    wild = sget("DICE_WILD_ONE")
-    _n = len(game.players)
-    _rules = ("｜1=万能" if wild else "｜无万能局")
-    if _dice_rule_on("DICE_STRAIGHT_ZERO", _n): _rules += "｜顺子=0"
-    if _dice_rule_on("DICE_LEOPARD_BONUS", _n): _rules += "｜豹子+2/+1"
-    if _dice_duel_mode(game): _rules += "｜一把定胜负"
-    lines = [f"🎲 大话骰（吹牛）｜第 {game.hand_no} 手",
-             f"💰 奖池 {game.pot}｜底注 {sget('DICE_ANTE')}｜在场骰子 {game.total_dice()} 颗" + _rules]
-    if game.last_action:
-        lines.append(f"🔔 上一手：{game.last_action}")
+    """牌桌文案（2026-09-11 用户「字太多有点复杂」→ 按《大话骰文案精简方案》减肥）。
+
+    精简 4 刀（11 行 → 9 行）：
+      ① 删规则串（`1=万能｜顺子=0｜豹子+2/+1｜一把定胜负`）—— **等待房第一条消息已完整写过**，
+         想看规则点「🎲 看牌」弹窗里也有；牌桌每局重复一遍纯占屏。
+      ② 删 `🔔 上一手` —— 与 `🎙 当前叫牌` 说的是同一件事（当前叫牌就是最新一手）。
+      ③ 删 `💡 玩法提示` 静态行 —— 看一次就会背的说明书，移到「🎲 看牌」弹窗。
+      ④ 标题/奖池/叫牌/玩家行各砍冗余字（`（吹牛）`、`底注 N`、`在场骰子`→`场上`、`5颗`→`5`、`余`→空格）。
+    ⛔ 保留（排版铁律，别再动）：`⏳`+`⏰` 两行、`━━━` 分隔线、玩家行 👉/占位对齐。
+    """
+    lines = [
+        f"🎲 大话骰 · 第{game.hand_no}手",
+        f"💰 奖池 {game.pot} ｜ 场上 {game.total_dice()} 颗骰",
+    ]
     if game.bid:
         bc, bf, bidder = game.bid
-        lines.append(f"🎙 当前叫牌：{bc}个{bf}（{await get_name(app, bidder)}）")
+        lines.append(f"🎙 {bc}个{bf}（{await get_name(app, bidder)}）")
     cur = game.actor if game.phase == "playing" else None
     lines.append("━━━━━━━━━━━━━━━━━")
     # ⚠️ 行动提示 = 两行（见 poker_table_text 同款注释，用户选「拆回两行·原样」，别再合并）
@@ -4769,20 +4924,33 @@ async def dice_table_text(game, app):
     if cur:
         _cur_name = await get_name(app, cur)
         lines.append(f"⏳ 当前行动：{_cur_name}（加码或开骰）")
-    # 两段式玩家行（§4.14 铁律：名字一行、数据一行全角缩进，手机端不挤）
-    # 2026-09-11 用户要求：👉 留在行首，非行动者补 3 个半角空格占位 → 序号落在同一列
+    # 玩家行**单行**（2026-09-11 用户要求：与炸金花一致压成一行）
+    #   `1. Hank 🎲5 🟢 2400` / 出局 `1. Hank 💀 已出局`
+    # 👉 留在行首；非行动者用 PLAYER_PAD 占位（与 PLAYER_MARK 等宽）→ 序号落在同一列
     for index, uid in enumerate(game.players, 1):
-        mark = "👉 " if uid == cur else "   "
-        lines.append(f"{mark}{index}. {await get_name(app, uid)}")
+        mark = PLAYER_MARK if uid == cur else PLAYER_PAD
         if uid in game.out:
-            lines.append("　　💀 已出局")
+            lines.append(f"{mark}{index}. {await get_name(app, uid)} 💀 已出局")
         else:
-            lines.append(f"　　🎲{game.dice[uid]}颗 🟢 余{game.chips[uid]}")
-    if _cur_name is not None:   # 牌桌底部：超时提示单独一行（原样第 ② 句）
-        lines.append("")
+            lines.append(f"{mark}{index}. {await get_name(app, uid)} 🎲{game.dice[uid]} 🟢 {game.chips[uid]}")
+    if _cur_name is not None:   # ⏰ 紧贴玩家列表（用户要求「靠近玩家」）
         lines.append(f"⏰ <b>{_cur_name}</b> 请在 {sget('DICE_THINK_SECONDS')} 秒内加码或开骰。")
-    lines.append("💡 群里打「6个3」叫牌｜「➕ 加一个」懒得算｜「🎯 开骰」掀盅｜点「🎲 看牌」弹窗看骰")
     return "\n".join(lines)
+
+
+def dice_rules_text(game):
+    """本局大话骰规则一句话摘要（给「🎲 看牌」弹窗用，别再往牌桌上堆）。"""
+    _n = len(game.players)
+    bits = ["1 是万能牌" if sget("DICE_WILD_ONE") else "无万能局（1 只是普通点数）"]
+    if _dice_rule_on("DICE_STRAIGHT_ZERO", _n):
+        bits.append("顺子（含 1 补位）算 0 个")
+    if _dice_rule_on("DICE_LEOPARD_BONUS", _n):
+        bits.append("豹子加成：纯豹 +2、花豹 +1")
+    if _dice_duel_mode(game):
+        bits.append("一把定胜负，开骰即结算")
+    else:
+        bits.append("输家掉一颗骰子，掉光出局")
+    return "📖 " + "；".join(bits) + "。\n💡 群里打「6个3」叫牌｜「➕ 加一个」懒得算｜「🎯 开骰」掀盅"
 
 
 async def show_dice_action(game, app):
@@ -5570,10 +5738,9 @@ async def jinhua_table_text(game, app):
     for index, uid in enumerate(game.players, 1):
         status = "❌弃" if uid in game.folded else "🔥全下" if uid in game.all_in else "🟢"
         seen_mark = "👁" if uid in game.seen else "🎴"
-        mark = "👉 " if uid == current else "   "
+        mark = PLAYER_MARK if uid == current else PLAYER_PAD
         lines.append(f"{mark}{index}. {await get_name(app, uid)} {seen_mark}{status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
-    if _cur_name is not None:   # 牌桌底部：超时提示单独一行（原样第 ② 句）
-        lines.append("")
+    if _cur_name is not None:   # ⏰ 紧贴玩家列表（用户要求「靠近玩家」）
         lines.append(f"⏰ <b>{_cur_name}</b> 请在 {sget('TURN_TIMEOUT')} 秒内行动。")
     return "\n".join(lines)
 
@@ -7066,22 +7233,58 @@ async def cmd_add(update, context):
 # 设计：榜单消息只有一条，翻页 = **原地编辑**同一条（不会刷屏、也不会产生「删除了消息」提示）。
 # 消息**不自动删除**（要留给人翻页），所以不走 send_reply / REPLY_DELETE_SECONDS。
 RANK_PAGE_SIZE = 10
+# 网页后台「群组管理」4 张记录表每页条数（2026-09-11 用户：别写死条数，要能翻页看全部）
+WEB_LIST_PAGE_SIZE = 20
+
+
+def _web_page_bounds(total, page, per=WEB_LIST_PAGE_SIZE):
+    """网页列表分页边界（纯函数，便于测试）：返回 (start, end, page, pages)。
+
+    page 为 1 基；越界自动夹紧到 [1, pages]；total=0 时 pages=1、返回空切片。
+    """
+    try:
+        per = max(1, int(per or WEB_LIST_PAGE_SIZE))
+    except (TypeError, ValueError):
+        per = WEB_LIST_PAGE_SIZE
+    total = max(0, int(total or 0))
+    pages = max(1, (total + per - 1) // per)
+    try:
+        page = int(page or 1)
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, min(page, pages))
+    # end 夹到 total：空表返回 (0,0,...)，末页不多算（切片更精确）
+    return (page - 1) * per, min(page * per, total), page, pages
 
 _RANK_TITLES = {
     "points":       "💰 积分榜",
-    "points_lv":    "💰 积分排行榜",
-    "profit":       "🏆 累计盈利榜（总数）",
+    "profit":       "🏆 累计盈利榜",
     "texas_day":    "🃏 德州当日盈亏",
     "other_profit": "🎮 其他游戏累计盈亏",
+}
+# 按钮用**短标签**（2026-09-11 用户截图「这么宽吗 UI都不会做了？」）：
+# 按钮文案过长会把整条消息撑宽，且 Telegram 会把超长按钮截断成「累计盈利榜（总数…」。
+_RANK_BTNS = {
+    "points":       "💰 积分榜",
+    "profit":       "🏆 累计盈利",
+    "texas_day":    "🃏 德州当日",
+    "other_profit": "🎮 其他累计",
 }
 # 每种榜可切换到哪个榜（切换按钮行）；单元素 = 无切换按钮
 _RANK_GROUPS = {
     "points":       ("points", "profit"),
     "profit":       ("points", "profit"),
-    "points_lv":    ("points_lv",),
     "texas_day":    ("texas_day", "other_profit"),
     "other_profit": ("texas_day", "other_profit"),
 }
+# 榜单里昵称最长显示多少字（长昵称会把消息撑得很宽，超出用 … 收尾）
+RANK_NAME_MAX = 12
+
+
+def clip_name(name, n=RANK_NAME_MAX):
+    """榜单/表格里截断过长昵称，避免把消息气泡撑宽（2026-09-11 用户报「这么宽吗」）。"""
+    s = (name or "").strip()
+    return s if len(s) <= n else s[:n] + "…"
 _RANK_SIGNED = {"profit", "other_profit", "texas_day"}   # 盈亏榜带 +/-；积分榜不带
 
 
@@ -7090,7 +7293,7 @@ def _rank_source(cid, kind):
 
     一律用 `.get` / 遍历取值，**不用裸下标读 defaultdict**（读了会凭空建幽灵键，见 SKILL §4.31）。
     """
-    if kind in ("points", "points_lv"):
+    if kind == "points":
         rows = list(game_chips.get(cid, {}).items())
     elif kind == "texas_day":
         rows = list(poker_profit_by_date.get(business_date(), {}).get(cid, {}).items())
@@ -7117,12 +7320,15 @@ async def _rank_page_text(app, cid, kind, page):
         lines.append("暂无记录")
         return "\n".join(lines), page, pages
     for i, (uid, value) in enumerate(chunk, start + 1):
-        name = await get_name(app, uid, cid=cid)
+        # 昵称截断：防长昵称把整条消息撑宽（用户 2026-09-11 截图投诉）
+        name = clip_name(await get_name(app, uid, cid=cid))
         if kind in _RANK_SIGNED:
             lines.append(f"{rank_marker(i)} {name}：{value:+d}")
-        elif kind == "points_lv":
+        elif kind == "points":
+            # 2026-09-11 用户「积分排名和积分排行感觉好乱」→ **两个榜合并成一个**：
+            # 积分 + 等级同一行显示，不再有「积分榜 / 积分排行榜」两个几乎一样的榜。
             lv = _level_of(cid, uid)[0]
-            lines.append(f"{rank_marker(i)} {name}：{value}" + (f"｜{lv}" if lv else ""))
+            lines.append(f"{rank_marker(i)} {name}：{value}" + (f" {lv}" if lv else ""))
         else:
             lines.append(f"{rank_marker(i)} {name}：{value}")
     lines.append("")
@@ -7131,16 +7337,17 @@ async def _rank_page_text(app, cid, kind, page):
 
 
 def _rank_keyboard(kind, page, pages, kinds):
+    """翻页/切换键盘。文案刻意用最短形式——按钮文案会把整条消息撑宽（用户 2026-09-11 截图投诉）。"""
     rows = []
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"rk_{kind}_{page - 1}"))
-    nav.append(InlineKeyboardButton(f"第 {page + 1}/{pages} 页", callback_data="rk_noop_0"))
+        nav.append(InlineKeyboardButton("‹", callback_data=f"rk_{kind}_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="rk_noop_0"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"rk_{kind}_{page + 1}"))
+        nav.append(InlineKeyboardButton("›", callback_data=f"rk_{kind}_{page + 1}"))
     rows.append(nav)
     if len(kinds) > 1:
-        rows.append([InlineKeyboardButton(_RANK_TITLES[k], callback_data=f"rk_{k}_0") for k in kinds])
+        rows.append([InlineKeyboardButton(_RANK_BTNS[k], callback_data=f"rk_{k}_0") for k in kinds])
     return InlineKeyboardMarkup(rows)
 
 
@@ -7766,7 +7973,9 @@ async def on_button(update, context):
                     if _lk: ds += f"（{_lk}·叫本点数算 +{2 if _lk == '纯豹' else 1}）"
                 bid_txt = f"{game.bid[0]}个{game.bid[1]}" if game.bid else "待开叫（你是先叫方）"
                 # 2026-09-11 用户要求：直接弹窗，不走私聊（弹窗只有点击者本人可见，不泄露骰子）
-                await q.answer(f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}", show_alert=True)
+                # 2026-09-11 玩法提示/本局规则从牌桌搬到这里（牌桌文案减肥，想看规则点一下就看得到）
+                await q.answer(f"🎲 你的骰子（仅你可见）：{ds}\n🎙 当前叫牌：{bid_txt}\n\n"
+                               + dice_rules_text(game), show_alert=True)
                 return
             if data == "dice_raise":
                 if uid != game.actor or game.phase != "playing":
@@ -9532,23 +9741,88 @@ def _level_rank(lv_name):
             return i
     return -1
 
-async def _level_sync_member_tag(app, cid, uid, level_name=None):
-    """积分称号同步成员标签（用户截图「积分称号同步成员标签开关」）。
+# ── Telegram 成员标签（setChatMemberTag）─────────────────────────────────────
+# 🚨 2026-09-11 用户报「有积分的人也没标签」——**根因：这个方法在 PTB 20.8 里根本不存在**
+#    （成员标签是 Bot API 9.1 才加的新能力），旧代码 `await app.bot.set_chat_member_tag(...)`
+#    每次都抛 AttributeError，又被 `except Exception` 静默吞掉（只写 debug 日志）
+#    ⇒ **上线以来一次都没成功过**，且不报错、不写警告，完全无声。
+#    修法：走 PTB 官方通用出口 `Bot.do_api_request`（20.8 新增，文档明说"用于本库还没
+#    封装的新方法"）；若将来 PTB 升级并原生支持，则自动优先用原生方法。
+TAG_MAX_LEN = 16       # 官方限制：0-16 字符，且**不允许 emoji**
+TAG_SYNC_MAX = 300     # 单次批量同步人数上限（防风控）
+TAG_SYNC_GAP = 0.06    # 每次调用间隔（秒）
 
-    用 Telegram 原生 set_chat_member_tag 把当前等级名写成成员标签（群昵称后的标识）。
-    失败静默：非管理员/权限不足/群不支持 都不影响主流程（等级系统照常工作）。
+
+def _tag_sanitize(s):
+    """把等级名净化成合法成员标签：≤16 字符、去掉 emoji 等非法字符。
+
+    官方 setChatMemberTag：tag 必须 0-16 字符且**不能含 emoji**，否则 400 TAG_INVALID。
+    等级名是后台可改的（用户很可能写成「👑 大神」），所以必须清洗后再发。
+    返回空串 = 这个等级名没法当标签；调用方**必须跳过**（用空值调 API 等于清除标签！）。
+    """
+    out = []
+    for ch in str(s or ""):
+        o = ord(ch)
+        if o < 128:
+            if ch.isprintable():
+                out.append(ch)
+            continue
+        # 只保留 CJK / 日文假名 / 韩文；emoji、零宽连接符 U+200D、
+        # 变体选择符 U+FE0F、各类符号一律丢弃。
+        if (0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF
+                or 0x3040 <= o <= 0x30FF or 0xAC00 <= o <= 0xD7A3):
+            out.append(ch)
+    return "".join(out).strip()[:TAG_MAX_LEN]
+
+
+async def _bot_api(bot, snake, camel, **params):
+    """调用 Telegram Bot API —— 兼容 PTB 尚未封装的新方法。
+
+    优先原生 `Bot.<snake>`；本库没有就退回通用出口 `Bot.do_api_request("<camel>")`。
+    这样 PTB 升级前后都不用改业务代码。
+    """
+    fn = getattr(bot, snake, None)
+    if callable(fn):
+        return await fn(**params)
+    return await bot.do_api_request(camel, api_kwargs=dict(params))
+
+
+def _tag_err_hint(exc):
+    """把 setChatMemberTag 的报错翻译成管理员能照着做的人话（排障用）。"""
+    txt = str(exc).lower()
+    if "not enough rights" in txt or "403" in txt or "forbidden" in txt:
+        return "bot 缺少「管理标签」权限 → 群管理→管理员→给 bot 勾上「管理标签」"
+    if "tag_invalid" in txt or "emoji" in txt:
+        return "等级名含 emoji 或超过 16 字（Telegram 不允许）→ 改成纯文字等级名"
+    if "supergroup" in txt or "channel chats only" in txt:
+        return "该群类型不支持成员标签（仅群/超级群可用）"
+    if "participant not found" in txt or "user not found" in txt:
+        return "对方已不在群里"
+    if "chat not found" in txt:
+        return "群不存在或 bot 不在该群"
+    return str(exc)[:120]
+
+
+async def _level_sync_member_tag(app, cid, uid, level_name=None, return_reason=False):
+    """把积分称号同步成 Telegram 成员标签（群昵称后面那个小标识）。
+
+    返回 True/False；`return_reason=True` 时返回 `(ok, 说明)` 供排障提示。
+    失败**绝不抛**：权限不足 / 群不支持 都不影响等级系统主流程。
     """
     try:
         if not sget("LEVEL_SYNC_TAG"):
-            return False
+            return (False, "后台「积分称号同步成员标签」开关是关的") if return_reason else False
         lv = level_name if level_name is not None else _level_of(cid, uid)[0]
-        if not lv:
-            return False
-        await app.bot.set_chat_member_tag(cid, uid, lv[:16])
-        return True
-    except Exception:
+        tag = _tag_sanitize(lv)
+        if not tag:
+            return (False, "未达任何等级（或等级名全是 emoji）") if return_reason else False
+        await _bot_api(app.bot, "set_chat_member_tag", "setChatMemberTag",
+                       chat_id=cid, user_id=uid, tag=tag)
+        return (True, tag) if return_reason else True
+    except Exception as exc:
         logger.debug("同步成员标签失败（已忽略）：cid=%s uid=%s", cid, uid, exc_info=True)
-        return False
+        return (False, _tag_err_hint(exc)) if return_reason else False
+
 
 
 async def _check_level_change(app, cid, uid, old_earned, new_earned, balance=None):
@@ -9605,6 +9879,115 @@ async def _check_level_drop_on_spend(app, cid, uid, before_balance):
                                              level=new_lv or "无", balance=new_v))
     except Exception:
         logger.exception("扣分降级检查失败（已忽略）")
+
+
+async def sync_member_tags(app, cid, limit=TAG_SYNC_MAX):
+    """把群内「有积分账本 / 有钱包」的成员称号，批量补同步成 Telegram 成员标签。
+
+    为什么要批量补：称号→标签只在**升级瞬间**同步（`_check_level_change`），
+    存量玩家早在修复前就满级了，永远不会再触发 ⇒ 必须能补历史欠账。
+    候选 = total_earned ∩ game_chips 的键（= 签到过/玩过游戏的人）。
+    读一律用 `.get`（防 defaultdict 幽灵键，见 SKILL §4.31）。
+
+    返回 {total, ok, skip, fail, reasons{原因:人数}, first_err}。
+    """
+    res = {"total": 0, "ok": 0, "skip": 0, "fail": 0, "reasons": {}, "first_err": ""}
+    uids = set()
+    for src in (total_earned.get(cid) or {}, game_chips.get(cid) or {}):
+        for u in list(src.keys()):
+            try:
+                u = int(u)
+            except (TypeError, ValueError):
+                continue
+            if u > 0:
+                uids.add(u)
+    uids = sorted(uids)[:max(1, int(limit or TAG_SYNC_MAX))]
+    res["total"] = len(uids)
+    for i, uid in enumerate(uids):
+        ok, info = await _level_sync_member_tag(app, cid, uid, return_reason=True)
+        if ok:
+            res["ok"] += 1
+        elif info.startswith("未达任何等级") or info.startswith("后台"):
+            res["skip"] += 1
+        else:
+            res["fail"] += 1
+            res["reasons"][info] = res["reasons"].get(info, 0) + 1
+            if not res["first_err"]:
+                res["first_err"] = info
+        if i + 1 < len(uids):
+            await asyncio.sleep(TAG_SYNC_GAP)   # 限速，防风控
+    return res
+
+
+def _tag_sync_line(cid, r):
+    """把一次同步结果格式化成给人看的几行（群命令与网页后台共用同一份文案）。"""
+    if not r["total"]:
+        return [f"· <code>{cid}</code>：没有有积分的成员，跳过"]
+    line = f"· <code>{cid}</code>：✅ 成功 {r['ok']} 人"
+    if r["skip"]:
+        line += f" ｜ ⏭ 无等级 {r['skip']} 人"
+    if r["fail"]:
+        line += f" ｜ ❌ 失败 {r['fail']} 人"
+    out = [line]
+    for why, n in sorted(r["reasons"].items(), key=lambda kv: -kv[1])[:2]:
+        out.append(f"    ↳ {n} 人：{html.escape(why)}")
+    return out
+
+
+async def sync_member_tags_notify(app, cid):
+    """后台（网页按钮）触发的批量同步：跑完给管理员私聊回报，避免网页请求长时间挂住。"""
+    try:
+        r = await sync_member_tags(app, cid)
+        txt = "🏷 <b>成员标签同步完成（网页后台发起）</b>\n" + "\n".join(_tag_sync_line(cid, r))
+        for rid in _admin_notify_ids():
+            try:
+                await app.bot.send_message(chat_id=rid, text=txt, parse_mode="HTML")
+            except Exception:
+                pass
+        return r
+    except Exception:
+        logger.exception("网页后台同步成员标签失败")
+        return None
+
+
+async def cmd_sync_tags(update, context):
+    """补同步成员标签（管理员）：把「积分称号」写进 Telegram 成员标签。
+
+    用法：群里发「同步标签」；「同步标签 全部」＝对全部授权群依次同步。
+    典型场景：修好了标签功能后，把老玩家的标签一次性补齐。
+    """
+    if not await need_auth(update, context):
+        return
+    if not is_bot_admin(update.effective_user.id):
+        await send_reply(update, context, "⛔ 只有管理员能同步成员标签。")
+        return
+    if not sget("LEVEL_SYNC_TAG"):
+        await send_reply(update, context,
+                         "⚠️ 后台「积分称号同步成员标签」开关是关闭状态，先开启再同步。")
+        return
+    try:
+        arg = (context.args[0] if context.args else "").strip()
+    except Exception:
+        arg = ""
+    cid = update.effective_chat.id
+    if arg in ("全部", "所有", "all"):
+        targets = sorted(int(c) for c in AUTHORIZED_GROUPS if int(c) < 0)
+    else:
+        if cid > 0:
+            await send_reply(update, context, "⚠️ 成员标签只在群里生效，请到群里发本命令。")
+            return
+        targets = [cid]
+    if not targets:
+        await send_reply(update, context, "⚠️ 没有可同步的群。")
+        return
+
+    await send_reply(update, context,
+                     f"🏷 开始同步成员标签…（{len(targets)} 个群，每群最多 {TAG_SYNC_MAX} 人）")
+    lines = []
+    for c in targets:
+        lines += _tag_sync_line(c, await sync_member_tags(context.application, c))
+    await send_reply(update, context, "🏷 <b>成员标签同步完成</b>\n" + "\n".join(lines))
+
 
 def _mall_price(item):
     """商品价格兼容新旧结构（旧 {"name","value"} / 新 {"name","price",...}）。"""
@@ -9790,9 +10173,13 @@ async def cmd_my_points(update, context):
     return reply
 
 async def cmd_points_rank(update, context):
-    # 2026-09-11 用户要求：改为分页（一页 10 人），带等级标签
+    """积分排行 —— 2026-09-11 用户「积分排名和积分排行感觉好乱」→ 与「积分榜」**合并为同一个榜**。
+
+    现在 `积分榜`/`积分排行`/`排行`/`排行榜` 全部输出「💰 积分榜」，每行显示「积分 + 等级」，
+    不再存在两个名字不同、内容几乎一样的榜。
+    """
     if not await need_auth(update, context): return
-    await send_rank_page(update, context, "points_lv")
+    await send_rank_page(update, context, "points")
 
 def _parse_dt_bj(spec):
     """'YYYY-MM-DD HH:MM' 或 'YYYY-MM-DD'（北京时间）→ aware datetime；空/非法返回 None。"""
@@ -12607,6 +12994,9 @@ TG_MENU = [list(t) for t in DEFAULT_TG_MENU]
 async def post_init(app):
     global _bot_app, _bot_loop, _BOT_USERNAME
     _bot_app, _bot_loop = app, asyncio.get_running_loop()  # 供网页后台跨线程调用 bot API（入群批准/拒绝等）
+    # 【必须最先做】打上「默认自动删除」补丁：必须早于本函数里任何一次发送，
+    # 否则 post_init 期间发出的消息不受默认回收管辖（2026-09-11 用户第 N 次追问后根治）。
+    install_autodelete_default(app)
     # 兑换按钮深链需要 bot 用户名（https://t.me/<用户名>?start=...）；启动时缓存
     try:
         _me = await app.bot.get_me()
@@ -12747,6 +13137,8 @@ CMD_ALIASES = {
     "invite_report": cmd_invite_report, "报备入群": cmd_invite_report, "邀请报备": cmd_invite_report,
     "schedule_status": cmd_schedule_status, "定时任务": cmd_schedule_status, "调度状态": cmd_schedule_status,
     "流水": cmd_points_flow, "积分流水": cmd_points_flow,
+    "同步标签": cmd_sync_tags, "同步头衔": cmd_sync_tags, "刷新标签": cmd_sync_tags,
+    "synctags": cmd_sync_tags,
     "今日邀请排行": cmd_invite_rank_today, "本月邀请排行": cmd_invite_rank_month, "总邀请排行": cmd_invite_rank_all,
 }
 # 动态指令接管默认名：网页改指令后，旧默认名同步失效
@@ -13394,10 +13786,8 @@ def start_health_server():
                     "</div></body></html>").encode("utf-8")
 
         def _admin_receivers():
-            """后台通知收件人：ADMIN_USER_ID + 全部 BOT_ADMINS（去重、过滤无效 0）。"""
-            ids = {ADMIN_USER_ID}
-            ids.update(BOT_ADMINS)
-            return sorted(i for i in ids if i)
+            """后台通知收件人（与模块级 _admin_notify_ids 同一口径，避免两处逻辑漂移）。"""
+            return _admin_notify_ids()
 
         def _send_otp_code(ip):
             """生成验证码并私聊发给所有管理员。返回 (otp_token, code, err)。
@@ -13746,25 +14136,52 @@ def start_health_server():
                 "<div class='sub' style='margin-bottom:8px'>点 ▲▼ 调整左侧菜单顺序，立即生效并保存</div>"
                 + sort_rows + "</div>")
 
-        def _members_body(mode="ops"):
-            """群组管理分页：records=进出记录+入群申请；ops=白名单+操作记录。
-            （成员档案已独立成「群组成员列表」mlist 页，这里不再重复展示）"""
+        def _members_body(mode="ops", pgs=None):
+            """群组管理：records=进出记录+入群申请；ops=白名单+操作记录。
+
+            （成员档案已独立成「群组成员列表」mlist 页，这里不再重复展示）
+            2026-09-11 用户报「就知道偷懒 只取前30条 不会弄成可以翻页啊」→ 4 张表全部改真分页：
+            每张表独立页码（p_rec/p_jr/p_wl/p_op），每页 WEB_LIST_PAGE_SIZE 条，标题显示总条数。
+            """
+            pgs = pgs or {}
+
             def tbl(headers, rows):
                 if not rows:
                     return "<div class='sub' style='margin-top:8px'>暂无记录</div>"
                 head = "".join(f"<th>{h}</th>" for h in headers)
                 body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
                 return f"<table class='tbl'><tr>{head}</tr>{body}</table>"
+
+            def paged(rows, key, sub):
+                """按页码切片 + 生成翻页条。返回 (本页行, 页脚 html)。"""
+                total = len(rows)
+                s, e, page, pages = _web_page_bounds(total, pgs.get(key, 1))
+                if pages <= 1:
+                    foot = (f"<div class='sub' style='margin-top:8px'>共 {total} 条</div>"
+                            if total else "")
+                    return rows[:e], foot
+                def _lnk(p, label, dis):
+                    if dis:
+                        return f"<span class='sub' style='margin:0'>{label}</span>"
+                    return (f"<a href='/page/members/{sub}?{key}={p}'>"
+                            f"<button type='button'>{label}</button></a>")
+                foot = ("<div style='margin-top:12px;display:flex;gap:10px;align-items:center'>"
+                        + _lnk(page - 1, "‹ 上一页", page <= 1)
+                        + f"<span class='sub' style='margin:0'>共 {total} 条 · 第 {page}/{pages} 页</span>"
+                        + _lnk(page + 1, "下一页 ›", page >= pages) + "</div>")
+                return rows[s:e], foot
+
             parts = []
             if mode == "records":
-                # 1. 退群/入群记录
-                lv_rows = [[r.get("ts", ""), html.escape(chat_name_cache.get(cid) or str(cid)),
-                            html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
-                            "🟢 入群" if r.get("join") else "🔴 退群"]
-                           for cid, lst in leave_records.items() for r in reversed(lst[-30:])]
-                parts.append("<div class='card'><h1>进出记录（最近 30 条）</h1>"
+                # 1. 退群/入群记录（全部群合并，按时间倒序，真分页）
+                lv_all = [[r.get("ts", ""), html.escape(chat_name_cache.get(cid) or str(cid)),
+                           html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                           "🟢 入群" if r.get("join") else "🔴 退群"]
+                          for cid, lst in leave_records.items() for r in reversed(lst)]
+                lv_rows, lv_foot = paged(lv_all, "p_rec", "records")
+                parts.append("<div class='card'><h1>📥 进出记录</h1>"
                              "<div class='sub'>bot 需为群管理员才能收到成员进出事件</div>"
-                             + tbl(["时间", "群", "成员", "ID", "类型"], lv_rows[-30:]) + "</div>")
+                             + tbl(["时间", "群", "成员", "ID", "类型"], lv_rows) + lv_foot + "</div>")
                 # 2. 入群申请（可直接网页批准/拒绝）
                 def _jr_btn(op, c, u, label):
                     return ("<form style='display:inline;margin:0' method='post' action='/adminops2'>"
@@ -13772,27 +14189,30 @@ def start_health_server():
                             f"<input type='hidden' name='cid' value='{c}'>"
                             f"<input type='hidden' name='uid' value='{u}'>"
                             f"<button type='submit' style='padding:2px 10px;cursor:pointer'>{label}</button></form>")
-                jq_rows = [[r.get("ts", ""), html.escape(chat_name_cache.get(cid) or str(cid)),
-                            html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
-                            _jr_btn("join_approve", cid, r.get("uid", ""), "✅ 批准") + " " + _jr_btn("join_decline", cid, r.get("uid", ""), "🚫 拒绝")]
-                           for cid, lst in join_requests.items() for r in reversed(lst[-30:])]
-                parts.append("<div class='card'><h1>📨 入群申请（最近 30 条）</h1>"
+                jq_all = [[r.get("ts", ""), html.escape(chat_name_cache.get(cid) or str(cid)),
+                           html.escape(r.get("name", "")), f"<code>{r.get('uid', '')}</code>",
+                           _jr_btn("join_approve", cid, r.get("uid", ""), "✅ 批准") + " " + _jr_btn("join_decline", cid, r.get("uid", ""), "🚫 拒绝")]
+                          for cid, lst in join_requests.items() for r in reversed(lst)]
+                jq_rows, jq_foot = paged(jq_all, "p_jr", "records")
+                parts.append("<div class='card'><h1>📨 入群申请</h1>"
                              "<div class='sub'>群需开启「申请加入」；可直接在此批准或拒绝，无需去 Telegram 客户端</div>"
-                             + tbl(["时间", "群", "申请人", "ID", "操作"], jq_rows[-30:]) + "</div>")
+                             + tbl(["时间", "群", "申请人", "ID", "操作"], jq_rows) + jq_foot + "</div>")
             else:
                 # 白名单
-                wl_rows = [[cid, html.escape(user_names.get(u, str(u))), f"<code>{u}</code>"]
-                           for cid, us in whitelist.items() for u in sorted(us)]
+                wl_all = [[cid, html.escape(user_names.get(u, str(u))), f"<code>{u}</code>"]
+                          for cid, us in whitelist.items() for u in sorted(us)]
+                wl_rows, wl_foot = paged(wl_all, "p_wl", "ops")
                 parts.append("<div class='card'><h1>🛡️ 白名单</h1>"
                              "<div class='sub'>免疫禁言/群封；群里回复消息发「加白」「删白」管理，或在成员列表页加白</div>"
-                             + tbl(["群", "成员", "ID"], wl_rows) + "</div>")
+                             + tbl(["群", "成员", "ID"], wl_rows) + wl_foot + "</div>")
                 # 管理员操作记录
-                op_rows = [[r.get("ts", ""), f"群 {r.get('cid', '')}", html.escape(r.get("admin", "")),
-                            html.escape(r.get("action", "")), html.escape(r.get("target", ""))]
-                           for r in reversed(admin_logs[-30:])]
-                parts.append("<div class='card'><h1>📜 管理员操作记录（最近 30 条）</h1>"
+                op_all = [[r.get("ts", ""), f"群 {r.get('cid', '')}", html.escape(r.get("admin", "")),
+                           html.escape(r.get("action", "")), html.escape(r.get("target", ""))]
+                          for r in reversed(admin_logs)]
+                op_rows, op_foot = paged(op_all, "p_op", "ops")
+                parts.append("<div class='card'><h1>📜 管理员操作记录</h1>"
                              "<div class='sub'>bot 执行的每次禁言/封禁/白名单操作自动留档</div>"
-                             + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows[-30:]) + "</div>")
+                             + tbl(["时间", "群", "操作人", "动作", "对象"], op_rows) + op_foot + "</div>")
             return "".join(parts)
 
         def _botlog_page():
@@ -13943,8 +14363,14 @@ def start_health_server():
                                    "<button type='submit' onclick=\"return confirm('确定清空该群所有成员的积分？此操作不可恢复！')\" "
                                    "style='padding:4px 12px;cursor:pointer;background:#8a3b3b;color:#fff;border:none;border-radius:6px'>💰 清除全部积分</button></form>") if sel_cid else ""
                 impexp_link = ("<a href='/page/points/impexp'><button type='button' style='padding:4px 12px;cursor:pointer;background:#3d6b4f;color:#fff;border:none;border-radius:6px'>📥 积分导入/导出</button></a>") if sel_cid else ""
+                # 🏷 一键补齐成员标签（2026-09-11：标签功能此前从未生效过，老玩家全都没标签）
+                tag_sync_btn = (f"<form style='display:inline;margin:0' method='post' action='/memops'>"
+                                f"<input type='hidden' name='op' value='tag_sync_all'>"
+                                f"<input type='hidden' name='cid' value='{sel_cid}'>"
+                                "<button type='submit' onclick=\"return confirm('将把该群所有「有积分」成员的标签覆盖为他们的积分称号，确定？')\" "
+                                "style='padding:4px 12px;cursor:pointer;background:#4a5f8a;color:#fff;border:none;border-radius:6px'>🏷 同步成员标签</button></form>") if sel_cid else ""
                 body = (f"<h1>{gicon} {gname}</h1><div class='sub'>数据来自成员档案+积分账本+进群事件；封禁/踢出需要 bot 是群管理员</div>{msg}"
-                        f"<div class='card'><h3>🧹 批量操作 {chips_clear_btn} {clear_warn_btn} {impexp_link}</h3></div>"
+                        f"<div class='card'><h3>🧹 批量操作 {chips_clear_btn} {clear_warn_btn} {tag_sync_btn} {impexp_link}</h3></div>"
                         "<div class='card' style='margin-top:18px'>"
                         "<form method='get' action='/page/members/mlist' style='display:flex;flex-wrap:wrap;gap:10px;align-items:end'>"
                         f"<div><div class='sub'>群</div><select name='cid' required>{_group_options(selected=sel_cid)}</select></div>"
@@ -13976,7 +14402,8 @@ def start_health_server():
                             + _field_rows("members/join") +
                             _savebar() + "</form></div>")
                 else:
-                    body = f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}" + _members_body("records" if sub == "records" else "ops")
+                    body = (f"<h1>{gicon} {gname}</h1><div class='sub'>数据只读展示，管理操作在群里用命令完成</div>{msg}"
+                            + _members_body("records" if sub == "records" else "ops", pgs=flt))
             elif gkey == "admin":
                 def _btn(action, key, val, label, color="#7c6cf0"):
                     return (f"<form style='display:inline' method='post' action='/adminops2'>"
@@ -15120,7 +15547,10 @@ def start_health_server():
                            "never": 1 if qs.get("never", [""])[0] else 0, "silent": _qi("silent", 0),
                            "join_from": (qs.get("join_from", [""])[0] or "")[:16],
                            "join_to": (qs.get("join_to", [""])[0] or "")[:16],
-                           "page": max(1, _qi("page", 1)), "per": _qi("per", 20)}
+                           "page": max(1, _qi("page", 1)), "per": _qi("per", 20),
+                           # 群组管理 4 张记录表各自的页码（2026-09-11 用户：写死条数看不到老记录）
+                           "p_rec": max(1, _qi("p_rec", 1)), "p_jr": max(1, _qi("p_jr", 1)),
+                           "p_wl": max(1, _qi("p_wl", 1)), "p_op": max(1, _qi("p_op", 1))}
                     try:
                         self._send(200, _admin_page(m.group(1), sub=m.group(2), saved=saved, bad=bad, note=note, err=err, uid=sel_uid, flt=flt)); return
                     except Exception as _pg_exc:
@@ -15422,6 +15852,19 @@ def start_health_server():
                         game_chips.pop(cid_, None)
                         save_data()
                         _mb(note=f"🧹 已清空群 {cid_} 全部成员积分（{n} 人）")
+                    elif op == "tag_sync_all" and cid_:
+                        # 🏷 补齐成员标签：长任务丢后台跑，跑完私聊回报，避免网页请求挂住
+                        if not (_bot_app and _bot_loop):
+                            _mb(err="bot 尚未启动完成，请稍后再试"); return
+                        if not sget("LEVEL_SYNC_TAG"):
+                            _mb(err="后台「积分称号同步成员标签」开关是关闭状态，请先开启"); return
+                        asyncio.run_coroutine_threadsafe(
+                            sync_member_tags_notify(_bot_app, cid_), _bot_loop)   # 非阻塞
+                        admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid_,
+                                           "admin": "网页后台", "action": "同步成员标签",
+                                           "target": str(cid_)})
+                        save_data()
+                        _mb(note=f"🏷 已在后台开始同步群 {cid_} 的成员标签（最多 {TAG_SYNC_MAX} 人），完成后会私聊通知管理员")
                     elif op == "wl_add" and cid_ and uid_:
                         whitelist.setdefault(cid_, set()).add(uid_); save_data()
                         admin_logs.append({"ts": now_bj().strftime("%Y-%m-%d %H:%M"), "cid": cid_,

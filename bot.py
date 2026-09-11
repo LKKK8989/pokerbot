@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1810"
+BOT_VERSION = "2026-09-11-1840"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -582,7 +582,7 @@ def group_set(cid, key, value):
     GROUP_SETTINGS.setdefault(cid, {})[key] = value
     return True
 
-def group_effective(cid, key, default=None):
+def group_effective(cid, key, default=None):   # wiring-ok: 群级覆盖基础设施，暂未接线（待清理）
     """该群当前生效值 + 是否来自群级覆盖。返回 (值, 是否覆盖)。网页回显用。"""
     try:
         cid = int(cid or 0)
@@ -610,7 +610,7 @@ def cur_cid():
         return 0
 
 @asynccontextmanager
-async def group_ctx_async(cid):
+async def group_ctx_async(cid):   # wiring-ok: 群级覆盖基础设施，暂未接线（待清理）
     tok = _CUR_CID.set(_safe_cid(cid))
     try: yield
     finally: _CUR_CID.reset(tok)
@@ -656,7 +656,7 @@ def sget(name, default=None):
                     return v
     return globals().get(name, default)
 
-def sget_key(key, default=None):
+def sget_key(key, default=None):   # wiring-ok: 按 settings 键读的便捷包装，暂未接线（待清理）
     """按 settings 键读（等价 sget，键名更顺手时用）。"""
     gname = _KEY2VAR.get(key)
     if gname is None:
@@ -2523,7 +2523,7 @@ async def safe_edit(bot, cid, msg_id, text, **kwargs):
     return None
 
 
-async def safe_send_photo(bot, cid, photo, caption, **kwargs):
+async def safe_send_photo(bot, cid, photo, caption, **kwargs):   # wiring-ok: 未被调用的带退避发图包装（待清理）
     for attempt in range(2):
         try: return await bot.send_photo(chat_id=cid, photo=photo, caption=caption, **kwargs)
         except RetryAfter as exc:
@@ -4868,7 +4868,7 @@ async def _dice_del_bid_msg(context, cid, message):
     """
     try:
         await message.delete()
-    except Exception:
+    except Exception:  # silent-ok: 删不掉玩家叫牌文本只是外观，绝不能影响牌局主流程
         try:
             await context.bot.delete_message(cid, message.message_id)
         except Exception:
@@ -6911,7 +6911,7 @@ async def _invite_push_card_to_private(context, uid, cid, cname):
     try:
         await context.bot.send_message(uid, body, parse_mode="HTML", reply_markup=kb)
         return True
-    except Exception:
+    except Exception:  # silent-ok: 已有 logger.info + 返回 False，调用方会回退群内发送
         logger.info("邀请面板推送私聊失败 uid=%s（用户可能未 /start）", uid)
         return False
 
@@ -8696,7 +8696,7 @@ async def _forcesub_enforce(update, context):
     # 未订阅：删消息 + 发提示（订阅其一即可；提示可自动删除）
     try:
         await context.bot.delete_message(chat_id=cid, message_id=message.message_id)
-    except Exception:
+    except Exception:  # silent-ok: 删不掉未订阅者消息只是外观；踢人失败已单独记 exception
         pass
     _prev = _fsub_ok_cache[cid].get(f"warned:{user.id}")
     if not (_prev and now - _prev < 60):   # 60 秒内只发一次提示，不刷屏
@@ -8947,7 +8947,7 @@ async def _join_gate_check(context, cid, member, name):
     try:
         await context.bot.send_message(
             cid, f"🚪 {html.escape(str(name))} 未满足进群要求（{'、'.join(reasons)}），已移出。")
-    except Exception:
+    except Exception:  # silent-ok: 提示发不出不影响已完成的移出动作；踢人失败已单独记 exception
         pass
     return False
 
@@ -8970,7 +8970,7 @@ async def _join_verify_pass(context, cid, uid, name, msg_id=0):
             pass
     try:
         await context.bot.send_message(cid, str(sget("JOIN_VERIFY_OK_MSG")).replace("{name}", html.escape(str(name))))
-    except Exception:
+    except Exception:  # silent-ok: 通过提示发不出只是外观；解除限制失败已单独记 exception
         pass
 
 async def join_verify_sweep(context):
@@ -9157,7 +9157,7 @@ async def announce_sweep(context):
     try:
         await context.bot.send_message(
             ADMIN_USER_ID, f"📣 定时群公告已推送到 {n}/{len(AUTHORIZED_GROUPS)} 个群。")
-    except Exception:
+    except Exception:  # silent-ok: 各群推送失败已逐群记 exception；管理员汇总发不出无妨
         pass
 
 async def observe_check_sweep(context):
@@ -9749,8 +9749,46 @@ def _level_rank(lv_name):
 #    修法：走 PTB 官方通用出口 `Bot.do_api_request`（20.8 新增，文档明说"用于本库还没
 #    封装的新方法"）；若将来 PTB 升级并原生支持，则自动优先用原生方法。
 TAG_MAX_LEN = 16       # 官方限制：0-16 字符，且**不允许 emoji**
-TAG_SYNC_MAX = 300     # 单次批量同步人数上限（防风控）
-TAG_SYNC_GAP = 0.06    # 每次调用间隔（秒）
+TAG_SYNC_MAX = 300     # 单次批量同步人数上限
+# 🔴 2026-09-11 生产实测（用户截图）：间隔 0.06 秒 = 每秒 16.7 次
+#    ⇒ 第 27 个人就被「Flood control exceeded. Retry in 38 seconds」挡下。
+#    Telegram 对「管理员类操作」约 **20 次/分钟/群**，故间隔取 3.2 秒（≈18.7 次/分）。
+#    ⚠️ **这个数字是查出来的，不是我拍脑袋定的**——上一轮写 0.06 就是没查资料，
+#    教训：凡是"速率/上限/配额"类参数，必须先查平台文档或实测，不能凭感觉填个小的。
+TAG_SYNC_GAP = 3.2
+TAG_SYNC_RETRIES = 2   # 遇限速：同一个人最多等 RetryAfter 后重试几次
+_TAG_SYNCING = set()   # 正在同步的群 ID（防重复触发：用户连点两次会打爆配额）
+
+
+def _tag_retry_after(text):
+    """从「Flood control exceeded. Retry in 38 seconds」里提取需等待的秒数；没有则 0。"""
+    mm = re.search(r"retry in\s+(\d+)\s*second", str(text or ""), re.I)
+    if mm:
+        return int(mm.group(1))
+    mm = re.search(r"(\d+)\s*second", str(text or ""), re.I)
+    return int(mm.group(1)) if mm else 0
+
+
+async def _tag_group_admins(app, cid):
+    """一次调用取回群内「管理员 + 群主」的 ID 集合。
+
+    🚨 为什么必须排除他们：Telegram 规定**只有群创建者能改管理员的标签**
+    （管理员的自定义头衔 = 同一字段）。bot 不是群主 ⇒ 给管理员设标签必定返回
+    400 `CHAT_CREATOR_REQUIRED`（用户截图里固定失败的 9 人就是管理员）。
+    提前排除 = 不浪费配额、不产生吓人的"失败"数字。
+    取不到（权限不足等）就返回空集合，让后续照常尝试（失败也只记 skip）。
+    """
+    try:
+        admins = await app.bot.get_chat_administrators(cid)
+    except Exception:  # silent-ok: 取不到管理员名单只降级为「不排除」，失败项会按 skip 归类，不会崩
+        logger.debug("取群管理员失败（同步标签将不做排除）：cid=%s", cid, exc_info=True)
+        return set()
+    out = set()
+    for a in admins or []:
+        u = getattr(a, "user", None)
+        if u is not None and getattr(u, "id", None):
+            out.add(int(u.id))
+    return out
 
 
 def _tag_sanitize(s):
@@ -9790,6 +9828,10 @@ async def _bot_api(bot, snake, camel, **params):
 def _tag_err_hint(exc):
     """把 setChatMemberTag 的报错翻译成管理员能照着做的人话（排障用）。"""
     txt = str(exc).lower()
+    if "chat_creator_required" in txt:
+        return "对方是群主/管理员：Telegram 规定只有群主能改管理员标签，bot 改不了（属正常，已自动跳过）"
+    if "flood" in txt or "retry in" in txt or "too many requests" in txt or "429" in txt:
+        return "Telegram 限速（调用太密）→ 已自动等待后重试"
     if "not enough rights" in txt or "403" in txt or "forbidden" in txt:
         return "bot 缺少「管理标签」权限 → 群管理→管理员→给 bot 勾上「管理标签」"
     if "tag_invalid" in txt or "emoji" in txt:
@@ -9801,6 +9843,27 @@ def _tag_err_hint(exc):
     if "chat not found" in txt:
         return "群不存在或 bot 不在该群"
     return str(exc)[:120]
+
+
+def _tag_is_expected_skip(reason):
+    """这些"失败"是**平台规则决定的、不可能成功**的，应算 skip 而不是 fail（别吓人）。"""
+    return (reason.startswith("未达任何等级") or reason.startswith("后台")
+            or reason.startswith("对方是群主/管理员") or reason.startswith("对方已不在群"))
+
+
+
+async def _tag_call(bot, cid, uid, tag):
+    """发一次 setChatMemberTag。返回 `(ok, 人话说明, 需等待秒数)`，**绝不抛**。
+
+    需等待秒数 > 0 表示被 Telegram 限速（Flood control），调用方应等这么久再重试。
+    """
+    try:
+        await _bot_api(bot, "set_chat_member_tag", "setChatMemberTag",
+                       chat_id=cid, user_id=uid, tag=tag)
+        return True, tag, 0
+    except Exception as exc:
+        logger.debug("同步成员标签失败：cid=%s uid=%s", cid, uid, exc_info=True)
+        return False, _tag_err_hint(exc), _tag_retry_after(exc)
 
 
 async def _level_sync_member_tag(app, cid, uid, level_name=None, return_reason=False):
@@ -9816,11 +9879,10 @@ async def _level_sync_member_tag(app, cid, uid, level_name=None, return_reason=F
         tag = _tag_sanitize(lv)
         if not tag:
             return (False, "未达任何等级（或等级名全是 emoji）") if return_reason else False
-        await _bot_api(app.bot, "set_chat_member_tag", "setChatMemberTag",
-                       chat_id=cid, user_id=uid, tag=tag)
-        return (True, tag) if return_reason else True
-    except Exception as exc:
-        logger.debug("同步成员标签失败（已忽略）：cid=%s uid=%s", cid, uid, exc_info=True)
+        ok, info, _wait = await _tag_call(app.bot, cid, uid, tag)
+        return (ok, info) if return_reason else ok
+    except Exception as exc:  # silent-ok: 最外层双保险（_tag_call 内部已保证不抛），非实际失败路径
+        logger.debug("同步成员标签异常：cid=%s uid=%s", cid, uid, exc_info=True)
         return (False, _tag_err_hint(exc)) if return_reason else False
 
 
@@ -9881,64 +9943,158 @@ async def _check_level_drop_on_spend(app, cid, uid, before_balance):
         logger.exception("扣分降级检查失败（已忽略）")
 
 
-async def sync_member_tags(app, cid, limit=TAG_SYNC_MAX):
+async def sync_member_tags(app, cid, limit=TAG_SYNC_MAX, progress=None):
     """把群内「有积分账本 / 有钱包」的成员称号，批量补同步成 Telegram 成员标签。
 
     为什么要批量补：称号→标签只在**升级瞬间**同步（`_check_level_change`），
     存量玩家早在修复前就满级了，永远不会再触发 ⇒ 必须能补历史欠账。
-    候选 = total_earned ∩ game_chips 的键（= 签到过/玩过游戏的人）。
-    读一律用 `.get`（防 defaultdict 幽灵键，见 SKILL §4.31）。
 
-    返回 {total, ok, skip, fail, reasons{原因:人数}, first_err}。
+    生产实测踩到的两个坑（2026-09-11 用户截图，都已处理）：
+      · **群主 / 管理员会被平台拒绝** —— Telegram 规定只有**群创建者**能改管理员标签
+        ⇒ 400 `CHAT_CREATOR_REQUIRED`。提前取管理员名单排除，不浪费配额。
+      · **按每秒十几次调会被限速** —— `Flood control exceeded. Retry in 38 seconds`。
+        现在按 `TAG_SYNC_GAP`(3.2s) 限速，且遇限速会**等 RetryAfter 后重试**并把间隔翻倍。
+
+    返回 {total, ok, skip, fail, reasons, admins_skipped, flood, busy, first_err}。
     """
-    res = {"total": 0, "ok": 0, "skip": 0, "fail": 0, "reasons": {}, "first_err": ""}
-    uids = set()
-    for src in (total_earned.get(cid) or {}, game_chips.get(cid) or {}):
-        for u in list(src.keys()):
-            try:
-                u = int(u)
-            except (TypeError, ValueError):
-                continue
-            if u > 0:
-                uids.add(u)
-    uids = sorted(uids)[:max(1, int(limit or TAG_SYNC_MAX))]
-    res["total"] = len(uids)
-    for i, uid in enumerate(uids):
-        ok, info = await _level_sync_member_tag(app, cid, uid, return_reason=True)
-        if ok:
-            res["ok"] += 1
-        elif info.startswith("未达任何等级") or info.startswith("后台"):
-            res["skip"] += 1
-        else:
-            res["fail"] += 1
-            res["reasons"][info] = res["reasons"].get(info, 0) + 1
-            if not res["first_err"]:
-                res["first_err"] = info
-        if i + 1 < len(uids):
-            await asyncio.sleep(TAG_SYNC_GAP)   # 限速，防风控
-    return res
+    res = {"total": 0, "ok": 0, "skip": 0, "fail": 0, "reasons": {},
+           "skip_reasons": {}, "admins_skipped": 0, "flood": 0, "busy": False, "first_err": ""}
+    if cid in _TAG_SYNCING:
+        res["busy"] = True      # 已在同步中：直接返回，避免用户连点把配额打爆
+        return res
+    _TAG_SYNCING.add(cid)
+    try:
+        if not sget("LEVEL_SYNC_TAG"):
+            return res
+        # 候选 = 有累计账本 ∪ 有钱包的人（一律 .get，防 defaultdict 幽灵键，§4.31）
+        cand = set()
+        for src in (total_earned.get(cid) or {}, game_chips.get(cid) or {}):
+            for u in list(src.keys()):
+                try:
+                    u = int(u)
+                except (TypeError, ValueError):
+                    continue
+                if u > 0:
+                    cand.add(u)
+        # 群主 + 管理员：平台不让 bot 改他们的标签，提前排除（否则一批必然失败）
+        admin_ids = await _tag_group_admins(app, cid)
+        res["admins_skipped"] = len(cand & admin_ids)
+        uids = sorted(cand - admin_ids)[:max(1, int(limit or TAG_SYNC_MAX))]
+        res["total"] = len(uids)
+        gap = TAG_SYNC_GAP
+        for i, uid in enumerate(uids):
+            tag = _tag_sanitize(_level_of(cid, uid)[0])
+            if not tag:                       # 没等级 / 净化后为空 ⇒ 绝不能发空标签（=清除标签）
+                res["skip"] += 1
+                # 记下"为什么跳过"：只报「跳过 1 人」管理员会以为功能又坏了
+                _why = "未达任何等级（等级名为空，或等级名净化后为空）"
+                res["skip_reasons"][_why] = res["skip_reasons"].get(_why, 0) + 1
+            else:
+                ok, info = False, ""
+                for _attempt in range(TAG_SYNC_RETRIES + 1):
+                    ok, info, wait = await _tag_call(app.bot, cid, uid, tag)
+                    if ok or wait <= 0:
+                        break
+                    res["flood"] += 1
+                    gap = min(gap * 2, 30.0)  # 被限速 ⇒ 自适应拉长间隔，别硬冲
+                    await asyncio.sleep(min(wait, 90) + 0.5)
+                if ok:
+                    res["ok"] += 1
+                elif _tag_is_expected_skip(info):
+                    res["skip"] += 1      # 平台规则决定的失败，别算进"失败"吓人
+                    res["skip_reasons"][info] = res["skip_reasons"].get(info, 0) + 1
+                else:
+                    res["fail"] += 1
+                    res["reasons"][info] = res["reasons"].get(info, 0) + 1
+                    if not res["first_err"]:
+                        res["first_err"] = info
+            if progress and (i + 1) % 20 == 0:
+                try:
+                    await progress(i + 1, len(uids), res)
+                except Exception:
+                    logger.debug("同步进度回调失败（已忽略）", exc_info=True)
+            if i + 1 < len(uids):
+                await asyncio.sleep(gap)
+        return res
+    finally:
+        _TAG_SYNCING.discard(cid)
+
+
+def _tag_eta_seconds(n):
+    """按当前限速估算批量同步耗时（秒），用于提前告诉用户要等多久。"""
+    try:
+        return max(0, int(n or 0)) * TAG_SYNC_GAP
+    except (TypeError, ValueError):
+        return 0
+
+
+_BG_TASKS = set()   # 后台长任务引用（**必须持引用**，否则可能被 GC 回收，见 SKILL §4.28）
+
+
+def _spawn_background(coro):
+    """把一个协程丢到后台跑，并持引用防 GC。返回 Task 或 None（无事件循环时）。
+
+    通用工具：任何"耗时长但不该阻塞用户"的任务（批量同步、批量导出…）都走这里。
+    """
+    try:
+        t = asyncio.create_task(coro)
+    except RuntimeError:
+        logger.debug("无事件循环，后台任务未启动", exc_info=True)
+        return None
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
 
 
 def _tag_sync_line(cid, r):
-    """把一次同步结果格式化成给人看的几行（群命令与网页后台共用同一份文案）。"""
+    """把一次同步结果格式化成给人看的几行（群命令与网页后台共用同一份文案）。
+
+    2026-09-11 生产实测后改进：原来只报「成功/失败」两个数，用户看到
+    「失败 21 人」会以为功能又坏了 —— 其实里面混着**平台规则决定的必然跳过**
+    （群主/管理员），和**限速后自动重试成功**的人。现在分开报，并给出可执行的下一步。
+    """
+    if r.get("busy"):
+        return [f"· <code>{cid}</code>：⏳ 正在同步中，请等这一轮跑完再点（避免触发限速）"]
     if not r["total"]:
-        return [f"· <code>{cid}</code>：没有有积分的成员，跳过"]
+        skip = r.get("admins_skipped", 0)
+        extra = f"（另有 {skip} 位群主/管理员，平台不允许改其标签）" if skip else ""
+        return [f"· <code>{cid}</code>：没有需要同步的成员，跳过{extra}"]
     line = f"· <code>{cid}</code>：✅ 成功 {r['ok']} 人"
+    if r.get("admins_skipped"):
+        line += f" ｜ 🚫 群主/管理员 {r['admins_skipped']} 人（平台不允许 bot 改）"
     if r["skip"]:
-        line += f" ｜ ⏭ 无等级 {r['skip']} 人"
+        line += f" ｜ ⏭ 跳过 {r['skip']} 人"
     if r["fail"]:
         line += f" ｜ ❌ 失败 {r['fail']} 人"
     out = [line]
+    if r.get("flood"):
+        out.append(f"    ↳ 期间被 Telegram 限速 {r['flood']} 次，已自动等待并加长间隔")
+    # 跳过原因也列出来（不列的话管理员只看到「跳过 N 人」，会以为功能又坏了）
+    for why, n in sorted((r.get("skip_reasons") or {}).items(), key=lambda kv: -kv[1])[:2]:
+        out.append(f"    ↳ ⏭ {n} 人：{html.escape(why)}")
     for why, n in sorted(r["reasons"].items(), key=lambda kv: -kv[1])[:2]:
-        out.append(f"    ↳ {n} 人：{html.escape(why)}")
+        out.append(f"    ↳ ❌ {n} 人：{html.escape(why)}")
     return out
 
 
 async def sync_member_tags_notify(app, cid):
-    """后台（网页按钮）触发的批量同步：跑完给管理员私聊回报，避免网页请求长时间挂住。"""
+    """后台（网页按钮）触发的批量同步：丢后台跑，完成后私聊回报；中途报一次进度。
+
+    为什么必须非阻塞 + 报进度：按 3.2 秒/人的限速，100 人要约 5 分钟。
+    网页请求不能挂那么久，用户也不该看到"点了没反应"。
+    """
     try:
-        r = await sync_member_tags(app, cid)
-        txt = "🏷 <b>成员标签同步完成（网页后台发起）</b>\n" + "\n".join(_tag_sync_line(cid, r))
+        async def _prog(done, total, r):
+            txt = (f"🏷 <b>成员标签同步中…</b>\n群 <code>{cid}</code>："
+                   f"{done}/{total}（已成功 {r['ok']}）")
+            for rid in _admin_notify_ids():
+                try:
+                    await app.bot.send_message(chat_id=rid, text=txt)
+                except Exception:
+                    pass
+
+        r = await sync_member_tags(app, cid, progress=_prog)
+        txt = "🏷 <b>成员标签同步完成</b>\n" + "\n".join(_tag_sync_line(cid, r))
         for rid in _admin_notify_ids():
             try:
                 await app.bot.send_message(chat_id=rid, text=txt, parse_mode="HTML")
@@ -9981,12 +10137,24 @@ async def cmd_sync_tags(update, context):
         await send_reply(update, context, "⚠️ 没有可同步的群。")
         return
 
+    # 非阻塞：按限速 3.2 秒/人，100 人要 5 分钟 —— 同步等会让这条命令看起来"卡死"。
+    # 改成后台跑 + 完成后在群里回报（同网页后台口径）。
     await send_reply(update, context,
-                     f"🏷 开始同步成员标签…（{len(targets)} 个群，每群最多 {TAG_SYNC_MAX} 人）")
-    lines = []
-    for c in targets:
-        lines += _tag_sync_line(c, await sync_member_tags(context.application, c))
-    await send_reply(update, context, "🏷 <b>成员标签同步完成</b>\n" + "\n".join(lines))
+                     f"🏷 已开始在后台同步成员标签（{len(targets)} 个群，上限 {TAG_SYNC_MAX} 人/群）\n"
+                     f"⏳ 按 Telegram 限速约需 {_tag_eta_seconds(TAG_SYNC_MAX) // 60} 分钟内完成，跑完汇报结果。")
+    _spawn_background(_sync_tags_report(context.application, targets, cid))
+
+
+async def _sync_tags_report(app, targets, report_cid):
+    """后台跑完批量同步后在群里回报（群命令入口用）。"""
+    try:
+        lines = []
+        for c in targets:
+            lines += _tag_sync_line(c, await sync_member_tags(app, c))
+        await safe_send(app.bot, report_cid,
+                        "🏷 <b>成员标签同步完成</b>\n" + "\n".join(lines), parse_mode="HTML")
+    except Exception:
+        logger.exception("群命令同步成员标签失败")
 
 
 def _mall_price(item):
@@ -10373,7 +10541,7 @@ async def _deep_start_confirm(q, data, context):
         ok, txt = await _season_exchange_execute(context, cid, uid, idx)
     try:
         await q.message.edit_text(txt)
-    except Exception:
+    except Exception:  # silent-ok: 编辑旧消息失败时，结果已通过 q.answer 弹给用户
         pass
     await q.answer(txt if not ok else "🎉 兑换成功！", show_alert=not ok)
 
@@ -10893,7 +11061,7 @@ async def _lottery_refresh_announce(app, cid, lo):
     try:
         await app.bot.edit_message_text(chat_id=cid, message_id=lo["msg_id"],
                                         text=_lottery_announce_text(lo), parse_mode="HTML")
-    except Exception:
+    except Exception:  # silent-ok: 刷新参与人数失败不影响参与，下次有人参与会再刷
         pass
 
 async def _lottery_draw(app, cid, lo):
@@ -12503,7 +12671,7 @@ async def _invite_ask_inviter(req, cid, uid, name, context):
                      f"你是被谁邀请进群的？点一下邀请人（计入 TA 的邀请奖励）：",
                 reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
             _inv_dbg(cid, f"[主动问] 已私聊 uid={uid} 选择邀请人（候选 {shown} 人）")
-    except Exception as e:
+    except Exception as e:  # silent-ok: 主动问只是兜底，失败不影响入群申请本身（_inv_dbg 已记录）
         _inv_dbg(cid, f"[主动问] 私聊 uid={uid} 失败（吞并）：{e!r}")
 
 
@@ -16254,7 +16422,7 @@ async def on_app_error(update, context):
         chat = getattr(update, "effective_chat", None) if update is not None else None
         if chat is not None and not net:
             await context.bot.send_message(chat.id, "⚠️ 处理该操作时出错，请稍后重试；已通知管理员排查。")
-    except Exception:
+    except Exception:  # silent-ok: 错误处理器自身绝不能二次抛错：提示发不出也不能再抛
         pass
     try:
         if net:
@@ -16264,7 +16432,7 @@ async def on_app_error(update, context):
                 "多为平台网络抖动或容器重启，bot 一般会自动重连；若群内命令也无反应，请检查平台实例状态。")
         else:
             await context.bot.send_message(ADMIN_USER_ID, f"⚠️ bot 发生未处理异常：{err!r}")
-    except Exception:
+    except Exception:  # silent-ok: 错误处理器自身绝不能二次抛错：提示发不出也不能再抛
         pass
 
 

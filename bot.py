@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-1251"
+BOT_VERSION = "2026-09-11-1325"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -2633,6 +2633,17 @@ async def send_settle(app, cid, text, kb=None, parse_mode="HTML", delete_after=N
     return msgs
 
 
+async def send_settle_rank(app, cid, lines):
+    """【结算榜单专用】把「累计盈利榜」单独发一条消息。
+
+    2026-09-11 用户要求：「把所有游戏的结算画面中的（累计盈利榜）拆开发，不然一个界面太长了，
+    有点刷屏的感觉」——结算正文保持精简，榜单另起一条，同样走 SETTLE_DELETE_SECONDS 回收。
+    lines 为已渲染好的行列表；为空/None 则一条都不发（无榜单就不产生空白消息）。
+    """
+    if not lines: return None
+    return await send_settle(app, cid, "\n".join(lines))
+
+
 async def send_reply(update, context, text, kb=None, parse_mode=None, delete_after=None):
     """【查询类命令必用】查询回复统一出口：发送 + 自动按 REPLY_DELETE_SECONDS 回收。
 
@@ -3469,14 +3480,18 @@ async def settle_poker(game, app):
                     season_points[game.chat_id][uid] = base
                     # 已取消淘汰机制：破产玩家当日剩余时间无法下注，次日 0 点重置为「起始分+兑换底分」后可继续参赛
 
+        # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
+        _rank_lines = None
         if game.mode == "official" and not game.season:
             rank = sorted(poker_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:50]
-            lines.extend(["", "🏆 <b>当日德州累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"])
-            lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
+            if rank:
+                _rank_lines = ["🏆 <b>当日德州累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"]
+                _rank_lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
             
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
         if sget("SETTLE_DELETE_SECONDS") > 0:
             schedule_delete(app, game.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
+        await send_settle_rank(app, game.chat_id, _rank_lines)
         # 牌桌卡片此前结算后一直留在群里，结束后延迟清理
         schedule_delete_ids(app, game.chat_id, game.game_msg_id, sget("PANEL_DELETE_SECONDS"))
         # 单赢场景（只剩一人未弃牌）：提供可选亮牌按钮，尊重德州 muck 规则，不强制亮牌
@@ -3639,7 +3654,7 @@ class HorseRace:
         total_wins = sum(stats)
         odds = self.odds()
         lines = [
-            f"🏁 赛车大赛 {race_id(self.create_time)} 🏁 【下注中】",
+            f"🏁 赛车大赛 {race_id(self.create_time)} 🏁",
             "━" * 14,
             *[f"🏁{'━' * 13}{sget('HORSE_EMOJI')[i]}" for i in range(sget("HORSE_COUNT"))],
             "━" * 14,
@@ -3662,7 +3677,7 @@ class HorseRace:
             lines.append("")
         _banner = race_subsidy_banner(self.auto_started)
         if _banner: lines.append(_banner)
-        lines.extend([f"⏰ 距离开赛还有 {minutes} 分 {seconds:02d} 秒", "🔒 开赛后无法投注", "💡 赔率随下注实时浮动，下注瞬间锁定"])
+        lines.extend([f"⏰ 距离开赛还有 {minutes} 分 {seconds:02d} 秒", "🔒 开赛后锁盘，赔率随注浮动、下注即锁"])
         return "\n".join(lines)
 
     def animation(self):
@@ -3885,15 +3900,18 @@ class HorseRace:
                     else:
                         lines.append(f"{name}：总投注 {stake}｜未命中｜净 {net:+d}")
 
+                # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
+                _rank_lines = None
                 if self.mode == "official":
                     day_rank = sorted(total_profit_by_game(race_profit_by_date, self.chat_id).items(), key=lambda item: item[1], reverse=True)[:50]
-                    lines.extend(["", "🏆 <b>赛车累计盈利榜（总数）</b>", "━━━━━━━━━━━━━━━━━"])
-                    for index, (uid, amount) in enumerate(day_rank, 1):
-                        name = self.name_cache.get(uid)
-                        if not name:
-                            name = await get_name(app, uid)
-                            self.name_cache[uid] = name
-                        lines.append(f"{rank_marker(index)} {name}：{amount:+d}")
+                    if day_rank:
+                        _rank_lines = ["🏆 <b>赛车累计盈利榜（总数）</b>", "━━━━━━━━━━━━━━━━━"]
+                        for index, (uid, amount) in enumerate(day_rank, 1):
+                            name = self.name_cache.get(uid)
+                            if not name:
+                                name = await get_name(app, uid)
+                                self.name_cache[uid] = name
+                            _rank_lines.append(f"{rank_marker(index)} {name}：{amount:+d}")
                 else:
                     lines.extend(["", "🎮 娱乐局：本局不计入正式盈亏榜。"])
                 
@@ -3903,6 +3921,7 @@ class HorseRace:
                 delivered = await safe_send_long(app.bot, self.chat_id, "\n".join(lines), parse_mode="HTML")
                 if sget("SETTLE_DELETE_SECONDS") > 0:
                     schedule_delete(app, self.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
+                await send_settle_rank(app, self.chat_id, _rank_lines)
 
                 if delivered is None:
                     schedule_notice_delete(app, self.chat_id, await safe_send(app.bot, self.chat_id, "⚠️ 赛车已完成结算，但详细结果消息发送失败。积分与当日盈亏已保存，可使用 /cx 查看排行榜。"), kind="settle")
@@ -4212,20 +4231,22 @@ async def update_blackjack_ui(game, app):
 
             text += "\n\n".join(lines)
             
+            # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
+            _rank_lines = None
             if game.mode == "official":
                 bj_rank = sorted(total_profit_by_game(blackjack_profit_by_date, game.chat_id).items(), key=lambda item: item[1], reverse=True)[:30]
-                text += "\n\n🏆 <b>21点 累计盈利榜（总数）</b>\n"
-                rank_lines = []
-                for i, (u, a) in enumerate(bj_rank, 1):
-                    name = game.name_cache.get(u) or await get_name(app, u)
-                    game.name_cache[u] = name
-                    rank_lines.append(f"{rank_marker(i)} {name}：{a:+d}")
-                text += "\n".join(rank_lines)
+                if bj_rank:
+                    _rank_lines = ["🏆 <b>21点 累计盈利榜（总数）</b>"]
+                    for i, (u, a) in enumerate(bj_rank, 1):
+                        name = game.name_cache.get(u) or await get_name(app, u)
+                        game.name_cache[u] = name
+                        _rank_lines.append(f"{rank_marker(i)} {name}：{a:+d}")
                 
             await safe_delete(app.bot, game.chat_id, game.game_msg_id)
             settled_msgs = await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
             if sget("SETTLE_DELETE_SECONDS") > 0:
                 schedule_delete(app, game.chat_id, settled_msgs, sget("SETTLE_DELETE_SECONDS"))
+            await send_settle_rank(app, game.chat_id, _rank_lines)
         except Exception:
             logger.exception("21点结算显示失败")
             if not payments_applied:
@@ -4911,6 +4932,10 @@ async def start_dice_wait_timeout(game, app):
                 await start_dice_turn_timer(game, app)
         else:
             await refund_dice(game, app, f"⌛ 大话骰等待 {_wait} 秒不足 2 人，房间已自动解散。")
+    # 必须把任务挂到 game.wait_task 上：
+    # ① 不启动 → 等待房永不解散（2026-09-11 事故）；
+    # ② 不持有引用 → 任务可能被事件循环 GC 掉。
+    game.wait_task = asyncio.create_task(countdown())
 
 
 async def _dice_notify_dropped(game, app):
@@ -5703,14 +5728,18 @@ async def settle_jinhua(game, app):
             lines.extend(["", "比牌惩罚："])
             for payer, payee, amount in game.penalty_log:
                 lines.extend([f"{names.get(payer, str(payer))} 倒赔 {amount} 给 {names.get(payee, str(payee))}", ""])
+        # 累计盈利榜单独发一条（2026-09-11 用户要求：结算正文太长像刷屏，榜单拆开发）
+        _rank_lines = None
         if game.mode == "official":
             rank = sorted(jinhua_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:50]
-            lines.extend(["", "🏆 <b>当日炸金花累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"])
-            lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
+            if rank:
+                _rank_lines = ["🏆 <b>当日炸金花累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"]
+                _rank_lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
         await safe_delete(app.bot, game.chat_id, game.game_msg_id)
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
         if sget("SETTLE_DELETE_SECONDS") > 0:
             schedule_delete(app, game.chat_id, delivered, sget("SETTLE_DELETE_SECONDS"))
+        await send_settle_rank(app, game.chat_id, _rank_lines)
         if delivered is None:
             schedule_notice_delete(app, game.chat_id, await safe_send(app.bot, game.chat_id, "⚠️ 炸金花已完成结算，但详细结算消息发送失败。"), kind="settle")
     except Exception:
@@ -8958,8 +8987,9 @@ async def on_text(update, context):
                                                    user_names.get(user.id) or user.first_name or "")
                 if _npts:
                     _app = context.application
-                    asyncio.create_task(_check_level_change(
-                        _app, cid, user.id, _old, _earn_get(cid, user.id)))
+                    # 持有引用：裸 create_task 的任务可能被事件循环 GC 掉，升级公告会悄悄丢失
+                    background_tasks.add(asyncio.create_task(_check_level_change(
+                        _app, cid, user.id, _old, _earn_get(cid, user.id))))
         except Exception:
             logger.exception("成员档案记录异常（已吞并）")
         # 合格邀请结算（事件驱动）：被邀请人在本群发言后即时判定是否达标（发奖/待达标）
@@ -10857,7 +10887,7 @@ async def _guess_close(cid, app):
         logger.exception("竞猜封盘看板刷新异常（已吞并）")
     # 兜底：管理员迟迟不结算/撤销时自动退款，绝不让玩家积分卡在奖池里（重启也捞不回来）
     if GUESS_AUTO_SETTLE_MINUTES and GUESS_AUTO_SETTLE_MINUTES > 0:
-        try: asyncio.create_task(_guess_auto_settle(cid, app))
+        try: background_tasks.add(asyncio.create_task(_guess_auto_settle(cid, app)))
         except Exception: pass
 
 

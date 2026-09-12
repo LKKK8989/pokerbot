@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-11-2330"
+BOT_VERSION = "2026-09-12-0905"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -1690,6 +1690,35 @@ def rank_marker(index):
     return RANK_ICONS[index - 1] if 1 <= index <= len(RANK_ICONS) else f"🔸{index}"
 
 
+def user_link(uid, name_html):
+    """把（已转义的）展示名包成**蓝色可点文本链接** → 点名字直接跳到该玩家的 Telegram 资料页。
+
+    2026-09-12 用户要求：「所有的积分榜或者能显示排名的东西，用户的名字都改成蓝色文本链接，
+    像我当时改积分兑换那个兑换一样，就是点那个玩家的名称就跳转到他的页面」。
+    用 Telegram 的 `tg://user?id=` 文本提及（text mention）实现：客户端渲染成蓝色、点击弹资料页，
+    观感与「积分兑换」面板的蓝色 `<a href>` 一致。
+
+    ⚠️ name_html 必须是**已经 HTML 转义**的展示名（get_name / html.escape 的产物），
+       这里**不再 escape** —— 二次转义会把昵称里的 & < > 变成可见的 &amp; 实体。
+    ⚠️ uid 必须 > 0：幽灵/占位 key（0、负数）拼出来的链接点不开，直接退回纯文本。
+    """
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return name_html
+    if uid <= 0:
+        return name_html
+    return f"<a href=\"tg://user?id={uid}\">{name_html}</a>"
+
+
+def rank_line(index, uid, name_html, tail):
+    """排行榜单行统一渲染：`🥇 <蓝色可点名字>：+120`。
+
+    tail 是名字后面的整段（含全角冒号），由各游戏自己拼，保证各榜原有格式不变。
+    """
+    return f"{rank_marker(index)} {user_link(uid, name_html)}{tail}"
+
+
 def total_profit_by_game(game_profit, chat_id):
     """聚合某游戏所有日期的盈亏为累计总数。"""
     total = defaultdict(int)
@@ -2624,37 +2653,6 @@ async def safe_edit(bot, cid, msg_id, text, **kwargs):
     return None
 
 
-async def safe_edit_ok(bot, cid, msg_id, text, **kwargs):
-    """编辑消息并**明确区分成功/失败**：True=画面已是最新，False=真失败（必须重发）。
-
-    与 `safe_edit` 的差别只有一个，但对「自愈」是决定性的：Telegram 的
-    `Message is not modified` 被算作**成功**（说明正文+键盘都已经是对的，无需动作），
-    而 `safe_edit` 把所有失败都吞成 None，调用方无法判断「要不要重发」——
-    2026-09-11 群友「德州卡了」就是死在这里：编辑失败后画面永远停在旧状态。
-    """
-    if not msg_id: return False
-    kwargs.setdefault("parse_mode", "HTML")
-    hit_retry_after = False
-    for _ in range(2):
-        try:
-            await bot.edit_message_text(chat_id=cid, message_id=msg_id, text=text, **kwargs)
-            return True
-        except BadRequest as exc:
-            low = str(exc).lower()
-            if "message is not modified" in low: return True
-            if "parse entities" in low and kwargs.get("parse_mode"):
-                kwargs.pop("parse_mode"); continue
-            logger.warning("编辑消息失败（将重发）: %s", exc); return False
-        except RetryAfter as exc:
-            hit_retry_after = True
-            await asyncio.sleep(min(exc.retry_after, 5))
-        except TelegramError:
-            logger.exception("编辑消息失败（将重发）"); return False
-    # 退避重试后仍被限流：**不要**删消息重发 —— 发送配额比编辑更贵，重发只会火上浇油。
-    # 当作「这轮先算了」，看门狗 20 秒内会再来渲染一次，画面自己会追上。
-    return hit_retry_after
-
-
 async def safe_send_photo(bot, cid, photo, caption, **kwargs):   # wiring-ok: 未被调用的带退避发图包装（待清理）
     for attempt in range(2):
         try: return await bot.send_photo(chat_id=cid, photo=photo, caption=caption, **kwargs)
@@ -2824,6 +2822,44 @@ async def send_settle_rank(app, cid, lines):
     return await send_settle(app, cid, "\n".join(lines))
 
 
+TURN_NOTICE_DELETE_SECONDS = 60   # 「轮到谁行动」提醒的存活秒数（2026-09-12 用户指定 1 分钟）
+
+
+async def announce_turn(app, cid, text, old_id=None, seconds=None):
+    """【回合提醒专用】把「轮到谁行动」单独发一条并定时回收，返回新消息 id。
+
+    2026-09-12 用户要求：「把游戏轮到谁行动单独发一条出来提醒玩家（记得设置自动1分钟删除），
+    然后就可以把牌桌文本那个该谁行动删除了」——
+    牌桌正文从此只描述牌局状态（干净、不再每回合变长），提醒本身醒目且不长期占屏。
+
+    为什么顺带删上一条提醒：一局里最密的德州/金花，10 秒内可能连过 3 个回合，
+    只靠 60 秒定时回收会在屏幕上叠出 3 条「⏳ 轮到 X」——同一件事说三遍比不说还吵。
+    因此每次发新提醒就删掉上一条（`old_id`），60 秒定时删除只是最后的兜底。
+
+    ⛔ 与牌桌相反，这里**不存在自愈问题**：提醒是一次性的，删失败/发失败都只是少一条提醒，
+    谁的回合由牌桌按钮 + 回合超时看门狗兜底，绝不允许因为提醒异常把牌局带崩。
+    """
+    secs = TURN_NOTICE_DELETE_SECONDS if seconds is None else int(seconds)
+    if old_id and not text:
+        await safe_delete(app.bot, cid, old_id)   # 本轮无人行动（如已进摊牌）→ 只清掉过期提醒
+        return None
+    if not text:
+        return None
+    try:
+        # 顺序与牌桌一致：**先发新、成功才删旧**。发送失败时旧提醒还在，不会出现「一条提醒都没有」
+        msg = await safe_send(app.bot, cid, text, parse_mode="HTML")
+        if msg:
+            if old_id and old_id != msg.message_id:
+                await safe_delete(app.bot, cid, old_id)
+            if secs > 0:
+                schedule_delete(app, cid, msg, secs)
+            return msg.message_id
+        return old_id   # 发失败 → 保留旧提醒的 id，下一轮还能接着删
+    except Exception:
+        logger.exception("回合提醒发送失败（已吞并，不影响牌局）")
+        return old_id
+
+
 async def send_reply(update, context, text, kb=None, parse_mode=None, delete_after=None):
     """【查询类命令必用】查询回复统一出口：发送 + 自动按 REPLY_DELETE_SECONDS 回收。
 
@@ -2894,6 +2930,36 @@ def schedule_notice_delete(app, cid, message, kind="panel"):
         secs = 0
     if secs > 0:
         schedule_delete(app, cid, message, secs)
+
+
+async def retire_panel(app, cid, msg_id, text, seconds=None):
+    """把一张**常驻**面板/卡片原地改写成一条**短命**状态提示，并排入自动回收。
+
+    【为什么必须有这个函数】（2026-09-12 用户第 N 次报「21点这个不自动删除」）
+    上面那套「默认自动删除」是挂在 `Bot.send_*` 上的 ⇒ 只对**新发送**的消息生效。
+    而用 `safe_edit(..., reply_markup=None)` 把常驻面板**改写**出来的提示
+    **根本不经过 send**，于是永远不会被回收 —— 用户截图里 07:51 / 08:07 两条
+    「21点等待 60 秒无人加入，房间已自动解散。」一直挂到 08:45 就是这个原因。
+    ⚠️ 同一处「编辑了但没排程」在本文件里出现过 6 次：
+      21点等待解散 / `/end bj` / `bj_end` 按钮 / 红包过期 / 红包「已被抢完」卡片 /
+      竞猜封盘看板（这条要留到结算，故改由 `_guess_do_settle`/`_guess_do_cancel` 回收）。
+    ⇒ **统一走本函数**，别再手写 `safe_edit(..., reply_markup=None)`。
+       若某张面板本来就该长期常驻（如赛马「正在奔跑中」的开赛帧），
+       请在该行加 `# autodel-keep` 注释显式说明理由
+       —— `test_autodel_edit_sweep.py` 会全文件扫描并拦住漏网的下一处。
+
+    ⚠️ **先排程、后编辑**：`safe_edit` 失败时旧面板还在（更该收掉），
+       而且极端情况下异常也不会把排程一起吞掉。
+    seconds=None → 用 `PANEL_DELETE_SECONDS`（与 `refund_poker` / 赛车 `refund` 一致）。
+    """
+    secs = sget("PANEL_DELETE_SECONDS") if seconds is None else seconds
+    try:
+        secs = int(secs or 0)
+    except (TypeError, ValueError):
+        secs = 0
+    if secs > 0 and msg_id:
+        schedule_delete_ids(app, cid, msg_id, secs)
+    await safe_edit(app.bot, cid, msg_id, text, reply_markup=None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3182,15 +3248,18 @@ def record_game_flows(cid, nets, typ):
 
 
 async def broadcast_big_win(app, cid, uid, game_name, net, detail=""):
-    """大奖战报：单局净赢超阈值时推送到其他授权群（排除事发群），制造全群气氛。"""
+    """大奖战报：单局净赢超阈值时推送。**事发群必发**，其余授权群一起广播制造气氛。"""
     try:
         if not sget("BROADCAST_ENABLED") or net < max(1, sget("BROADCAST_MIN_AMOUNT")): return
         if cid not in AUTHORIZED_GROUPS: return
         name = await get_name(app, uid, cid=cid)
         extra = f"\n{detail}" if detail else ""
         text = (f"📣 <b>战报快讯</b>\n{game_name}｜{html.escape(name)} 单局豪赢 <b>{net}</b> 积分{extra}")
-        for g in AUTHORIZED_GROUPS:
-            if g == cid: continue
+        # ⚠️ 2026-09-12 修「战报快讯在发生的群不推送，反而推送别的群」：
+        #   老代码遍历授权群时遇到「事发群自己」就跳过 —— 等于把刚中大奖的群排除掉，
+        #   于是它一条战报都收不到，气氛全送给了不相干的群。
+        #   现在事发群固定排第一个（必发），其余授权群照旧广播。
+        for g in [cid] + [x for x in AUTHORIZED_GROUPS if x != cid]:
             await safe_send(app.bot, g, text, parse_mode="HTML")
     except Exception:
         logger.exception("大奖战报广播失败（不影响结算）")
@@ -3228,6 +3297,7 @@ class BlackjackGame:
         self.timer_task = None
         self.wait_task = None # 新增等待解散任务变量
         self.settled = False
+        self.turn_notice_id = None   # 「轮到谁行动」提醒消息 id（单独一条、60 秒自动回收，见 announce_turn）
 
     def cancel_timer(self):
         if self.timer_task and not self.timer_task.done():
@@ -3248,7 +3318,19 @@ class BlackjackGame:
 
     def start(self):
         if not self.players: return False
+        # ⛔ 幂等闸门（2026-09-12 修「庄家每一把都 20/21」）：
+        #   入口有两处会调 start()——发起人点「🎮 开始游戏」+ 等待房 60 秒自动开局；
+        #   而本函数过去**不看 phase**，双击/抢跑就会再发一轮牌：每人 4 张、庄家 4 张。
+        #   实测（20 万局，8 副牌）：正常单人玩家胜率 38.2%／庄家 56.9%；
+        #   连发两轮 → 玩家 20.0%／庄家 79.3%——玩家几乎把把爆牌输钱，看着就像「庄家在作弊」。
+        #   线上 09-10 那天「5 人全部输钱、赢家合计 +0」正是这条路径。
+        if self.phase != "waiting": return False
         self.phase = "playing"
+        # 防御式清空：任何调用路径都不该带着上一轮的牌开局（hands 是 defaultdict，会静默累积）
+        self.hands.clear()
+        self.dealer_hand = []
+        self.current_player_idx = 0
+        self.settled = False
         self.deck = [r + s for r in "23456789TJQKA" for s in "shdc"] * sget("BLACKJACK_DECKS")
         random.shuffle(self.deck)
         # 发初始牌
@@ -3412,6 +3494,10 @@ class PokerGame:
         # 本回合倒计时「是什么时候挂上去的」：看门狗据此判断牌局是不是真的没人管了
         # （刚渲染完的那个瞬间计时器还没建好，不能误判成冻结，见 _poker_watchdog_tick）
         self.turn_started_at = 0.0
+        # 牌桌渲染锁：删旧发新期间防并发（连点 / 超时与点击撞一起）导致群里出现两条牌桌。
+        # 2026-09-12 与炸金花/大话骰统一补上（那两个游戏早就有，德州漏了）。
+        self._render_lock = asyncio.Lock()
+        self.turn_notice_id = None   # 「轮到谁行动」提醒消息 id（单独一条、60 秒自动回收，见 announce_turn）
         self.evaluator, self.settled, self.showdown_order = Evaluator(), False, []
         self.max_total_bet = None  # 排位赛单局每人投入上限（仅 season，start 时按总筹码×百分比算）
         self.start_date = now_bj().strftime("%Y-%m-%d")  # 开局业务日，用于排位赛跨午夜补重置判断
@@ -3712,16 +3798,14 @@ async def poker_table_text(game, app):
     ]
     current = game.current()
     lines.append("━━━━━━━━━━━━━━━━━")
-    # ⚠️⚠️ 行动提示 = **两行**（2026-09-11 用户第 3 次明确 + 选「拆回两行·原样」）：
-    #   ① 牌桌内（分隔线后、玩家列表前）：`⏳ 当前行动：名｜需跟：N`
-    #   ② 牌桌底部单独一行：`⏰ 名 请在 N 秒内行动。`
-    # 我曾把这两句**并成一行**（"行动中｜需跟 N｜N 秒未操作自动X"），用户否决「不是成一行」。
-    # 别再合并、别再改文案。原文案取自合并前版本（GitHub 474e6893）。
-    _cur_name = None
-    if current:
-        _need = max(0, game.current_bet - game.round_bets[current])
-        _cur_name = await get_name(app, current)
-        lines.append(f"⏳ 当前行动：{_cur_name}｜需跟：{_need}")
+    # 2026-09-12 用户要求：「把游戏轮到谁行动单独发一条出来提醒玩家（记得设置自动1分钟删除），
+    #   然后就可以把牌桌文本那个该谁行动删除了」→ 行动提示**整体移出牌桌**，改由
+    #   start_turn_timer 调 announce_turn() 单独发一条（60 秒自动回收）。
+    #   牌桌于是只描述牌局状态：不随回合变长、不再和提醒消息把同一件事说两遍。
+    #   👉（PLAYER_MARK）仍标着当前行动者，牌面上不看文字也能认出轮到谁。
+    # ⛔ 历史坑：09-11 曾三次要求「⏳ 当前行动 / ⏰ 请在 N 秒内行动」拆**两行留在牌桌里**
+    #   （见 GitHub 474e6893）。那条排版要求已被本次「移出牌桌」取代 —— 别再往牌桌里加回
+    #   行动行，否则又会出现「牌桌一行 + 提醒一条」的重复。要改只改 announce_turn 的文案。
     # 玩家行**单行**（2026-09-11 用户要求：与炸金花一致，压成一行）
     #   `1. Hank 🟢 在局｜投100｜余2400`
     # 👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
@@ -3729,9 +3813,18 @@ async def poker_table_text(game, app):
         status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
         mark = PLAYER_MARK if uid == current else PLAYER_PAD
         lines.append(f"{mark}{index}. {await get_name(app, uid)} {status}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
-    if _cur_name is not None:   # ⏰ 紧贴玩家列表（用户要求「靠近玩家」，不再空一行丢在底部）
-        lines.append(f"⏰ <b>{_cur_name}</b> 请在 {game.turn_timeout} 秒内行动。")
     return "\n".join(lines)
+
+
+async def poker_turn_notice(game, app):
+    """德州「轮到谁」提醒文案（单独一条消息，见 announce_turn）。current() 为 None 时返回 None。"""
+    uid = game.current()
+    if uid is None: return None
+    need = max(0, game.current_bet - game.round_bets[uid])
+    tail = f"｜需跟 {need}" if need else "｜可过牌"
+    return (f"⏳ <b>{await get_name(app, uid)}</b> 轮到你行动{tail}\n"
+            f"⏰ 请在 {game.turn_timeout} 秒内操作，超时将自动{'过牌' if need == 0 else '弃牌'}"
+            f"（本提醒 {TURN_NOTICE_DELETE_SECONDS} 秒后自动删除）")
 
 
 def poker_buttons(game, uid):
@@ -3766,32 +3859,38 @@ def poker_buttons(game, uid):
     return InlineKeyboardMarkup(rows)
 
 
-async def update_poker_table(game, app):
-    # 游戏开始后：把等待房消息直接编辑成牌桌（不删除）。
-    # ⚠️ 这里**故意不传 reply_markup**：以前传的是 `reply_markup=None`（显式摘掉键盘），
-    # 于是每回合先「摘按钮」再「装按钮」两次编辑，中间那次失败就把全群的按钮抹掉 ——
-    # 玩家点不了弃牌，看起来就是「卡了」（2026-09-11）。不传 = 保持现有键盘不动。
-    await safe_edit(app.bot, game.chat_id, game.game_msg_id, await poker_table_text(game, app), parse_mode="HTML")
-
-
 async def render_poker_table(game, app):
-    """把牌桌（正文 + 当前行动者按钮）渲染到 game_msg_id，**不动回合计时器**。
+    """渲染唯一权威牌桌消息：**删旧发新**，全群始终只有这一条，且永远停在群最底部。
 
-    为什么单独抽出来：牌桌是全群唯一的权威画面，必须**自愈**。
-    原地编辑失败（消息被删 / 不可编辑 / 限流用尽）时删旧发新并接管 game_msg_id，
-    否则画面永远停在旧状态：牌桌还写着「当前行动：你」、按钮还是你的，
-    你点弃牌只得到「还没轮到你」——群友看到的就是「卡了」「我放弃不了牌」。
+    2026-09-12 用户：「为什么德州又是原地编辑了」——炸金花与大话骰早在 09-11 就已统一
+    删旧发新，只有德州漏在外面。原地编辑**位置不动**，会被后来的聊天顶上去，
+    群友翻不到牌桌就看不出轮到谁，表现成「卡了」「我放弃不了牌」。
+    三种渲染方式在同一个 bot 里并存本身就是 bug，此处收敛为一致行为。
+
+    顺序必须是**先发新、成功才删旧**（与 `_sync_jinhua_msg` 同理）：
+    发送失败（限流/网络）时旧牌桌原封不动留着，全群不会出现「一条牌桌都没有」的空窗。
+    本函数**不动回合计时器** —— 调用方负责挂表（连点旧按钮不能重置倒计时）。
     """
-    text = await poker_table_text(game, app)
-    uid = game.current()
-    kb = poker_buttons(game, uid) if uid is not None else None
-    if game.game_msg_id and await safe_edit_ok(app.bot, game.chat_id, game.game_msg_id, text,
-                                               reply_markup=kb) is True:
-        return
-    if game.game_msg_id:
-        await safe_delete(app.bot, game.chat_id, game.game_msg_id)   # 死消息清掉，别留成第二条牌桌
-    msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb)
-    if msg: game.game_msg_id = msg.message_id
+    async with game._render_lock:
+        text = await poker_table_text(game, app)
+        uid = game.current()
+        kb = poker_buttons(game, uid) if uid is not None else None
+        old_id = game.game_msg_id
+        msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb)
+        if msg:                                   # 发送失败 → 保留旧牌桌，下一轮再试
+            game.game_msg_id = msg.message_id
+            if old_id and old_id != game.game_msg_id:
+                await safe_delete(app.bot, game.chat_id, old_id)
+
+
+async def update_poker_table(game, app):
+    """兼容别名：等价于 render_poker_table（删旧发新）。
+
+    历史上这里做过「原地编辑、且故意不传 reply_markup」——每回合先摘键盘再装键盘两次编辑，
+    中间那次失败就把全群按钮抹掉（2026-09-11「德州卡了」的直接原因）。那条路径已彻底删除：
+    删旧发新天然带上新键盘，不存在「正文已更新、按钮还是上一轮」的中间态。
+    """
+    await render_poker_table(game, app)
 
 
 async def start_turn_timer(game, app):
@@ -3809,6 +3908,9 @@ async def start_turn_timer(game, app):
             return
     await render_poker_table(game, app)
     game.turn_started_at = time.time()
+    # 行动提醒：单独一条 + 60 秒自动删除（2026-09-12 用户要求，牌桌正文里已不再写行动行）
+    game.turn_notice_id = await announce_turn(app, game.chat_id, await poker_turn_notice(game, app),
+                                              old_id=game.turn_notice_id)
 
     # 真实超时任务：无需跟注自动过牌，否则自动弃牌，防止牌局卡死
     async def timeout_action():
@@ -3826,7 +3928,10 @@ async def start_turn_timer(game, app):
                                      await safe_send(app.bot, game.chat_id, f"⏰ {desc}：{await get_name(app, uid)}"))
         if game.phase == "showdown":
             await settle_poker(game, app)
-        else: await update_poker_table(game, app); await start_turn_timer(game, app)
+        else:
+            # start_turn_timer 内部已含 render_poker_table，**不能**再在前面补一次
+            # update_poker_table —— 删旧发新下那会连锁刷出两条牌桌。
+            await start_turn_timer(game, app)
     game.turn_task = asyncio.create_task(timeout_action())
 
 
@@ -3933,7 +4038,7 @@ async def settle_poker(game, app):
             rank = sorted(poker_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:RANK_PAGE_SIZE]
             if rank:
                 _rank_lines = ["🏆 <b>当日德州累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"]
-                _rank_lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
+                _rank_lines.extend([rank_line(index, uid, names.get(uid) or await get_name(app, uid), f"：{amount:+d}") for index, (uid, amount) in enumerate(rank, 1)])
             
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
         if sget("SETTLE_DELETE_SECONDS") > 0:
@@ -4218,6 +4323,8 @@ class HorseRace:
             self.phase = "racing"
             self.final_odds = self.odds()
             self.race_start_time = time.time()
+            # autodel-keep：开赛帧不回收——牌桌这条消息比赛全程都要能被继续编辑
+            #   （结束后会被改写成结果看板；中途取消则走 refund() 改写 + 排程回收）。
             await safe_edit(app.bot, self.chat_id, self.game_msg_id, "🏁 比赛开始！正在奔跑中……", reply_markup=None)
             msg = await safe_send(app.bot, self.chat_id, "🏁 比赛开始！正在奔跑中……"); self.animation_msg_id = msg.message_id if msg else None
             # 先按胜率加权抽取完整名次，再分配有间隔的完赛时间。
@@ -4412,7 +4519,7 @@ class HorseRace:
                             if not name:
                                 name = await get_name(app, uid)
                                 self.name_cache[uid] = name
-                            _rank_lines.append(f"{rank_marker(index)} {name}：{amount:+d}")
+                            _rank_lines.append(rank_line(index, uid, name, f"：{amount:+d}"))
                 else:
                     lines.extend(["", "🎮 娱乐局：本局不计入正式盈亏榜。"])
                 
@@ -4546,9 +4653,22 @@ async def cmd_help(update, context):
     await send_reply(update, context, text)
 
 # ---------- 21点 界面与逻辑 ----------
+async def bj_turn_notice(game, app):
+    """21点「轮到谁」提醒文案（单独一条消息，见 announce_turn）。"""
+    if game.phase != "playing": return None
+    uid = game.players[game.current_player_idx]
+    hand = game.get_card_str(game.hands[uid])
+    return (f"⏳ <b>{await get_name(app, uid)}</b> 轮到你行动｜你的手牌 {hand}（{game.get_score(game.hands[uid])}点）\n"
+            f"⏰ 请在 {sget('TURN_TIMEOUT')} 秒内操作，超时自动停牌"
+            f"（本提醒 {TURN_NOTICE_DELETE_SECONDS} 秒后自动删除）")
+
+
 async def start_bj_turn_timer(game, app):
     game.cancel_timer()
     curr_uid = game.players[game.current_player_idx]
+    # 行动提醒：单独一条 + 60 秒自动删除（2026-09-12 用户要求，牌桌正文里已不再写行动行）
+    game.turn_notice_id = await announce_turn(app, game.chat_id, await bj_turn_notice(game, app),
+                                              old_id=game.turn_notice_id)
     async def timeout():
         await asyncio.sleep(sget("TURN_TIMEOUT"))
         if active_blackjack_games.get(game.chat_id) is not game: return  # 游戏已终止或被替换
@@ -4574,7 +4694,11 @@ async def start_bj_wait_timeout(game, app):
                 await start_bj_turn_timer(game, app)
         else:
             active_blackjack_games.pop(game.chat_id, None)
-            await safe_edit(app.bot, game.chat_id, game.game_msg_id, f"⌛ 21点等待 {_wait} 秒无人加入，房间已自动解散。", reply_markup=None)
+            # 2026-09-12 修：解散提示是靠 edit 把常驻看板**改写**出来的 ⇒ 不经过 send
+            #   ⇒ 全局「默认自动删除」收不到它 ⇒ 此前永久挂在群里（用户截图 07:51/08:07）。
+            #   改走 retire_panel：改写 + 排入 PANEL_DELETE_SECONDS 回收。
+            await retire_panel(app, game.chat_id, game.game_msg_id,
+                               f"⌛ 21点等待 {_wait} 秒无人加入，房间已自动解散。")
     game.wait_task = asyncio.create_task(expire())
 
 
@@ -4610,12 +4734,12 @@ async def update_blackjack_ui(game, app):
     elif game.phase == "playing":
         curr_uid = game.players[game.current_player_idx]
         dealer_peek = game.get_card_str(game.dealer_hand, True)
-        my_hand = game.get_card_str(game.hands[curr_uid])
-        my_score = game.get_score(game.hands[curr_uid])
         # 单一权威面板：牌桌+操作按钮同一条消息，原地编辑不闪跳；信息不再写两遍
         lines = ["🃏 <b>21点</b>", f"🏛 庄家：{dealer_peek}", "━━━━━━━━━━━━━━━━━"]
-        # 2026-09-11 用户要求：行动行放到分隔线之后、玩家列表之前
-        lines.append(f"⏳ <b>{await get_name(app, curr_uid)}</b> 行动｜我 {my_hand} ({my_score}点)")
+        # 行动提示（`⏳ 名 行动｜我 ♠️A ♥️K (21点)`）2026-09-12 已**整体移出牌桌** →
+        # 改由 start_bj_turn_timer 调 announce_turn() 单独发一条（60 秒自动回收）。
+        # 玩家自己的手牌在下方玩家列表里已有，牌桌不再重复。
+        # ⛔ 别再往牌桌加回行动行（会与提醒消息重复说同一件事）。
         lines.append("")
         # 👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
         for i, uid in enumerate(game.players, 1):
@@ -4752,7 +4876,7 @@ async def update_blackjack_ui(game, app):
                     for i, (u, a) in enumerate(bj_rank, 1):
                         name = game.name_cache.get(u) or await get_name(app, u)
                         game.name_cache[u] = name
-                        _rank_lines.append(f"{rank_marker(i)} {name}：{a:+d}")
+                        _rank_lines.append(rank_line(i, u, name, f"：{a:+d}"))
                 
             await safe_delete(app.bot, game.chat_id, game.game_msg_id)
             settled_msgs = await safe_send_long(app.bot, game.chat_id, text, parse_mode="HTML")
@@ -4975,6 +5099,7 @@ class DiceGame:
         self.settled = False
         self.last_action = None
         self._render_lock = asyncio.Lock()
+        self.turn_notice_id = None   # 「轮到谁行动」提醒消息 id（单独一条、60 秒自动回收，见 announce_turn）
 
     # ---- 等待房 ----
     def add(self, uid):
@@ -5232,7 +5357,10 @@ async def dice_table_text(game, app):
       ② 删 `🔔 上一手` —— 与 `🎙 当前叫牌` 说的是同一件事（当前叫牌就是最新一手）。
       ③ 删 `💡 玩法提示` 静态行 —— 看一次就会背的说明书，移到「🎲 看牌」弹窗。
       ④ 标题/奖池/叫牌/玩家行各砍冗余字（`（吹牛）`、`底注 N`、`在场骰子`→`场上`、`5颗`→`5`、`余`→空格）。
-    ⛔ 保留（排版铁律，别再动）：`⏳`+`⏰` 两行、`━━━` 分隔线、玩家行 👉/占位对齐。
+    ⛔ 保留（排版铁律，别再动）：`━━━` 分隔线、玩家行 👉/占位对齐。
+    ⚠️ 行动提示（`⏳ 当前行动` / `⏰ 请在 N 秒内加码或开骰`）2026-09-12 已**整体移出牌桌** →
+       改由 start_dice_turn_timer 调 announce_turn() 单独发一条（60 秒自动回收）。
+       别再往牌桌加回行动行（会与提醒消息重复说同一件事）。
     """
     lines = [
         f"🎲 大话骰 · 第{game.hand_no}手",
@@ -5243,11 +5371,6 @@ async def dice_table_text(game, app):
         lines.append(f"🎙 {bc}个{bf}（{await get_name(app, bidder)}）")
     cur = game.actor if game.phase == "playing" else None
     lines.append("━━━━━━━━━━━━━━━━━")
-    # ⚠️ 行动提示 = 两行（见 poker_table_text 同款注释，用户选「拆回两行·原样」，别再合并）
-    _cur_name = None
-    if cur:
-        _cur_name = await get_name(app, cur)
-        lines.append(f"⏳ 当前行动：{_cur_name}（加码或开骰）")
     # 玩家行**单行**（2026-09-11 用户要求：与炸金花一致压成一行）
     #   `1. Hank 🎲5 🟢 2400` / 出局 `1. Hank 💀 已出局`
     # 👉 留在行首；非行动者用 PLAYER_PAD 占位（与 PLAYER_MARK 等宽）→ 序号落在同一列
@@ -5257,9 +5380,16 @@ async def dice_table_text(game, app):
             lines.append(f"{mark}{index}. {await get_name(app, uid)} 💀 已出局")
         else:
             lines.append(f"{mark}{index}. {await get_name(app, uid)} 🎲{game.dice[uid]} 🟢 {game.chips[uid]}")
-    if _cur_name is not None:   # ⏰ 紧贴玩家列表（用户要求「靠近玩家」）
-        lines.append(f"⏰ <b>{_cur_name}</b> 请在 {sget('DICE_THINK_SECONDS')} 秒内加码或开骰。")
     return "\n".join(lines)
+
+
+async def dice_turn_notice(game, app):
+    """大话骰「轮到谁」提醒文案（单独一条消息，见 announce_turn）。"""
+    cur = game.actor if game.phase == "playing" else None
+    if not cur: return None
+    return (f"⏳ <b>{await get_name(app, cur)}</b> 轮到你叫牌（加码或开骰）\n"
+            f"⏰ 请在 {sget('DICE_THINK_SECONDS')} 秒内操作，超时自动开骰"
+            f"（本提醒 {TURN_NOTICE_DELETE_SECONDS} 秒后自动删除）")
 
 
 def dice_rules_text(game):
@@ -5295,6 +5425,9 @@ async def start_dice_turn_timer(game, app):
     await show_dice_action(game, app)
     if game.phase != "playing": return
     uid = game.actor
+    # 行动提醒：单独一条 + 60 秒自动删除（2026-09-12 用户要求，牌桌正文里已不再写行动行）
+    game.turn_notice_id = await announce_turn(app, game.chat_id, await dice_turn_notice(game, app),
+                                              old_id=game.turn_notice_id)
 
     async def timeout_action():
         await asyncio.sleep(sget("DICE_THINK_SECONDS"))
@@ -5776,6 +5909,7 @@ class JinhuaGame:
         self.last_action = None          # 牌桌状态行：展示“上一手”动作，取代浮动提示消息
         self.compare_menu_owner = None   # 比牌选人菜单发起者（锁），仅其可点选对手
         self._render_lock = asyncio.Lock()  # 牌桌渲染锁：删旧发新期间防并发导致出现两条牌桌
+        self.turn_notice_id = None   # 「轮到谁行动」提醒消息 id（单独一条、60 秒自动回收，见 announce_turn）
 
     def add(self, uid):
         if self.phase != "waiting" or uid in self.players: return False
@@ -6067,21 +6201,28 @@ async def jinhua_table_text(game, app):
         lines.append(f"🔔 上一手：{game.last_action}")
     current = game.current() if game.phase == "betting" else None
     lines.append("━━━━━━━━━━━━━━━━━")
-    # ⚠️ 行动提示 = 两行（见 poker_table_text 同款注释，用户选「拆回两行·原样」，别再合并）
-    _cur_name = None
-    if current:
-        _need = max(0, game._target(current) - game.round_bets[current])
-        _cur_name = await get_name(app, current)
-        lines.append(f"⏳ 当前行动：{_cur_name}｜需补：{_need}")
+    # 行动提示（`⏳ 当前行动` / `⏰ 请在 N 秒内行动`）2026-09-12 已**整体移出牌桌** →
+    # 改由 start_jinhua_turn_timer 调 announce_turn() 单独发一条（60 秒自动回收）。
+    # ⛔ 别再往牌桌加回行动行（会与提醒消息重复说同一件事）。
     # 紧凑排版：每人 1 行；👉 留在行首，非行动者补 3 个半角空格占位 → 序号落在同一列
     for index, uid in enumerate(game.players, 1):
         status = "❌弃" if uid in game.folded else "🔥全下" if uid in game.all_in else "🟢"
         seen_mark = "👁" if uid in game.seen else "🎴"
         mark = PLAYER_MARK if uid == current else PLAYER_PAD
         lines.append(f"{mark}{index}. {await get_name(app, uid)} {seen_mark}{status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
-    if _cur_name is not None:   # ⏰ 紧贴玩家列表（用户要求「靠近玩家」）
-        lines.append(f"⏰ <b>{_cur_name}</b> 请在 {sget('TURN_TIMEOUT')} 秒内行动。")
     return "\n".join(lines)
+
+
+async def jinhua_turn_notice(game, app):
+    """炸金花「轮到谁」提醒文案（单独一条消息，见 announce_turn）。"""
+    if game.phase != "betting": return None
+    uid = game.current()
+    if uid is None: return None
+    need = max(0, game._target(uid) - game.round_bets[uid])
+    tail = f"｜需补 {need}" if need else "｜可过牌"
+    return (f"⏳ <b>{await get_name(app, uid)}</b> 轮到你行动{tail}\n"
+            f"⏰ 请在 {sget('TURN_TIMEOUT')} 秒内操作，超时自动弃牌"
+            f"（本提醒 {TURN_NOTICE_DELETE_SECONDS} 秒后自动删除）")
 
 
 def jinhua_buttons(game, uid):
@@ -6207,6 +6348,9 @@ async def start_jinhua_turn_timer(game, app):
             game.turn_task = asyncio.create_task(_open_pending_timeout())
         return
     uid = game.current()
+    # 行动提醒：单独一条 + 60 秒自动删除（2026-09-12 用户要求，牌桌正文里已不再写行动行）
+    game.turn_notice_id = await announce_turn(app, game.chat_id, await jinhua_turn_notice(game, app),
+                                              old_id=game.turn_notice_id)
 
     async def timeout_action():
         await asyncio.sleep(sget("TURN_TIMEOUT"))
@@ -6302,7 +6446,7 @@ async def settle_jinhua(game, app):
             rank = sorted(jinhua_profit_by_date[date][game.chat_id].items(), key=lambda item: item[1], reverse=True)[:RANK_PAGE_SIZE]
             if rank:
                 _rank_lines = ["🏆 <b>当日炸金花累计盈利榜</b>", "━━━━━━━━━━━━━━━━━"]
-                _rank_lines.extend([f"{rank_marker(index)} {names.get(uid) or await get_name(app, uid)}：{amount:+d}" for index, (uid, amount) in enumerate(rank, 1)])
+                _rank_lines.extend([rank_line(index, uid, names.get(uid) or await get_name(app, uid), f"：{amount:+d}") for index, (uid, amount) in enumerate(rank, 1)])
         await safe_delete(app.bot, game.chat_id, game.game_msg_id)
         delivered = await safe_send_long(app.bot, game.chat_id, "\n".join(lines), parse_mode="HTML")
         if sget("SETTLE_DELETE_SECONDS") > 0:
@@ -6412,7 +6556,7 @@ async def start_wait_timeout(game, app):
             return
         if len(game.players) >= 2:
             if game.start():
-                await update_poker_table(game, app)
+                # start_turn_timer 内部已渲染牌桌（删旧发新），别再补一次
                 await start_turn_timer(game, app)
         else:
             await refund_poker(game, app, f"⌛ 德州等待 {_wait} 秒不足 2 人，房间已自动解散。")
@@ -6494,7 +6638,7 @@ async def season_settle(app, manual=False):
         for i, (uid, val) in enumerate(eligible[:50], 1):
             g = season_games[cid].get(uid, 0)
             marker = "👑" if (i == 1 and uid in user_titles and TITLE_GAMBLING_GOD in user_titles[uid]) else rank_marker(i)
-            lines.append(f"{marker} {await get_name(app, uid, cid=cid, with_title=False)}：总{season_total_profit(cid, uid):+d}｜{g}局")
+            lines.append(f"{marker} {user_link(uid, await get_name(app, uid, cid=cid, with_title=False))}：总{season_total_profit(cid, uid):+d}｜{g}局")
         lines.extend(["", "⚠️ 结算时刻进行中的牌局不计入本赛季。", "🎁 奖励由管理员另行发放。"])
         await safe_send_long(app.bot, cid, "\n".join(lines))
         # 自动加冕本赛季赌神（全局唯一，覆盖上任）
@@ -6588,7 +6732,7 @@ async def season_standings_lines(app, cid, uid=None):
         marker = "👑" if (i == 1 and u in user_titles and TITLE_GAMBLING_GOD in user_titles[u]) else rank_marker(i)
         bonus = season_exchange_bonus.get(cid, {}).get(u, 0)
         btag = f"｜底分{bonus}" if bonus else ""
-        lines.append(f"{marker} {await get_name(app, u, cid=cid, with_title=False)}：总{season_total_profit(cid, u):+d}｜当日{val - _season_base(cid, u):+d}｜{g}局{btag}{tag}")
+        lines.append(f"{marker} {user_link(u, await get_name(app, u, cid=cid, with_title=False))}：总{season_total_profit(cid, u):+d}｜当日{val - _season_base(cid, u):+d}｜{g}局{btag}{tag}")
     # 个人排名行：请求者不在前 50 时，单独补一行真实名次，避免大群看不到自己
     if uid is not None and uid in users:
         full_rank = next((i for i, (u, _) in enumerate(standings, 1) if u == uid), None)
@@ -7493,7 +7637,8 @@ async def cmd_end(update, context):
                 wallet[cid][p_uid] += b
                 pending_game_bets[cid].get(p_uid, {}).pop("21", None)
             active_blackjack_games.pop(cid, None)
-            await safe_edit(context.bot, cid, bj.game_msg_id, "🛑 21点已终止，积分已退回。", reply_markup=None)
+            # 与 /end 的其它游戏一致：终止提示也要回收（此前 edit 出来的提示永久残留）
+            await retire_panel(context.application, cid, bj.game_msg_id, "🛑 21点已终止，积分已退回。")
             notices.append("21点已退款")
 
     if not notices:
@@ -7518,6 +7663,59 @@ def player_is_busy(cid, uid):
     if _dg and _dg.phase != "waiting" and uid in _dg.players:
         return True
     return False
+
+
+# 网页「积分加减分」最近操作记录（仅内存展示用，重启即清空 —— 不是账本，账本在 ledger）
+WEB_POINT_ADJ_LOG = []
+
+
+def _resolve_web_uid(cid, raw):
+    """把网页加减分表单里的「用户」解析成 uid。返回 (uid, 错误信息)。
+
+    2026-09-12 用户报「网页端积分加减分无效根本用不了」：后端路由实测完全正常，
+    真正卡住的是**选人**——原表单只有一个 `input type=number list=datalist`，
+    移动端浏览器对 number+datalist 支持极差（下拉根本不弹），而玩家不可能手输 10 位数字 ID，
+    于是这功能实际用不了。现在首页面改用原生 <select> 选成员，本函数只负责兜底入口：
+    允许直接填 **数字 ID / @用户名 / 昵称**，任一种都认。
+
+    注意：昵称匹配优先在本群范围内找（避免把别群同名玩家改错分），唯一命中才接受。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return 0, "请先选择群组并从下拉里挑一个成员（或在「手填用户」里填 ID）"
+    if raw.lstrip("-").isdigit():
+        return int(raw), ""
+    key = raw.lstrip("@").strip().lower()
+    if not key:
+        return 0, f"「{raw}」不是有效的用户标识"
+    local = set(game_chips.get(cid, {})) | set(member_profiles.get(cid, {}))
+    for pool, where in ((local, "本群"), (set(user_names.keys()), "全部群")):
+        exact = [u for u in pool if str(user_names.get(u, "")).strip().lower() == key]
+        if len(exact) == 1:
+            return exact[0], ""
+        part = [u for u in pool if key in str(user_names.get(u, "")).strip().lower()]
+        if len(part) == 1:
+            return part[0], ""
+        if len(part) > 1:
+            return 0, f"{where}内有 {len(part)} 个昵称含「{raw}」，请改用数字 ID 或 @用户名"
+    return 0, f"在群 {cid} 里找不到「{raw}」，请改用数字 ID 或在群里让他先发一条消息"
+
+
+def _point_adj_log_card():
+    """网页加减分「最近调整」卡片：让管理员一眼看到刚才那次操作确实生效了。"""
+    if not WEB_POINT_ADJ_LOG:
+        return ""
+    rows = "".join(
+        f"<tr><td>{html.escape(str(r['ts']))}</td>"
+        f"<td>{html.escape(str(r['gname']))} <code>{r['cid']}</code></td>"
+        f"<td>{html.escape(str(r['name']))} <code>{r['uid']}</code></td>"
+        f"<td style='color:{'#6fd08c' if r['amount'] > 0 else '#ff7b7b'};font-weight:700'>{r['amount']:+d}</td>"
+        f"<td>{r['after']}</td></tr>"
+        for r in reversed(WEB_POINT_ADJ_LOG))
+    return ("<div class='card' style='margin-top:18px'><h3>🕘 最近调整</h3>"
+            "<div class='sub'>本页最近 20 次操作（刷新页面不丢，重启机器人后清空）</div>"
+            "<table class='tbl'><tr><th>时间</th><th>群</th><th>成员</th><th>变动</th><th>变动后</th></tr>"
+            + rows + "</table></div>")
 
 
 def poker_room_of(cid, uid, exclude_game=None):
@@ -7625,6 +7823,20 @@ def clip_name(name, n=RANK_NAME_MAX):
     """榜单/表格里截断过长昵称，避免把消息气泡撑宽（2026-09-11 用户报「这么宽吗」）。"""
     s = (name or "").strip()
     return s if len(s) <= n else s[:n] + "…"
+
+
+def _safe_html_clip(name, n=RANK_NAME_MAX):
+    """截断**已 HTML 转义**的展示名，且绝不把实体的 `&amp;` 截成半截。
+
+    为什么必须单独一个函数：`get_name()` 返回的名字已经转义过（`&` → `&amp;`）。
+    直接 clip_name 到 12 字，正好切在 `&amp;` 中间就会产出 `&am` 这种非法实体，
+    整条消息（含榜单）HTML 解析失败、被 safe_send 掉回纯文本重发 —— 玩家看到的是
+    一屏裸露的 `<a href="tg://user?id=...">`，比不截断还难看。
+    """
+    t = clip_name(name, n)
+    if "&" in t and ";" not in t.rsplit("&", 1)[-1]:
+        t = t.rsplit("&", 1)[0]      # 丢掉残缺的实体尾巴
+    return t
 _RANK_SIGNED = {"profit", "other_profit", "texas_day"}   # 盈亏榜带 +/-；积分榜不带
 
 
@@ -7661,16 +7873,19 @@ async def _rank_page_text(app, cid, kind, page):
         return "\n".join(lines), page, pages
     for i, (uid, value) in enumerate(chunk, start + 1):
         # 昵称截断：防长昵称把整条消息撑宽（用户 2026-09-11 截图投诉）
-        name = clip_name(await get_name(app, uid, cid=cid))
+        # ⚠️ 用 _safe_html_clip 而不是裸 clip_name：get_name 返回的是**已转义**文本，
+        #   在 `&amp;` 中间截断会留下半截实体的，整条消息 HTML 直接解析失败（掉回纯文本，
+        #   玩家会看到裸露的 <a href=...>）。截断后再包蓝色可点链接（2026-09-12 用户要求）。
+        name = _safe_html_clip(await get_name(app, uid, cid=cid))
         if kind in _RANK_SIGNED:
-            lines.append(f"{rank_marker(i)} {name}：{value:+d}")
+            lines.append(rank_line(i, uid, name, f"：{value:+d}"))
         elif kind == "points":
             # 2026-09-11 用户「积分排名和积分排行感觉好乱」→ **两个榜合并成一个**：
             # 积分 + 等级同一行显示，不再有「积分榜 / 积分排行榜」两个几乎一样的榜。
             lv = _level_of(cid, uid)[0]
-            lines.append(f"{rank_marker(i)} {name}：{value}" + (f" {lv}" if lv else ""))
+            lines.append(rank_line(i, uid, name, f"：{value}" + (f" {lv}" if lv else "")))
         else:
-            lines.append(f"{rank_marker(i)} {name}：{value}")
+            lines.append(rank_line(i, uid, name, f"：{value}"))
     lines.append("")
     lines.append(f"<i>共 {total} 人 · 第 {page + 1}/{pages} 页</i>")
     return "\n".join(lines), page, pages
@@ -8127,6 +8342,8 @@ async def on_button(update, context):
                 await q.answer("已加入"); await update_blackjack_ui(game, context.application)
             elif data == "bj_start":
                 if uid != game.owner_id: await q.answer("仅发起人可开始", show_alert=True); return
+                # 幂等：等待房 60 秒自动开局与本按钮会抢跑；连点也在这里被挡（见 BlackjackGame.start 注释）
+                if game.phase != "waiting": await q.answer("游戏已经开始", show_alert=True); return
                 if game.start(): 
                     game.cancel_wait() # 开始后取消等待计时
                     await update_blackjack_ui(game, context.application); await start_bj_turn_timer(game, context.application)
@@ -8179,7 +8396,7 @@ async def on_button(update, context):
                     wallet[cid][p_uid] += bet
                     pending_game_bets[cid].get(p_uid, {}).pop("21", None)
                 active_blackjack_games.pop(cid, None)
-                await safe_edit(context.bot, cid, game.game_msg_id, "🛑 21点已手动终止，积分已退回。", reply_markup=None)
+                await retire_panel(context.application, cid, game.game_msg_id, "🛑 21点已手动终止，积分已退回。")
             return
 
         if data.startswith("season_"):
@@ -8252,7 +8469,7 @@ async def on_button(update, context):
                     else: await q.answer("你已在等待房间中。", show_alert=True)
                 elif data == "texas_start" and uid == game.owner_id and game.start():
                     game.cancel_wait()
-                    await q.answer("游戏开始"); await update_poker_table(game, context.application); await start_turn_timer(game, context.application)
+                    await q.answer("游戏开始"); await start_turn_timer(game, context.application)
                 else: await q.answer("无法执行此操作", show_alert=True)
                 return
             if uid != game.current():
@@ -8274,7 +8491,7 @@ async def on_button(update, context):
             if not ok: await q.answer(desc, show_alert=True); return
             await q.answer(desc); await action_notice(cid, context.application, uid, desc)
             if game.phase == "showdown": await settle_poker(game, context.application)
-            else: await update_poker_table(game, context.application); await start_turn_timer(game, context.application)
+            else: await start_turn_timer(game, context.application)
             return
         # --- 大话骰：等待房 + 牌局操作（加入/开始/终止/私看骰子/加码/开骰/刷新） ---
         if data.startswith("dice_"):
@@ -9510,7 +9727,11 @@ async def announce_sweep(context):
     n = 0
     for cid in sorted(AUTHORIZED_GROUPS):
         try:
-            await context.bot.send_message(cid, txt.replace("{date}", announce_last_date))
+            # ⚠️ autodel_keep：「定时群公告」是**公示**，必须留到下一次公告（甚至更久）。
+            #   否则「默认自动删除」会在几分钟后把它收走 —— 一天只发一次的公告活 5 分钟，
+            #   等于没发（与 2026-09-12 用户报的「抽奖信息被删」同一类问题）。
+            await context.bot.send_message(
+                cid, txt.replace("{date}", announce_last_date), autodel_keep=True)
             n += 1
         except Exception:
             logger.exception("定时公告推送失败 cid=%s", cid)
@@ -9791,7 +10012,9 @@ async def on_text(update, context):
                 if not ok: await send_reply(update, context, f"❌ {desc}"); return
                 await action_notice(cid, context.application, user.id, desc)
                 if game.phase == "showdown": await settle(game, context.application)
-                else: await update(game, context.application); await start_timer(game, context.application)
+                # 只调 start_timer：它内部已渲染牌桌（删旧发新）。
+                # 原来这里先 update() 再 start_timer() = 同一画面连发两条，群里会闪一下。
+                else: await start_timer(game, context.application)
                 return
 
         # 扑克类游戏文字全下（自动路由到玩家当前轮到的游戏：德州→炸金花）
@@ -9806,7 +10029,7 @@ async def on_text(update, context):
                 if not ok: await send_reply(update, context, f"❌ {desc}"); return
                 await action_notice(cid, context.application, user.id, desc)
                 if game.phase == "showdown": await settle(game, context.application)
-                else: await update(game, context.application); await start_timer(game, context.application)
+                else: await start_timer(game, context.application)   # 同上：内部已渲染
                 return
 
         # 大话骰：群里直接打「6个3」「6 3」「六個三」叫牌（也认「叫6个3」）；
@@ -10691,7 +10914,7 @@ async def cmd_sign_rank(update, context):
         await send_reply(update, context, "本群还没有签到记录，发「签到」抢头名！"); return
     lines = ["📅 连续签到排行", "━" * 14]
     for i, (uid, s) in enumerate(sorted(users, key=lambda x: (-x[1], x[0]))[:20], 1):
-        lines.append(f"{rank_marker(i)} {await get_name(context.application, uid, cid=cid)}：连续 {s} 天")
+        lines.append(rank_line(i, uid, await get_name(context.application, uid, cid=cid), f"：连续 {s} 天"))
     await send_reply(update, context, "\n".join(lines))
 
 async def cmd_my_points(update, context):
@@ -11398,7 +11621,10 @@ def _lottery_join(lo, uid, name):
 async def _lottery_publish(app, cid, lo):
     """编辑/发送活动公告消息；记录 msg_id 用于开奖后编辑。"""
     if not sget("LOTTERY_ENABLED"): return
-    msg = await safe_send(app.bot, cid, _lottery_announce_text(lo), parse_mode="HTML")
+    # ⚠️ autodel_keep：抽奖公告是**常驻活动看板**，绝不能进「默认自动删除」
+    #   （2026-09-12 用户报障：群里刚发起抽奖，公告就被删了）。
+    #   它还要在开奖时被 edit 成「已开奖 ✅」，被删掉连 edit 都无处可改。
+    msg = await safe_send(app.bot, cid, _lottery_announce_text(lo), parse_mode="HTML", autodel_keep=True)
     if msg:
         lo["msg_id"] = msg.message_id
 
@@ -11484,7 +11710,9 @@ async def _lottery_draw(app, cid, lo):
                                             text=done_line, parse_mode="HTML")
     except Exception:
         logger.exception("编辑公告为已开奖状态失败（忽略）")
-    result_msg = await safe_send(app.bot, cid, text, parse_mode="HTML")
+    # ⚠️ autodel_keep：开奖结果是**永久公示**（上面注释写的「绝不自动删除」要靠这个参数兑现），
+    #   否则会被「默认自动删除」在几分钟后收走（2026-09-12 用户报障：开奖也要保留）。
+    result_msg = await safe_send(app.bot, cid, text, parse_mode="HTML", autodel_keep=True)
     if not result_msg:
         # 编辑路径已废弃，新消息也失败则退回编辑公告兜底
         try:
@@ -11821,7 +12049,8 @@ async def _rp_grab(p, pid, uid, context, q):
                 game_chips[cid][p["from"]] += refund
             rp_packets.pop(pid, None); save_data()
             await q.answer("红包已过期，剩余已退回", show_alert=True)
-            await safe_edit(context.bot, cid, p["msg_id"], "🧧 红包已过期，未领完的积分已退回。", reply_markup=None)
+            # 同 21点 解散提示：edit 改写出来的提示不走 send ⇒ 必须显式排程回收
+            await retire_panel(context.application, cid, p.get("msg_id"), "🧧 红包已过期，未领完的积分已退回。")
             return
         if uid in p["grabbed"]:
             await q.answer(_fmt_tpl("rp_msg_dup", amount=p["grabbed"][uid]), show_alert=True); return
@@ -11851,13 +12080,15 @@ async def _rp_grab(p, pid, uid, context, q):
             lines = []
             for i, (u, a) in enumerate(sorted(p["grabbed"].items(), key=lambda x: -x[1]), 1):
                 lines.append(_fmt_tpl("rp_msg_log", rank=rank_marker(i),
-                                      name=await get_name(context.application, u, cid=cid), amount=a))
+                                      name=user_link(u, await get_name(context.application, u, cid=cid)), amount=a))
             detail = "\n".join(lines)
         else:
             detail = "\n".join(f"{await get_name(context.application, u, cid=cid)}：{a}"
                                for u, a in p["grabbed"].items())
-        await safe_edit(context.bot, cid, p["msg_id"],
-                        f"🧧 红包已被抢完（{count} 份 / {total} 积分）\n{detail}", reply_markup=None)
+        # 抢完 = 这张卡片退役（摘掉了「抢红包」按钮）⇒ 走 retire_panel 才会被回收。
+        #   此前摘了按钮却没人排程，于是「红包已被抢完」卡片永久留在群里（同 21点 那类漏网）。
+        await retire_panel(context.application, cid, p.get("msg_id"),
+                           f"🧧 红包已被抢完（{count} 份 / {total} 积分）\n{detail}")
     else:
         await safe_edit(context.bot, cid, p["msg_id"],
                         f"🧧 红包进行中\n💰 已领 {count}/{p['left_n'] + count} 份｜剩 {p['left_amt']} 积分",
@@ -11972,6 +12203,8 @@ async def _guess_close(cid, app):
     g["locked"] = True
     save_data()
     try:
+        # autodel-keep：封盘看板要一直留到管理员结算/撤销（那是设计，不是漏网）；
+        #   真正退役的地方在 _guess_do_settle / _guess_do_cancel —— 两处都会回收它。
         await safe_edit(app.bot, cid, g["msg_id"], _guess_text(cid), reply_markup=None)
     except Exception:
         logger.exception("竞猜封盘看板刷新异常（已吞并）")
@@ -12051,6 +12284,11 @@ async def _guess_do_settle(app, cid, winner):
         await send_settle(app, cid, f"🎯 竞猜结算｜{g['q']}\n✅ 答案：{ans_txt}｜奖池 {total} 分（{len(paid)} 人瓜分）" + lines)
     except Exception:
         logger.exception("竞猜结算播报异常（已吞并）")
+    # 竞猜结束 ⇒ 封盘看板退役。此前只发结算播报、从不回收那张（封盘时已摘掉按钮的）卡片，
+    # 于是它永久留在群里 —— 与 21点 解散提示同一类漏网（见 retire_panel 的说明）。
+    _gd_secs = int(sget("PANEL_DELETE_SECONDS") or 0)
+    if _gd_secs > 0 and g.get("msg_id"):
+        schedule_delete_ids(app, cid, g["msg_id"], _gd_secs)
     return None
 
 
@@ -12076,6 +12314,10 @@ async def _guess_do_cancel(app, cid, auto=False):
         await send_settle(app, cid, tip)
     except Exception:
         logger.exception("竞猜撤销播报异常（已吞并）")
+    # 同上：撤销也意味着封盘看板退役，别让它永久留在群里
+    _gc_secs = int(sget("PANEL_DELETE_SECONDS") or 0)
+    if _gc_secs > 0 and g.get("msg_id"):
+        schedule_delete_ids(app, cid, g["msg_id"], _gc_secs)
     return None
 
 
@@ -12766,7 +13008,9 @@ async def _invite_send_rank(update, context, scope):
     if not rows:
         lines.append("暂无数据")
     for i, uid, n in rows:
-        lines.append(_fmt_tpl("invite_rank_line_fmt", i=i, name=await get_name(context.application, uid, cid=cid), count=n))
+        # 名字包成蓝色可点链接（2026-09-12 用户要求：所有排名的名字都能点开看人）
+        lines.append(_fmt_tpl("invite_rank_line_fmt", i=i,
+                              name=user_link(uid, await get_name(context.application, uid, cid=cid)), count=n))
     await send_reply(update, context, "\n".join(lines))
 
 
@@ -13208,7 +13452,7 @@ async def leaderboard_scheduler(app):
                 if cid not in target_groups: continue  # 只推目标群
                 _CUR_CID.set(_safe_cid(cid))
                 lines = [f"🏆 德州当日排行榜（{date}）", "━"*14]
-                for i, (uid, amount) in enumerate(sorted(data.items(), key=lambda x:x[1], reverse=True)[:RANK_PAGE_SIZE], 1): lines.append(f"{rank_marker(i)} {await get_name(app, uid)}：{amount:+d}")
+                for i, (uid, amount) in enumerate(sorted(data.items(), key=lambda x:x[1], reverse=True)[:RANK_PAGE_SIZE], 1): lines.append(rank_line(i, uid, await get_name(app, uid), f"：{amount:+d}"))
                 await safe_send_long(app.bot, cid, "\n".join(lines))
             # 排位赛每日 23:50 推送「当日盈亏」（当前分 - 基准分，兑换底分不计入）
             if season_active:
@@ -13224,7 +13468,7 @@ async def leaderboard_scheduler(app):
                     for i, (u, val) in enumerate(day_standings[:RANK_PAGE_SIZE], 1):
                         g = season_games[cid].get(u, 0)
                         tag = "" if g >= sget("SEASON_MIN_GAMES") else f"（{g}局·未达标）"
-                        lines.append(f"{rank_marker(i)} {await get_name(app, u, cid=cid, with_title=False)}：{val:+d}｜{g}局{tag}")
+                        lines.append(rank_line(i, u, await get_name(app, u, cid=cid, with_title=False), f"：{val:+d}｜{g}局{tag}"))
                     await safe_send_long(app.bot, cid, "\n".join(lines))
             save_data()
         except Exception:
@@ -13248,19 +13492,19 @@ async def build_daily_report_text(app, yesterday):
     losers = sorted(net_map.items(), key=lambda x: x[1])
     win_parts = []
     for u, v in winners[:3]:
-        if v > 0: win_parts.append(f"{await get_name(app, u, with_title=False)} +{v}")
+        if v > 0: win_parts.append(f"{user_link(u, await get_name(app, u, with_title=False))} +{v}")
     if win_parts:
         lines.append("🏆 昨日净赢 TOP3：" + "｜".join(win_parts))
     lose_parts = []
     for u, v in losers[:3]:
-        if v < 0: lose_parts.append(f"{await get_name(app, u, with_title=False)} {v}")
+        if v < 0: lose_parts.append(f"{user_link(u, await get_name(app, u, with_title=False))} {v}")
     if lose_parts:
         lines.append("💸 昨日净亏 TOP3：" + "｜".join(lose_parts))
     alerts = [(u, v) for u, v in winners if v >= max(5000, total_flow * 0.2)]
     if alerts:
         lines.append("🚨 异常警示（单人大额集中赢钱，注意小号对刷）：")
         for u, v in alerts[:3]:
-            lines.append(f"　{await get_name(app, u, with_title=False)} 净赢 +{v}（占流水 {v * 100 // max(1, total_flow)}%）")
+            lines.append(f"　{user_link(u, await get_name(app, u, with_title=False))} 净赢 +{v}（占流水 {v * 100 // max(1, total_flow)}%）")
     lines.append("👑 当前富豪榜：")
     for cid in sorted(AUTHORIZED_GROUPS):
         chips = game_chips.get(cid, {})
@@ -13268,7 +13512,7 @@ async def build_daily_report_text(app, yesterday):
         gname = chat_name_cache.get(cid) or str(cid)
         top_parts = []
         for u, v in sorted(chips.items(), key=lambda x: -x[1])[:3]:
-            top_parts.append(f"{await get_name(app, u, cid=cid, with_title=False)} {v}")
+            top_parts.append(f"{user_link(u, await get_name(app, u, cid=cid, with_title=False))} {v}")
         lines.append(f"　[{gname}] " + "｜".join(top_parts))
     return "\n".join(lines)
 
@@ -15112,18 +15356,53 @@ def start_health_server():
                             f"<datalist id='dl_users_god'>{_all_user_options()}</datalist>"
                             "<button type='submit' style='margin-top:0'>👑 封赌神</button></form></div>")
                 elif sub == "seasonpts":
-                    body = (f"<h1>{gicon} 排位分调整</h1>"
-                            f"<div class='sub'>给玩家加/减排位分（正加负减）；赛季未开始时需玩家已在赛季名单</div>{msg}"
-                            "<div class='card'><form method='post' action='/adminops2'>"
-                            "<input type='hidden' name='op' value='seasonpts'>"
-                            "<div class='row'><div class='lbl'>群 ID<small>选群后用户 ID 自动带出该群成员</small></div>"
-                            f"<select name='cid' data-users-for='dl_season_uid' required>{_group_options()}</select></div>"
-                            "<div class='row'><div class='lbl'>用户 ID</div>"
-                            "<input type='number' name='uid' list='dl_season_uid' required>"
-                            "<datalist id='dl_season_uid'></datalist></div>"
-                            "<div class='row'><div class='lbl'>排位分变动<small>正数=加，负数=减</small></div>"
-                            "<input type='number' name='amount' value='100' required></div>"
-                            "<button type='submit'>💾 执行调整</button></form></div>")
+                    # 2026-09-12 用户报「网页端积分加减分无效根本用不了」。
+                    # 排位分调整页是**同一个病**：旧表单用 `number + datalist`，
+                    # number+datalist 在移动端弹不出成员下拉，管理员记不住 10 位数字 ID
+                    # ⇒ 实际根本选不了人。这里同样改成「① 选群载入 → ② 原生下拉选成员」，
+                    # 并留「手填用户」兜底（数字 ID / @用户名 / 昵称），与积分加减分页一致。
+                    _sg = sel_flt_cid
+                    _c1 = ("<div class='card'><h3>① 选择群组</h3>"
+                           "<div class='sub'>先选群并载入，下面才会列出该群成员（手机端同样可用）</div>"
+                           "<form method='get' action='/page/admin/seasonpts' "
+                           "style='display:flex;gap:10px;align-items:end;flex-wrap:wrap'>"
+                           "<div style='flex:1;min-width:220px'><div class='sub'>群组</div>"
+                           "<select name='cid' required><option value=''>— 请选择群 —</option>"
+                           + _group_options(selected=_sg) + "</select></div>"
+                           "<button type='submit' style='margin-top:0'>🔍 载入成员</button></form></div>")
+                    _sp_hdr = (f"<h1>{gicon} 排位分调整</h1>"
+                               f"<div class='sub'>给玩家加/减排位分（正加负减）；赛季未开始时需玩家已在赛季名单</div>{msg}{err}")
+                    if _sg:
+                        _sp_members = (set(game_chips.get(_sg, {})) | set(member_profiles.get(_sg, {}))
+                                       | set(season_points.get(_sg, {})))
+                        _sp_opts = "".join(
+                            f"<option value='{u}'>{html.escape(user_names.get(u, str(u)))}（{u}）</option>"
+                            for u in sorted(_sp_members,
+                                            key=lambda u: -int(game_chips.get(_sg, {}).get(u, 0) or 0)))
+                        _sp_sel = (f"<select name='uid' style='flex:1;min-width:200px'>"
+                                   f"<option value=''>（可选）从该群成员里挑一个</option>{_sp_opts}</select>"
+                                   if _sp_opts else
+                                   "<div class='sub' style='flex:1'>该群还没有成员记录，请用下面的「手填用户」</div>")
+                        body = (_sp_hdr + _c1 +
+                                "<div class='card' style='margin-top:18px'><h3>② 执行调整</h3>"
+                                "<div class='sub'>目标群："
+                                f"<b>{html.escape(chat_name_cache.get(_sg) or '未命名群')}</b> <code>{_sg}</code>"
+                                f" · 已知成员 {len(_sp_members)} 人</div>"
+                                "<form method='post' action='/adminops2'>"
+                                "<input type='hidden' name='op' value='seasonpts'>"
+                                f"<input type='hidden' name='cid' value='{_sg}'>"
+                                "<div class='row'><div class='lbl'>成员<small>原生下拉，手机也能正常选</small></div>"
+                                f"{_sp_sel}</div>"
+                                "<div class='row'><div class='lbl'>手填用户<small>数字 ID / @用户名 / 昵称任填其一，填了就优先用它</small></div>"
+                                "<input type='text' name='uid_raw' placeholder='如 123456789 或 @name 或 昵称' "
+                                "style='flex:1;min-width:200px'></div>"
+                                "<div class='row'><div class='lbl'>排位分变动<small>正数=加，负数=减</small></div>"
+                                "<input type='number' name='amount' value='100' required></div>"
+                                "<button type='submit'>💾 执行调整</button></form></div>")
+                    else:
+                        body = (_sp_hdr + _c1 +
+                                "<div class='card' style='margin-top:18px'><h3>② 执行调整</h3>"
+                                "<div class='sub'>请先在 ① 里选好群组并点「🔍 载入成员」</div></div>")
                 elif sub == "fundflow":
                     sel = uid or 0
                     recv_map, send_map = defaultdict(int), defaultdict(int)
@@ -15433,17 +15712,52 @@ def start_health_server():
                 subs = {k: n for k, n in SUBPAGES.get(gkey, [])}
                 sname = subs.get(sub, sub)
                 if gkey == "points" and sub == "adjust":
-                    body = (f"<h1>{gicon} {sname}</h1>"
-                            f"<div class='sub'>直接给玩家加/减统一积分（正数加、负数减），立即生效并落盘；等效群里的 /add 命令</div>{msg}"
-                            "<div class='card'><form method='post' action='/points_adj'>"
-                            "<div class='row'><div class='lbl'>群 ID<small>下拉选择；选群后用户 ID 自动带出该群成员</small></div>"
-                            f"<select name='cid' data-users-for='dl_adj_uid' required>{_group_options()}</select></div>"
-                            "<div class='row'><div class='lbl'>用户 ID<small>点输入框可从该群成员里选，也可手输</small></div>"
-                            "<input type='number' name='uid' list='dl_adj_uid' required>"
-                            "<datalist id='dl_adj_uid'></datalist></div>"
-                            "<div class='row'><div class='lbl'>积分变动<small>正数=加分，负数=扣分，0 无效</small></div>"
-                            "<input type='number' name='amount' value='1000' required></div>"
-                            "<button type='submit'>💾 执行加减分</button></form></div>")
+                    # 2026-09-12 用户报「网页端积分加减分无效根本用不了」。
+                    # 后端 /points_adj 本地端到端实测完全正常（加分/减分/超扣拦截/落盘全部通过），
+                    # 线上源码与本地逐行一致 ⇒ 卡点在**表单选不了人**：
+                    # 旧表单只有一个 `input type=number list=datalist` 的「用户 ID」，
+                    # number+datalist 在移动端浏览器上支持极差（下拉根本弹不出来），
+                    # 而玩家不可能去记 10 位数字 ID ⇒ 管理员实际上根本没法完成这一步。
+                    # 改为「① 选群 → ② 原生下拉选成员」两步（原生 select 在各端都正常），
+                    # 另留「手填用户」兜底，支持 数字 ID / @用户名 / 昵称 三种写法。
+                    _gsel = sel_flt_cid
+                    _hdr = (f"<h1>{gicon} {sname}</h1>"
+                            f"<div class='sub'>直接给玩家加/减统一积分（正数加、负数减），立即生效并落盘；等效群里的 /add 命令</div>{msg}{err}")
+                    _card1 = ("<div class='card'><h3>① 选择群组</h3>"
+                              "<div class='sub'>先选群并载入，下面才会列出该群成员（手机端同样可用）</div>"
+                              "<form method='get' action='/page/points/adjust' style='display:flex;gap:10px;align-items:end;flex-wrap:wrap'>"
+                              "<div style='flex:1;min-width:220px'><div class='sub'>群组</div>"
+                              "<select name='cid' required><option value=''>— 请选择群 —</option>"
+                              + _group_options(selected=_gsel) + "</select></div>"
+                              "<button type='submit' style='margin-top:0'>🔍 载入成员</button></form></div>")
+                    if _gsel:
+                        _mem_opts = "".join(
+                            f"<option value='{u}'>{html.escape(user_names.get(u, str(u)))}（{u}）</option>"
+                            for u in sorted(set(game_chips.get(_gsel, {})) | set(member_profiles.get(_gsel, {})),
+                                            key=lambda u: -int(game_chips.get(_gsel, {}).get(u, 0) or 0)))
+                        _mem_sel = (f"<select name='uid' style='flex:1;min-width:200px'>"
+                                    f"<option value=''>（可选）从该群成员里挑一个</option>{_mem_opts}</select>"
+                                    if _mem_opts else
+                                    "<div class='sub' style='flex:1'>该群还没有任何成员记录，请用下面的「手填用户」</div>")
+                        _known = len(set(game_chips.get(_gsel, {})) | set(member_profiles.get(_gsel, {})))
+                        _card2 = ("<div class='card' style='margin-top:18px'><h3>② 执行加减分</h3>"
+                                  f"<div class='sub'>目标群：<b>{html.escape(chat_name_cache.get(_gsel) or '未命名群')}</b>"
+                                  f" <code>{_gsel}</code> · 已知成员 {_known} 人</div>"
+                                  "<form method='post' action='/points_adj'>"
+                                  f"<input type='hidden' name='cid' value='{_gsel}'>"
+                                  "<div class='row'><div class='lbl'>成员<small>原生下拉，手机也能正常选</small></div>"
+                                  f"{_mem_sel}</div>"
+                                  "<div class='row'><div class='lbl'>手填用户<small>数字 ID / @用户名 / 昵称任填其一，填了就优先用它</small></div>"
+                                  "<input type='text' name='uid_raw' placeholder='如 123456789 或 @name 或 昵称' style='flex:1;min-width:200px'></div>"
+                                  "<div class='row'><div class='lbl'>积分变动<small>正数=加分，负数=扣分，0 无效</small></div>"
+                                  "<input type='number' name='amount' value='1000' required></div>"
+                                  "<button type='submit'>💾 执行加减分</button></form></div>")
+                        _card3 = _point_adj_log_card()
+                    else:
+                        _card2 = ("<div class='card' style='margin-top:18px'><h3>② 执行加减分</h3>"
+                                  "<div class='sub'>请先在 ① 里选好群组并点「🔍 载入成员」</div></div>")
+                        _card3 = ""
+                    body = _hdr + _card1 + _card2 + _card3
                 elif gkey == "points" and sub == "impexp":
                     opts = _group_options()
                     body = (f"<h1>{gicon} {sname}</h1>"
@@ -16408,10 +16722,20 @@ def start_health_server():
                         self._redirect(_base + ("?" + q if q else ""))
                     try:
                         cid_ = int(form["cid"][0]) if form.get("cid") else None
-                        uid_ = int(form["uid"][0]) if form.get("uid") else None
+                        uid_ = int(form["uid"][0]) if form.get("uid") and form["uid"][0].strip() else None
                         amt = int(form["amount"][0]) if form.get("amount") else None
                     except ValueError:
                         _back(err="参数必须是数字"); return
+                    # 2026-09-12：排位分调整页的「手填用户」兜底（数字 ID / @用户名 / 昵称）。
+                    # 原生下拉没选中、但手填了 uid_raw 时，先把它解析成数字 ID 再走原逻辑；
+                    # 解析失败直接回可读错误（不静默改错人）。
+                    if op == "seasonpts" and cid_ and not uid_:
+                        _uid_raw = (form.get("uid_raw", [""])[0] or "").strip()
+                        if _uid_raw:
+                            _ru, _rerr = _resolve_web_uid(cid_, _uid_raw)
+                            if _rerr:
+                                _back(err=_rerr); return
+                            uid_ = _ru
                     if op == "authadd" and cid_:
                         AUTHORIZED_GROUPS.add(cid_); save_data()
                         try:   # 顺手拉群名进缓存，授权列表不再显示裸 ID
@@ -16740,21 +17064,41 @@ def start_health_server():
                     _lc_back(note=f"✅ 抽奖「{fields['title'][:20]}」已创建并发到群 {cid}{pub_err}")
                     return
                 if path == "/points_adj":
-                    def _back(note="", err=""):
-                        q = ("?note=" + quote(note)) if note else ("?err=" + quote(err) if err else "")
-                        self._redirect("/page/points/adjust" + q)
+                    # 2026-09-12 改：群 ID 改为隐藏字段（页面①已选好），用户支持
+                    # 「原生下拉选成员」或「手填 ID/@用户名/昵称」两条路；回跳带上 cid，
+                    # 否则跳回页面会丢掉当前群、下拉又得重选一次（旧实现的老毛病）。
+                    def _back(note="", err="", cid=0):
+                        q = ("note=" + quote(note)) if note else ("err=" + quote(err) if err else "")
+                        if cid:
+                            q = (f"cid={cid}&" + q) if q else f"cid={cid}"
+                        self._redirect("/page/points/adjust" + ("?" + q if q else ""))
                     try:
-                        cid = int(form.get("cid", [""])[0]); uid = int(form.get("uid", [""])[0])
+                        cid = int(form.get("cid", [""])[0])
+                    except ValueError:
+                        _back(err="参数错误：群 ID 必须是数字"); return
+                    # 手填优先（填了说明用户就是要指定这个人），否则用下拉选中的成员
+                    _raw = (form.get("uid_raw", [""])[0] or "").strip() or (form.get("uid", [""])[0] or "").strip()
+                    uid, _uerr = _resolve_web_uid(cid, _raw)
+                    if _uerr:
+                        _back(err=_uerr, cid=cid); return
+                    try:
                         amount = int(form.get("amount", [""])[0])
                         if amount == 0: raise ValueError
                     except ValueError:
-                        _back(err="参数错误：群ID/用户ID 必须是数字，金额不能为 0"); return
+                        _back(err="参数错误：金额必须是数字且不能为 0", cid=cid); return
+                    _who = (user_names.get(uid) or str(uid))
                     if player_is_busy(cid, uid):
-                        _back(err="该玩家正在游戏中，请等牌局结束再调整积分"); return
+                        _back(err=f"该玩家正在游戏中，请等牌局结束再调整积分（{_who}）", cid=cid); return
                     if amount < 0 and game_chips[cid][uid] < -amount:
-                        _back(err=f"扣分失败：该玩家当前积分 {game_chips[cid][uid]} 不足 {-amount}"); return
+                        _back(err=f"扣分失败：{_who} 当前积分 {game_chips[cid][uid]} 不足 {-amount}", cid=cid); return
                     _before_bal = int(game_chips[cid][uid] or 0)
                     game_chips[cid][uid] += amount
+                    # 记一笔「最近调整」：管理员一眼能看到刚才那次确实生效了（用户报「无效」时的痛点）
+                    WEB_POINT_ADJ_LOG.append({
+                        "ts": now_bj().strftime("%m-%d %H:%M:%S"), "cid": cid,
+                        "gname": chat_name_cache.get(cid) or str(cid), "uid": uid,
+                        "name": _who, "amount": amount, "after": game_chips[cid][uid]})
+                    del WEB_POINT_ADJ_LOG[:-20]
                     if amount > 0:
                         _earn_add(cid, uid, amount)   # 网页加分同样计入累计获得
                     force_save_now()
@@ -16765,7 +17109,8 @@ def start_health_server():
                                 _check_level_drop_on_spend(_bot_app, cid, uid, _before_bal), _bot_loop).result(8)
                         except Exception:
                             logger.exception("网页扣分降级通知失败（已吞并）")
-                    _back(note=f"✅ 已{'给' if amount > 0 else '扣除'} 用户 {uid} {abs(amount)} 积分，当前余额 {game_chips[cid][uid]}（群 {cid}）")
+                    _back(note=f"✅ 已{'给' if amount > 0 else '扣除'} {_who}（{uid}）{abs(amount)} 积分，"
+                               f"当前余额 {game_chips[cid][uid]}（群 {cid}）", cid=cid)
                     return
                 if path == "/save":
                     if not _check_session(self.headers.get("Cookie")):

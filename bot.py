@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-12-1540"
+BOT_VERSION = "2026-09-12-1620"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -3382,6 +3382,8 @@ async def emergency_if_needed(cid, uid, app, wallet=None, poker=None):
     wallet[cid][uid] = sget("EMERGENCY_CHIPS")
     if poker and uid in poker.chips: poker.chips[uid] += sget("EMERGENCY_CHIPS")
     _earn_add(cid, uid, sget("EMERGENCY_CHIPS"))   # 归零赠送属于「白给分」，计入累计获得
+    # 台账：白给的分是「凭空产出」，不记流水的话玩家会以为这笔分来路不明/被吞了
+    ledger_add(cid, 0, uid, sget("EMERGENCY_CHIPS"), "应急赠送")
     daily_emergency_used[cid][uid] = used + 1; save_data()
     remaining = sget("EMERGENCY_MAX_USES") - daily_emergency_used[cid][uid]
     schedule_notice_delete(app, cid, await safe_send(app.bot, cid, f"🆘 {await get_name(app, uid)} 积分归零，已赠送 {sget('EMERGENCY_CHIPS')} 应急积分（今日已补充 {daily_emergency_used[cid][uid]}/{sget('EMERGENCY_MAX_USES')} 次，剩余 {remaining} 次）。"))
@@ -3914,12 +3916,17 @@ async def poker_table_text(game, app):
     #   （见 GitHub 474e6893）。那条排版要求已被本次「移出牌桌」取代 —— 别再往牌桌里加回
     #   行动行，否则又会出现「牌桌一行 + 提醒一条」的重复。要改只改 announce_turn 的文案。
     # 玩家行**单行**（2026-09-11 用户要求：与炸金花一致，压成一行）
-    #   `1. Hank 🟢 在局｜投100｜余2400`
     # 👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
+    # 2026-09-12 用户二选一（「1. Sharo Bow 🟢」vs「🟢1. Sharo Bow」）→ **选徽标前置**：
+    #   ① 视觉上是一列「状态」，眼睛扫第一列就知道谁弃了谁全下，不用逐行读到名字结尾；
+    #   ② 「🟢」本身就是「还在局里」，`在局` 两个字是重复表达，删掉更干净（用户原话「在局删除
+    #      是不更加简洁明了」）；`❌`/`🔥` 同理只留徽标，不再写「弃牌 / 全下」。
+    #   ③ 徽标等宽（都是 1 个 emoji），序号列不会被状态长短推歪。
+    # ⛔ 别再改回「名字在前 + 🟢 在局」：用户明确否了那一版。
     for index, uid in enumerate(game.players, 1):
-        status = "❌ 弃牌" if uid in game.folded else "🔥 全下" if uid in game.all_in else "🟢 在局"
+        badge = "❌" if uid in game.folded else "🔥" if uid in game.all_in else "🟢"
         mark = PLAYER_MARK if uid == current else PLAYER_PAD
-        lines.append(f"{mark}{index}. {await get_name(app, uid)} {status}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
+        lines.append(f"{mark}{badge}{index}. {await get_name(app, uid)}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
     return "\n".join(lines)
 
 
@@ -7404,6 +7411,22 @@ def _flow_ts_full(ts):
     return s
 
 
+FLOW_PEER_MAX = 8
+
+
+def _peer_brief(name):
+    """流水括号里的对家名：截到能认出人的长度。
+
+    2026-09-12 用户报「流水里 +50（德州·投喂 无敌棒棒屌爆）太复杂」——**对局行直接不写对家**
+    （见 cmd_points_flow），本函数只管**人对人转移**（转赠/红包），那是唯一需要「谁给的」的信息。
+    昵称可能极长（群友爱堆 emoji/长句），不截断会把一行撑成两行、时间戳被挤下去。
+    """
+    s = str(name or "").strip()
+    if len(s) <= FLOW_PEER_MAX:
+        return s
+    return s[:FLOW_PEER_MAX - 1] + "…"
+
+
 async def cmd_points_flow(update, context):
     """积分流水：一笔笔列出来源/去向（游戏送分 / 红包 / 转赠 / 兑换 / 抽水 / 抽奖 / 聊天积分 / 邀请奖励…）。
 
@@ -7413,6 +7436,10 @@ async def cmd_points_flow(update, context):
          首行 `您当前的积分为N，最近积分流水如下：`，每行 `+10（文字信息） - 2026-09-12 09:36:44`
          （ASCII 正负号 + 全角括号包住类型 + ' - ' + 带秒的完整北京时间）；
       ④ 「流水又偷懒只显示 14 条」→ **默认全部显示**，仅在超过单条上限时丢掉最旧的几条。
+      ⑤ 「德州获得积分文本太他妈的复杂了 而且聊天获得也没有」→ 对局行不再拼对家昵称
+         （`+50（德州）`，见 game_flows 段注释）；聊天积分改为 `chat_earn_daily` + `chat_today`
+         双账本取大；另外把「签到/购买到账/管理员加减分/应急赠送」四条只加钱、不进流水的
+         入口全部补上台账（否则流水永远缺这几类，用户看着就像"漏账"）。
     """
     if not await need_auth(update, context): return
     uid = update.effective_user.id
@@ -7428,15 +7455,27 @@ async def cmd_points_flow(update, context):
             entries.append((e.get("ts", ""), -amt, str(e.get("typ", "")), e.get("to")))
         elif e.get("to") == target and amt:
             entries.append((e.get("ts", ""), amt, str(e.get("typ", "")), e.get("frm")))
+    # 对局净转移（德州/金花/竞猜/大话骰）：**只记游戏名，不记对家**
+    #   —— 2026-09-12 用户原话「德州获得积分文本太他妈的复杂了」（`（德州·投喂 无敌棒棒屌爆）`）。
+    #   一局里钱是散户对全桌的净转移，挑一个「对家」本来就是不准确的，写出来只是噪音。
     for e in game_flows:
         amt = int(e.get("amt", 0) or 0)
         if e.get("frm") == target and amt:
-            entries.append((e.get("ts", ""), -amt, str(e.get("typ", "")), e.get("to")))
+            entries.append((e.get("ts", ""), -amt, str(e.get("typ", "")), 0))
         elif e.get("to") == target and amt:
-            entries.append((e.get("ts", ""), amt, str(e.get("typ", "")), e.get("frm")))
+            entries.append((e.get("ts", ""), amt, str(e.get("typ", "")), 0))
     # 聊天积分：按「人·天」聚合出一行（逐条进台账会把红包/转赠挤掉，见 chat_earn_daily 注释）
-    for date, chats in chat_earn_daily.items():
-        tot = sum(int(users.get(target, 0) or 0) for users in chats.values())
+    #   ⚠️ 两个账本都要读：`chat_earn_daily` 是现行账本（留 7 天），`chat_today` 是旧账本
+    #   （留 2 天，`_award_chat_points` 里两者同步写）。只读前者 ⇒ 旧存档/刚升级的群
+    #   当天之前的聊天分**在流水里凭空消失**（用户报「聊天获得也没有」）。
+    #   同一天两边都有时**取较大值**，不是相加 —— 同一天同一笔分会被两个账本各记一次，相加等于双计。
+    chat_by_date = {}
+    for bank in (chat_earn_daily, chat_today):
+        for date, chats in bank.items():
+            tot = sum(int(users.get(target, 0) or 0) for users in chats.values())
+            if tot > chat_by_date.get(date, 0):
+                chat_by_date[date] = tot
+    for date, tot in chat_by_date.items():
         if tot:
             entries.append((f"{date} 23:59", tot, "聊天积分", 0))
     entries.sort(key=lambda x: x[0])
@@ -7462,7 +7501,9 @@ async def cmd_points_flow(update, context):
                     try: nm = await get_name(context.application, peer, cid=cid)
                     except Exception: nm = str(peer)
                 peer_cache[peer] = nm or str(peer)
-            peer_txt = "·" + peer_cache[peer]
+            # 只有人对人转移才保留对方（「这 100 是谁给的」是这笔账的全部信息量）；
+            # 长昵称截断（见 _peer_brief），别让一行的宽度被昵称拖垮。
+            peer_txt = "·" + _peer_brief(peer_cache[peer])
         body.append(f"{'+' if amt >= 0 else '-'}{abs(amt)}（{typ}{peer_txt}） - {_flow_ts_full(ts)}")
     total = len(body)
     dropped = 0
@@ -7911,6 +7952,12 @@ async def cmd_add(update, context):
         game_chips[cid][uid] += amount
         if amount > 0:
             _earn_add(cid, uid, amount)   # 管理员加分算「获得」；扣分不回退累计（只增不减）
+        # 台账：加分记「谁给的」（frm=0 系统），扣分记「从谁那扣的」（frm=uid）——
+        # cmd_points_flow 按 frm==我 → 支出、to==我 → 收入 来判方向，两侧各记一半即可。
+        if amount > 0:
+            ledger_add(cid, 0, uid, amount, "管理员加分")
+        else:
+            ledger_add(cid, uid, 0, -amount, "管理员扣分")
         save_data()
     verb = "添加" if amount > 0 else "扣除"
     msg = _fmt_tpl("add_msg_tpl", target=await get_name(context.application, uid),
@@ -11069,6 +11116,9 @@ async def cmd_sign(update, context):
         old_earned = _earn_get(cid, uid)
         game_chips[cid][uid] += reward
         _earn_add(cid, uid, reward)
+        # 2026-09-12：签到以前只加钱、不进流水 ⇒ 玩家在「流水」里看不到这笔，以为没发。
+        # 凡「系统凭空发分」的入口都必须记台账（口径见 cmd_points_flow 文档）。
+        ledger_add(cid, 0, uid, reward, "签到奖励")
         sign_data[cid][uid] = {"last": today, "streak": streak}
         save_data()
     bonus = "（含连续7天额外奖励）" if streak % 7 == 0 else ""
@@ -12707,6 +12757,7 @@ async def _buy_settle(context, oid, ok, q):
         old_earned = _earn_get(_cid, _uid)
         game_chips[_cid][_uid] += o["amount"]
         _earn_add(_cid, _uid, o["amount"])   # 购买到账是系统新产出，计入累计获得
+        ledger_add(_cid, 0, _uid, o["amount"], "购买到账")   # 台账：玩家「流水」里要能看到这笔充值
         try:
             await context.bot.send_message(o["cid"], f"✅ 你的购买申请（{o['amount']} 积分）已确认到账，当前积分 {game_chips[o['cid']][o['uid']]}。")
         except Exception:
@@ -17386,6 +17437,11 @@ def start_health_server():
                     del WEB_POINT_ADJ_LOG[:-20]
                     if amount > 0:
                         _earn_add(cid, uid, amount)   # 网页加分同样计入累计获得
+                    # 台账：与群内 /add 同口径（网页改的分也要能在玩家「流水」里查到）
+                    if amount > 0:
+                        ledger_add(cid, 0, uid, amount, "管理员加分")
+                    else:
+                        ledger_add(cid, uid, 0, -amount, "管理员扣分")
                     force_save_now()
                     if amount < 0 and _bot_app and _bot_loop:
                         # 开启「允许降级」时扣分可能掉级 → 发降级通知（开关内自判，零开销）

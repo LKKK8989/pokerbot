@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-12-1715"
+BOT_VERSION = "2026-09-12-1720"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -816,10 +816,14 @@ _delete_tasks = set()      # 持有删除 task 的引用：裸 create_task 不�
 # ── 玩家行序号对齐（2026-09-11 用户第 3 次投诉「1. 2. 3. 没对齐」后定死） ─────────────
 # 根因：👉 是 emoji，在 Telegram 里实测约 1.3em 宽；而旧的 3 个半角空格只有约 0.75em，
 #       ⇒ 行动者行的 `3.` 被推到右边，与 `1.`/`2.` 不同列。
-# 正解：非行动者补位用「全角空格(U+3000) + 2 个半角空格」≈ 1.56em，与「👉 + 半角空格」≈ 1.58em 等宽。
-# ⚠️ 四个游戏（德州/21点/金花/大话骰）玩家行**必须**用这两个常量，别再手写空格。
+# 正解：非行动者补位用「盲文空格 U+2800 + 1 个半角空格」≈ 与「👉 + 半角空格」≈ 1.58em 等宽。
+# ⚠️ 四个游戏（德州/21点/金花/大话骰）玩家行**必须**用这两常量，别再手写空格。
+#   ⚠️ 关键坑（2026-09-12 用户 Android 端第 4 次投诉「没对齐」）：旧实现用全角空格 U+3000 补位，
+#   但 U+3000 属 Unicode 空白(Zs)，Android Telegram 会裁切行首空白 → 非行动者补位渲染成 0 宽、
+#   徽标 🟢 顶到最左，与行动者 👉(≈2.5 格) 错位。改 U+2800 BRAILLE PATTERN BLANK（类别 So 非空白
+#   → 绝不裁切，且天然占 2 格）即稳稳对齐。
 PLAYER_MARK = "👉 "        # 行动者：emoji + 1 半角空格
-PLAYER_PAD = "　  "        # 非行动者：全角空格 + 2 半角空格（视觉等宽于 PLAYER_MARK）
+PLAYER_PAD = "\u2800 "       # 非行动者：盲文空格(U+2800, 非空白→不裁切) + 1 半角空格，视觉等宽于 PLAYER_MARK       
 
 
 def player_line(index, name, badge="", acting=False, cols=(), sep=" "):
@@ -827,7 +831,7 @@ def player_line(index, name, badge="", acting=False, cols=(), sep=" "):
 
     版式：`{行动标记}{徽标}{序号}. {名字}{分隔}{信息列…}`
 
-      · 行动标记：`PLAYER_MARK`(👉 ) / `PLAYER_PAD`(全角空格补位)。两者视觉等宽
+      · 行动标记：`PLAYER_MARK`(👉 ) / `PLAYER_PAD`(盲文空格 U+2800 补位，非空白字符不会被客户端裁切)。两者视觉等宽
         ⇒ 不管是不是行动者，**序号永远落在同一列**（别再手写空格，见上面注释的根因）。
       · 徽标：**恒定在最前**，且只用 1 个 emoji（等宽，不会把序号列推歪）。
           🟢 在局 ｜ ❌ 弃牌·爆牌 ｜ 🔥 全下 ｜ 💀 出局 ｜ ✋ 已停牌
@@ -5195,6 +5199,15 @@ def _dice_is_straight(hand, wild=True):
     顺子这手**整手算 0 个**，不参与任何点数统计（开骰计数 + 亮盅展示都要体现）。
     万能开时还认「**假顺**」（2026-09-11 群友口径，张瑾一：12456 在两人局算顺子）：
     1 当替身补上空位，只要 5 颗能排成 12345 / 23456 就算 —— 如 12456（1→3）、13456（1→2）。
+
+    ⚠️ 2026-09-12 修正（用户两次报障）：
+    **假顺最多只能用 1 个万能 1 补位（= 整手只能有 1 个空位）**。需要同时拿 2 个 1 去补两个空位
+    不算顺子——否则几乎任何带两 1 的牌都能凑顺子，规则就失去意义。含两类典型错判：
+      · 1 1 3 4 6（补 2、5 → 23456）不算顺子；
+      · 1 1 2 3 4 / 1 1 3 4 5（补 1 位 + 另一空位 → 12345）也不算顺子——
+        即便其中一个空位恰是目标连号里天然的 1 位，它照样要消耗一个万能，
+        所以仍需 2 个万能 → 超出「最多 1 个」上限。
+    真顺（无 1 / 只 1 个 1 自然连号）与单 1 假顺（12456 / 13456 / 12346）保持原样。
     掉骰制下只有满 5 颗才可能成顺（4 颗/6 颗一律不算）。
     """
     if len(hand) != 5: return False
@@ -5204,13 +5217,17 @@ def _dice_is_straight(hand, wild=True):
     if not wild: return False
     ones = hand.count(1)
     if ones == 0: return False
-    rest = sorted(d for d in hand if d != 1)
+    # 非 1 的骰本身必须都是目标连号里的值；否则哪怕有万能也拼不出顺子
+    rest = [d for d in hand if d != 1]
     for target in ([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]):
-        pool = list(target)
-        for d in rest:
-            if d in pool: pool.remove(d)
-            else: pool = None; break
-        if pool is not None: return True     # 剩下的空位正好由 ones 个万能 1 补齐
+        if all(d in target for d in rest):
+            covered = set(rest)
+            missing = [v for v in target if v not in covered]   # 需要靠 1 补的空位（含目标连号里天然的 1 位）
+            # 每个空位都消耗一个万能 1；假顺只允许 1 个空位（= 只能拿 1 个 1 补 1 个位置）。
+            wilds_needed = len(missing)
+            # 最多 1 个万能（= 空位数 ≤ 1）；且 1 的总数够填满所有空位。
+            if wilds_needed <= 1 and ones >= len(missing):
+                return True
     return False
 
 
@@ -5581,13 +5598,10 @@ async def dice_table_text(game, app):
         f"🎲 大话骰 · 第{game.hand_no}手",
         f"💰 奖池 {game.pot} ｜ 场上 {game.total_dice()} 颗骰",
     ]
-    if game.bid:
-        bc, bf, bidder = game.bid
-        lines.append(f"🎙 {bc}个{bf}（{await get_name(app, bidder)}）")
     cur = game.actor if game.phase == "playing" else None
     lines.append("━━━━━━━━━━━━━━━━━")
     # 玩家行**单行**（2026-09-11 用户要求：与炸金花一致压成一行）
-    #   在局 `👉 🟢1. Hank 🎲5 2400` ｜ 出局 `　  💀2. Hank`
+    #   在局 `👉 🟢1. Hank 🎲5 2400` ｜ 出局 `{PLAYER_PAD}💀2. Hank`
     # 版式统一走 player_line()（徽标前置 + 序号对齐）：状态由「中段」提到行首，
     # 徽标本身即状态，所以不再写「已出局」；🎲点数与积分作为**信息列**留在名字后面。
     # 注：积分前不加「余」字 —— 2026-09-11 用户点名砍冗余字（`余`→空格），别再补回去。
@@ -5598,7 +5612,7 @@ async def dice_table_text(game, app):
         else:
             lines.append(player_line(
                 index, await get_name(app, uid), "🟢", acting=acting,
-                cols=[f"🎲{game.dice[uid]}", game.chips[uid]]))
+                cols=[game.chips[uid]]))
     return "\n".join(lines)
 
 
@@ -6424,7 +6438,7 @@ async def jinhua_table_text(game, app):
     # 改由 start_jinhua_turn_timer 调 announce_turn() 单独发一条（60 秒自动回收）。
     # ⛔ 别再往牌桌加回行动行（会与提醒消息重复说同一件事）。
     # 紧凑排版：每人 1 行；版式统一走 player_line()（徽标前置 + 序号对齐）。
-    #   在局 `👉 🟢1. 名 👁 投100 余900` ｜ 弃牌 `　  ❌2. 名 🎴 投100 余900`
+    #   在局 `👉 🟢1. 名 👁 投100 余900` ｜ 弃牌 `{PLAYER_PAD}❌2. 名 🎴 投100 余900`
     # 徽标只留 1 个 emoji（🟢/❌/🔥），不再写「弃 / 全下」；看牌标记 👁/🎴 属于**信息列**，
     # 留在名字后面 —— 与徽标隔着「序号. 名字」一整段，不会出现「🟢👁」连着读成两个状态。
     for index, uid in enumerate(game.players, 1):
@@ -8896,6 +8910,8 @@ async def on_button(update, context):
                 if not ok: await q.answer(desc, show_alert=True); return
                 await q.answer(f"已叫 {mr[0]}个{mr[1]}")
                 game.last_action = f"{await get_name(context.application, uid)} 加码叫 {mr[0]}个{mr[1]}"
+                # 当前叫牌单独发一条（跟德州 action_notice 同款），不再堆在牌桌上
+                await action_notice(cid, context.application, uid, f"加码叫 {mr[0]}个{mr[1]}")
                 await start_dice_turn_timer(game, context.application)
                 return
             if data == "dice_open":
@@ -10393,6 +10409,8 @@ async def on_text(update, context):
                         await send_reply(update, context, f"❌ {desc}"); return
                     _dg.last_action = f"{await get_name(context.application, user.id)} 叫 {_bid[0]}个{_bid[1]}"
                     await _dice_del_bid_msg(context, cid, message)   # 删掉玩家发的叫牌文本，保持群聊清爽
+                    # 当前叫牌单独发一条（跟德州 action_notice 同款），不再堆在牌桌上
+                    await action_notice(cid, context.application, user.id, f"叫 {_bid[0]}个{_bid[1]}")
                     await start_dice_turn_timer(_dg, context.application)
                     return
     except Exception:

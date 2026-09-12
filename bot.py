@@ -4,7 +4,7 @@ import html
 import io
 import json
 # 版本标记：/health 与登录页底部都会显示，用于一眼核对"线上跑的是不是最新代码"
-BOT_VERSION = "2026-09-12-1620"
+BOT_VERSION = "2026-09-12-1715"
 # 主题色：key -> (主色, 深主色, 强色上的文字色, 页面底色, 侧栏底, 卡片底, 输入框底, 边框, 表头底, 悬停底)
 # 网页顶栏色点一键切换，存 SETTINGS_SNAPSHOT["ui_theme"] 持久化；整套色板全量生效，不是只换 accent
 _UI_THEMES = {
@@ -820,6 +820,36 @@ _delete_tasks = set()      # 持有删除 task 的引用：裸 create_task 不�
 # ⚠️ 四个游戏（德州/21点/金花/大话骰）玩家行**必须**用这两个常量，别再手写空格。
 PLAYER_MARK = "👉 "        # 行动者：emoji + 1 半角空格
 PLAYER_PAD = "　  "        # 非行动者：全角空格 + 2 半角空格（视觉等宽于 PLAYER_MARK）
+
+
+def player_line(index, name, badge="", acting=False, cols=(), sep=" "):
+    """四款游戏（德州 / 21点 / 炸金花 / 大话骰）玩家行的**唯一**渲染出口。
+
+    版式：`{行动标记}{徽标}{序号}. {名字}{分隔}{信息列…}`
+
+      · 行动标记：`PLAYER_MARK`(👉 ) / `PLAYER_PAD`(全角空格补位)。两者视觉等宽
+        ⇒ 不管是不是行动者，**序号永远落在同一列**（别再手写空格，见上面注释的根因）。
+      · 徽标：**恒定在最前**，且只用 1 个 emoji（等宽，不会把序号列推歪）。
+          🟢 在局 ｜ ❌ 弃牌·爆牌 ｜ 🔥 全下 ｜ 💀 出局 ｜ ✋ 已停牌
+        2026-09-12 用户二选一后拍板「徽标前置」：眼睛扫第一列就知道谁出局了，
+        不必逐行读到名字中段；徽标本身就说明了状态，所以不再画蛇添足写「在局 / 弃牌 / 已出局」。
+      · 信息列（👁看牌 / 🎲点数 / 手牌+点数 / 投注 / 余额）：**留在名字后面**。
+        徽标与信息列之间隔着「序号. 名字」一整段，所以不会出现 `🟢👁1. 名`
+        那种两个状态挤在一起、读起来像两种状态的歧义。
+      · `cols` 里的空值自动跳过（例如某些局面没有第二信息列），不会留下连续分隔符。
+
+    ⛔ 别再改回「名字在前 + 状态挂名字/信息列后面」：用户已明确否掉，四款必须一致。
+       （旧写法把状态徽标埋在中段 —— 顺序是「名字 → 第二信息列 → 状态 → 投注 → 余额」，
+        眼睛必须读到中段才知道谁出局了；徽标前置后扫第一列即可。）
+    参数都是纯值、不碰 game 对象 ⇒ 单测可以直接验版式（见 test_player_row_unified.py）。
+    """
+    mark = PLAYER_MARK if acting else PLAYER_PAD
+    row = f"{mark}{badge}{index}. {name}"
+    for col in cols:
+        if col not in (None, ""):
+            row += f"{sep}{col}"
+    return row
+
 WEB_OTP_ENABLED = False  # 一键登录(/后台)为主，密码直登为备用；验证码步骤默认关闭（要开改这里）
 WEB_BASE_URL = ""  # 后台公网地址（如 https://xxx.northflank.app），/后台 一键登录链接用；不配则该功能不可用
 # ---------- 群组抽奖 ----------
@@ -1115,10 +1145,16 @@ def _fmt_tpl(key, **kw):
 
 # 积分系统持久化数据（与主数据同一套脏标记/写盘/备份机制）
 sign_data = defaultdict(lambda: defaultdict(dict))   # sign_data[cid][uid] = {"last": "YYYY-MM-DD", "streak": n}
-chat_today = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # chat_today[date][cid][uid] = 当日聊天已得积分
-# chat_earn_daily[date][cid][uid] = 当日聊天积分累计（**只增不减**，供「积分流水」展示）。
+# chat_earn_daily[date][cid][uid] = 当日聊天积分累计（**只增不减**）。一份账本管三件事：
+#   ① 聊天每日上限判定（_award_chat_points）②「我的积分」里的当日聊天分 ③「积分流水」按人·天聚合展示。
 # 为什么不逐条进 ledger：聊天积分小额高频，逐条记账会把 5000 条台账几天内冲干净，
 # 把红包/转赠这些真正需要审查的记录挤掉。按「人·天」聚合成一条，既看得到又不淹台账。
+# ⚠️ 2026-09-12 合并：这里**曾经还有第二个账本**（结构相同、只留 2 天、只服务日上限判定）。
+#   它与本账本是同一份数据的两份拷贝 —— _award_chat_points() 里两行紧挨着写、中间没有任何
+#   提前返回，且「上一次的值 + 本次得分」恒等于「本次得分累加」⇒ 两者逐字节相同，
+#   唯一差别只有保留天数。用户点名「聊天分还分为2个账本 你是不是在代码里面写了一堆重复没用的东西」
+#   ⇒ 删掉旧账本，三处读点全改读本账本（判定语义不变，留存反而从 2 天变 7 天，更稳）。
+#   旧存档里的残留键由 load_data() 一次性搬进来（见那里的迁移注释），历史聊天分不会丢。
 chat_earn_daily = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 newbie_rewarded = {}                                 # "cid:uid" -> True 新人欢迎奖励已发放（防重复）
 chat_dup_hist = {}                                   # (cid,uid,内容归一化) -> [ts,...] 有效发言查重用
@@ -2073,7 +2109,6 @@ def force_save_now():
                 "champions_history": champions_history,
                 "user_names": {str(uid): n for uid, n in user_names.items()},
                 "sign_data": {str(cid): {str(uid): dict(v) for uid, v in users.items()} for cid, users in sign_data.items()},
-                "chat_today": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in chats.items()} for date, chats in chat_today.items()},
                 "chat_earn_daily": {date: {str(cid): {str(uid): v for uid, v in users.items()} for cid, users in chats.items()} for date, chats in chat_earn_daily.items()},
                 "newbie_rewarded": {k: 1 for k in newbie_rewarded},
                 "invite_daily": {date: {str(cid): {str(u): dict(v) for u, v in us.items()}
@@ -2295,15 +2330,23 @@ def load_data():
         for cid, users in data.get("sign_data", {}).items():
             for uid, v in users.items():
                 if isinstance(v, dict): sign_data[int(cid)][int(uid)] = {"last": str(v.get("last", "")), "streak": int(v.get("streak", 0))}
-        for date, chats in data.get("chat_today", {}).items():
-            for cid, users in chats.items():
-                for uid, v in users.items():
-                    chat_today[str(date)][int(cid)][int(uid)] = int(v)
         chat_earn_daily.clear()
         for date, chats in data.get("chat_earn_daily", {}).items():
             for cid, users in chats.items():
                 for uid, v in users.items():
                     chat_earn_daily[str(date)][int(cid)][int(uid)] = int(v)
+        # 旧存档迁移（2026-09-12 双账本合并）：老 bot_data.json 里还残留着一个已删除的旧账本键
+        #   （结构与 chat_earn_daily 相同、只留 2 天）。直接丢弃会让「最近 2 天的聊天分」
+        #   在「积分流水」里凭空消失 —— 那正是用户 09-12 报过的「聊天获得也没有」。
+        #   所以按 (date, cid, uid) **取大**并入唯一账本：取大而不是相加，
+        #   因为同一天同一笔分在旧版被两个账本各记过一次，相加等于双计。
+        for date, chats in data.get("chat_today", {}).items():
+            for cid, users in chats.items():
+                for uid, v in users.items():
+                    _cd, _ud, _vd = int(cid), int(uid), int(v)
+                    _dst = chat_earn_daily[str(date)][_cd]
+                    if _vd > _dst.get(_ud, 0):
+                        _dst[_ud] = _vd
         newbie_rewarded.clear()
         for k in (data.get("newbie_rewarded") or {}):
             newbie_rewarded[str(k)] = True
@@ -3184,17 +3227,45 @@ def audit_autodel_whitelist():
 
 
 def install_autodelete_default(app):
-    """【默认开启自动删除】给 telegram.Bot 的每个 send_* 打补丁：群消息默认回收。
+    """【默认开启自动删除】给**运行实例真实类**的每个发送 API 打补丁：群消息默认回收。
 
     幂等（重复调用无副作用）。用**类级**补丁，因为 Bot 定义了 __slots__，无法挂实例属性。
     想临时豁免一次发送：`bot.send_message(..., autodel_keep=True)`。
 
     ⚠️ 覆盖 `_AUTODEL_PATCH_METHODS` 里的**全部**发送 API，而不是只包 send_message：
     只包一个的话，用 send_photo / send_document 发的新功能又变成「永不删除」。
+
+    ⚠️⚠️ 2026-09-12 真根因（用户截图：群里发「积分排名」→「⚠️ 指令处理出错，请联系管理员。」）：
+      `Application.builder().build()` 造出来的是 **ExtBot**（`Bot` 的子类，PTB 源码里走
+      `ApplicationBuilder._build_ext_bot()`），而 ExtBot **自己实现了全部 send_xxx**，内部用
+      `super().send_xxx()` 转发。此前把补丁 setattr 到父类 `telegram.Bot` 上 ⇒ 实例走的是
+      子类方法，补丁**从来没有生效过**，后果两条：
+        ① 「默认自动删除」自上线起一次都没跑过（这就是用户第 N 次追问「为什么新加的功能
+           永远不会自动删除」的真因 —— 不是没写，是补丁打在了不被用到的那一层）；
+        ② 调用方传的 `autodel_own` / `autodel_keep` / `autodel_secs` 从来没被 pop 掉，
+           ExtBot 直接抛 `TypeError: got an unexpected keyword argument 'autodel_own'`。
+           榜单 `send_rank_page` 正好传了 `autodel_own=True` ⇒ 异常冒到 on_text 外层 except
+           ⇒ 用户看到「指令处理出错」，消息还被 POINTS_DELETE_SECONDS 回收（截图原样）。
+      修法：沿**真实类的方法解析顺序（MRO）**找到「实际定义该方法的那个类」再 setattr，
+      每个方法只包一层（父类不再包，否则走 super() 转发时会二次记账）。
+      ⚠️ 别再用「给 Bot 打补丁」这种写在父类上的写法：父类补丁会被子类覆盖悄悄吃掉。
     """
     from telegram import Bot as _Bot
-    if getattr(_Bot, "_autodel_patched", False):
-        return
+    _bot_obj = getattr(app, "bot", None)
+    _bot_cls = _Bot
+    if _bot_obj is not None and isinstance(type(_bot_obj), type):
+        _bot_cls = type(_bot_obj)
+    if getattr(_bot_cls, "_autodel_patched", False):
+        return   # 幂等：同一类只打一遍
+
+    def _owner(cls, name):
+        """该方法在 cls 的 MRO 上「实际生效」的定义者 = 第一个在 __dict__ 里定义它的类。
+
+        ExtBot 重写了全部 send_xxx ⇒ owner 是 ExtBot；只有它自己没实现的才回落父类。
+        **必须打在 owner 上**：打在父类 = 被 ExtBot 覆盖吃掉（死补丁，本 bug 的成因）；
+        打在父类和子类两层 = 子类 `super()` 转发时二次排程（同一消息排两条删除任务）。
+        """
+        return next((k for k in cls.__mro__ if name in k.__dict__), None)
 
     def _make_patch(method_name, orig):
         async def _patched(self, *args, **kwargs):
@@ -3227,15 +3298,32 @@ def install_autodelete_default(app):
                 logger.exception("默认自动删除排程失败（不影响发送）")
             return res
         _patched.__name__ = _AUTODEL_PATCH_PREFIX + method_name
+        # ⚠️⚠️ 必须连 `__code__.co_name` 一起改：`_autodel_caller_name()` 走真实栈时读的是
+        # **f_code.co_name**（不是 `__name__`）。只改 `__name__` 的话，真实栈帧名永远是
+        # "_patched"，`_autodel_skip()` 认不出它 ⇒ 调用方被解析成 "_patched" ⇒ 白名单
+        # **全部静默失配**：`_AUTODEL_KEEP_FUNCS` 里的 on_text（德州牌桌无按钮正文必须常驻）、
+        # run / _push_animation_frame（赛马动画帧）会被 300 秒删掉；`_AUTODEL_OWN_FUNCS`
+        # 里的 send_reply / send_settle 会被叠一层默认删除。
+        # 这个坑只在补丁**真的生效之后**才会暴露 —— 补丁此前是死的，所以从没人发现。
+        try:
+            _patched.__code__ = _patched.__code__.replace(co_name=_patched.__name__)
+        except Exception:   # pragma: no cover - 极端环境兜底
+            logger.warning("补丁帧名改写失败：自动删除白名单可能失配（牌桌/赛马动画会被误删）")
         return _patched
 
     done = []
     for _m in _AUTODEL_PATCH_METHODS:
-        _orig = getattr(_Bot, _m, None)
-        if callable(_orig):
-            setattr(_Bot, _m, _make_patch(_m, _orig))
-            done.append(_m)
-    _Bot._autodel_patched = True
+        _own = _owner(_bot_cls, _m)          # ← 打在该方法的真实定义类上（ExtBot）
+        if _own is None:
+            continue
+        _func = _own.__dict__.get(_m)
+        if not callable(_func):
+            continue
+        if getattr(_func, "__name__", "").startswith(_AUTODEL_PATCH_PREFIX):
+            continue                          # 已经包过（防二次包装）
+        setattr(_own, _m, _make_patch(_m, _func))
+        done.append(_m)
+    _bot_cls._autodel_patched = True
     logger.info("已启用「默认自动删除」：群里无按钮消息 %s 秒后回收、榜单 %s 秒后回收（已覆盖 %s）",
                 AUTODEL_DEFAULT_SECONDS, _rank_delete_secs(), ",".join(done))
     _miss = audit_autodel_whitelist()
@@ -3923,10 +4011,12 @@ async def poker_table_text(game, app):
     #      是不更加简洁明了」）；`❌`/`🔥` 同理只留徽标，不再写「弃牌 / 全下」。
     #   ③ 徽标等宽（都是 1 个 emoji），序号列不会被状态长短推歪。
     # ⛔ 别再改回「名字在前 + 🟢 在局」：用户明确否了那一版。
+    # 版式统一由 player_line() 负责（徽标前置 + 序号对齐），本处只报数据。
     for index, uid in enumerate(game.players, 1):
         badge = "❌" if uid in game.folded else "🔥" if uid in game.all_in else "🟢"
-        mark = PLAYER_MARK if uid == current else PLAYER_PAD
-        lines.append(f"{mark}{badge}{index}. {await get_name(app, uid)}｜投{game.total_bet[uid]}｜余{game.chips[uid]}")
+        lines.append(player_line(
+            index, await get_name(app, uid), badge, acting=(uid == current),
+            cols=[f"投{game.total_bet[uid]}", f"余{game.chips[uid]}"], sep="｜"))
     return "\n".join(lines)
 
 
@@ -4853,10 +4943,23 @@ async def update_blackjack_ui(game, app):
         # 玩家自己的手牌在下方玩家列表里已有，牌桌不再重复。
         # ⛔ 别再往牌桌加回行动行（会与提醒消息重复说同一件事）。
         lines.append("")
-        # 👉 留在行首，非行动者补 3 个半角空格占位 → 所有行序号落在同一列
-        for i, uid in enumerate(game.players, 1):
-            mark = PLAYER_MARK if uid == curr_uid else PLAYER_PAD
-            lines.append(f"{mark}{i}. {await get_name(app, uid)} {game.get_card_str(game.hands[uid])} ({game.get_score(game.hands[uid])})")
+        # 玩家行：统一走 player_line()（徽标前置 + 序号对齐）。
+        #   21点原来**没有任何状态列**，与另外三款不一致 ⇒ 本轮补上，语义与德州/金花对齐：
+        #     ❌ 爆牌（点数 > 21）｜✋ 已停牌（轮次已过、人还在）｜🟢 待行动
+        #   ⚠️ 判定顺序：先看爆牌再看轮次 —— 爆牌的玩家轮次也「已过」，
+        #      若反过来判就永远显示不出 ❌（玩家会以为这局自己没爆）。
+        #   信息列（手牌 + 点数）留在名字后面，与徽标隔开一整列，不会读成两个状态。
+        for i, uid in enumerate(game.players):
+            score = game.get_score(game.hands[uid])
+            if score > 21:
+                badge = "❌"
+            elif i < game.current_player_idx:
+                badge = "✋"
+            else:
+                badge = "🟢"
+            lines.append(player_line(
+                i + 1, await get_name(app, uid), badge, acting=(i == game.current_player_idx),
+                cols=[game.get_card_str(game.hands[uid]), f"({score})"]))
         text = "\n".join(lines)
 
         kb_rows = [[
@@ -5484,14 +5587,18 @@ async def dice_table_text(game, app):
     cur = game.actor if game.phase == "playing" else None
     lines.append("━━━━━━━━━━━━━━━━━")
     # 玩家行**单行**（2026-09-11 用户要求：与炸金花一致压成一行）
-    #   `1. Hank 🎲5 🟢 2400` / 出局 `1. Hank 💀 已出局`
-    # 👉 留在行首；非行动者用 PLAYER_PAD 占位（与 PLAYER_MARK 等宽）→ 序号落在同一列
+    #   在局 `👉 🟢1. Hank 🎲5 2400` ｜ 出局 `　  💀2. Hank`
+    # 版式统一走 player_line()（徽标前置 + 序号对齐）：状态由「中段」提到行首，
+    # 徽标本身即状态，所以不再写「已出局」；🎲点数与积分作为**信息列**留在名字后面。
+    # 注：积分前不加「余」字 —— 2026-09-11 用户点名砍冗余字（`余`→空格），别再补回去。
     for index, uid in enumerate(game.players, 1):
-        mark = PLAYER_MARK if uid == cur else PLAYER_PAD
+        acting = (uid == cur)
         if uid in game.out:
-            lines.append(f"{mark}{index}. {await get_name(app, uid)} 💀 已出局")
+            lines.append(player_line(index, await get_name(app, uid), "💀", acting=acting))
         else:
-            lines.append(f"{mark}{index}. {await get_name(app, uid)} 🎲{game.dice[uid]} 🟢 {game.chips[uid]}")
+            lines.append(player_line(
+                index, await get_name(app, uid), "🟢", acting=acting,
+                cols=[f"🎲{game.dice[uid]}", game.chips[uid]]))
     return "\n".join(lines)
 
 
@@ -6316,12 +6423,16 @@ async def jinhua_table_text(game, app):
     # 行动提示（`⏳ 当前行动` / `⏰ 请在 N 秒内行动`）2026-09-12 已**整体移出牌桌** →
     # 改由 start_jinhua_turn_timer 调 announce_turn() 单独发一条（60 秒自动回收）。
     # ⛔ 别再往牌桌加回行动行（会与提醒消息重复说同一件事）。
-    # 紧凑排版：每人 1 行；👉 留在行首，非行动者补 3 个半角空格占位 → 序号落在同一列
+    # 紧凑排版：每人 1 行；版式统一走 player_line()（徽标前置 + 序号对齐）。
+    #   在局 `👉 🟢1. 名 👁 投100 余900` ｜ 弃牌 `　  ❌2. 名 🎴 投100 余900`
+    # 徽标只留 1 个 emoji（🟢/❌/🔥），不再写「弃 / 全下」；看牌标记 👁/🎴 属于**信息列**，
+    # 留在名字后面 —— 与徽标隔着「序号. 名字」一整段，不会出现「🟢👁」连着读成两个状态。
     for index, uid in enumerate(game.players, 1):
-        status = "❌弃" if uid in game.folded else "🔥全下" if uid in game.all_in else "🟢"
+        badge = "❌" if uid in game.folded else "🔥" if uid in game.all_in else "🟢"
         seen_mark = "👁" if uid in game.seen else "🎴"
-        mark = PLAYER_MARK if uid == current else PLAYER_PAD
-        lines.append(f"{mark}{index}. {await get_name(app, uid)} {seen_mark}{status} 投{game.total_bet[uid]} 余{game.chips[uid]}")
+        lines.append(player_line(
+            index, await get_name(app, uid), badge, acting=(uid == current),
+            cols=[seen_mark, f"投{game.total_bet[uid]}", f"余{game.chips[uid]}"]))
     return "\n".join(lines)
 
 
@@ -7437,8 +7548,9 @@ async def cmd_points_flow(update, context):
          （ASCII 正负号 + 全角括号包住类型 + ' - ' + 带秒的完整北京时间）；
       ④ 「流水又偷懒只显示 14 条」→ **默认全部显示**，仅在超过单条上限时丢掉最旧的几条。
       ⑤ 「德州获得积分文本太他妈的复杂了 而且聊天获得也没有」→ 对局行不再拼对家昵称
-         （`+50（德州）`，见 game_flows 段注释）；聊天积分改为 `chat_earn_daily` + `chat_today`
-         双账本取大；另外把「签到/购买到账/管理员加减分/应急赠送」四条只加钱、不进流水的
+         （`+50（德州）`，见 game_flows 段注释）；聊天积分改为按 `chat_earn_daily` 聚合展示
+         （2026-09-12 起**只有一个账本**，不再双账本取大，见变量声明处注释）；
+         另外把「签到/购买到账/管理员加减分/应急赠送」四条只加钱、不进流水的
          入口全部补上台账（否则流水永远缺这几类，用户看着就像"漏账"）。
     """
     if not await need_auth(update, context): return
@@ -7464,17 +7576,14 @@ async def cmd_points_flow(update, context):
             entries.append((e.get("ts", ""), -amt, str(e.get("typ", "")), 0))
         elif e.get("to") == target and amt:
             entries.append((e.get("ts", ""), amt, str(e.get("typ", "")), 0))
-    # 聊天积分：按「人·天」聚合出一行（逐条进台账会把红包/转赠挤掉，见 chat_earn_daily 注释）
-    #   ⚠️ 两个账本都要读：`chat_earn_daily` 是现行账本（留 7 天），`chat_today` 是旧账本
-    #   （留 2 天，`_award_chat_points` 里两者同步写）。只读前者 ⇒ 旧存档/刚升级的群
-    #   当天之前的聊天分**在流水里凭空消失**（用户报「聊天获得也没有」）。
-    #   同一天两边都有时**取较大值**，不是相加 —— 同一天同一笔分会被两个账本各记一次，相加等于双计。
+    # 聊天积分：按「人·天」聚合出一行（逐条进台账会把红包/转赠挤掉，见 chat_earn_daily 注释）。
+    #   2026-09-12 起**只有一个账本**：旧的双账本已被证明是同一份数据的两份拷贝（见声明处注释），
+    #   旧存档的残留由 load_data() 一次性搬进来 ⇒ 这里不必再「两个账本取较大值」。
     chat_by_date = {}
-    for bank in (chat_earn_daily, chat_today):
-        for date, chats in bank.items():
-            tot = sum(int(users.get(target, 0) or 0) for users in chats.values())
-            if tot > chat_by_date.get(date, 0):
-                chat_by_date[date] = tot
+    for date, chats in chat_earn_daily.items():
+        tot = sum(int(users.get(target, 0) or 0) for users in chats.values())
+        if tot > chat_by_date.get(date, 0):
+            chat_by_date[date] = tot
     for date, tot in chat_by_date.items():
         if tot:
             entries.append((f"{date} 23:59", tot, "聊天积分", 0))
@@ -11087,15 +11196,16 @@ def _award_chat_points(cid, uid, text):
     if gain <= 0:
         return
     date = now_bj().strftime("%Y-%m-%d")
-    today = chat_today[date][cid]
-    earned = today.get(uid, 0)
+    # 唯一账本（2026-09-12 合并，见声明处注释）：当日已得分既用于日上限判定，
+    # 也直接供「积分流水」按人·天展示 —— 不必再多维护一份拷贝。
+    daily = chat_earn_daily[date][cid]
+    earned = daily.get(uid, 0)
     if sget("CHAT_DAILY_CAP") > 0:
         gain = min(gain, sget("CHAT_DAILY_CAP") - earned)
         if gain <= 0:
             return
-    today[uid] = earned + gain
+    daily[uid] = earned + gain
     game_chips[cid][uid] += gain
-    chat_earn_daily[date][cid][uid] += gain   # 「积分流水」展示用（按人·天聚合，见声明处注释）
     _earn_add(cid, uid, gain)   # 聊天积分计入累计获得（等级口径），但不发升级通知（高频防刷屏）
 
 async def cmd_sign(update, context):
@@ -11149,7 +11259,7 @@ async def cmd_my_points(update, context):
     cid, uid = update.effective_chat.id, update.effective_user.id
     balance = game_chips.get(cid, {}).get(uid, sget("GAME_STARTING_CHIPS"))
     date = now_bj().strftime("%Y-%m-%d")
-    today_chat = chat_today.get(date, {}).get(cid, {}).get(uid, 0)
+    today_chat = chat_earn_daily.get(date, {}).get(cid, {}).get(uid, 0)
     streak = sign_data.get(cid, {}).get(uid, {}).get("streak", 0)
     signed = "✅ 已签" if sign_data.get(cid, {}).get(uid, {}).get("last") == date else "❌ 未签"
     lv, earned = _level_of(cid, uid)   # 等级按累计获得，与「我的等级」口径一致
@@ -13715,9 +13825,9 @@ async def daily_reset_scheduler(app):
                 _CUR_CID.set(_safe_cid(cid))   # 马匹数量可按群覆盖 → 该群日统计长度按该群解析
                 if cid in race_daily_stats: race_daily_stats[cid] = [0] * sget("HORSE_COUNT")
             archive_old_profit_data()
-            # 积分系统：清掉前天的聊天积分（保留当天用于跨午夜），过期红包退余款
-            chat_today.pop((now_bj() - timedelta(days=2)).strftime("%Y-%m-%d"), None)
-            # 聊天积分流水聚合：保留最近 7 天（超出即清，防长期运行后字典无限膨胀）
+            # 聊天积分聚合账本（2026-09-12 起**唯一**）：保留最近 7 天，超出即清，
+            # 防长期运行后字典无限膨胀。旧账本那份「2 天清理」随变量一起删掉了。
+            # （过期红包退余款仍在下面统一处理。）
             for _d in [d for d in chat_earn_daily if d < (now_bj() - timedelta(days=7)).strftime("%Y-%m-%d")]:
                 chat_earn_daily.pop(_d, None)
             # 兑换排位分的每日累计：只留最近两天，防长期运行后字典无限膨胀
